@@ -1,0 +1,65 @@
+{
+  "id": "cozy",
+  "label": "Cozy Cyberpunk",
+  "description": "warm dark",
+  "default": true,
+  "vars": {
+    "bg": "oklch(0.18 0.018 45)",
+    "bg-sunken": "oklch(0.14 0.015 42)",
+    "bg-elevated": "oklch(0.22 0.020 47)",
+    "card": "oklch(0.23 0.022 48)",
+    "card-soft": "oklch(0.26 0.024 50)",
+
+    "fg": "oklch(0.96 0.020 80)",
+    "fg-muted": "oklch(0.74 0.025 70)",
+    "fg-subtle": "oklch(0.56 0.022 60)",
+
+    "border": "oklch(0.32 0.025 55)",
+    "border-strong": "oklch(0.42 0.035 60)",
+    "hairline": "oklch(0.28 0.022 50)",
+
+    "amber": "oklch(0.82 0.165 70)",
+    "amber-soft": "oklch(0.32 0.060 65)",
+    "amber-glow": "oklch(0.88 0.180 72)",
+    "peach": "oklch(0.85 0.110 50)",
+    "pink": "oklch(0.76 0.180 350)",
+    "pink-soft": "oklch(0.30 0.065 350)",
+    "neon": "oklch(0.86 0.200 145)",
+    "neon-dim": "oklch(0.62 0.150 145)",
+    "cyan": "oklch(0.82 0.130 200)",
+
+    "ok": "var(--neon)",
+    "ok-soft": "oklch(0.30 0.06 145)",
+    "warn": "oklch(0.82 0.150 80)",
+    "warn-soft": "oklch(0.32 0.05 80)",
+    "danger": "oklch(0.70 0.190 25)",
+    "danger-soft": "oklch(0.32 0.080 25)",
+
+    "term-bg": "oklch(0.13 0.018 40)",
+    "term-fg": "oklch(0.93 0.018 80)",
+    "term-dim": "oklch(0.58 0.020 65)",
+    "term-amber": "oklch(0.84 0.160 75)",
+    "term-green": "oklch(0.85 0.190 145)",
+    "term-pink": "oklch(0.78 0.180 350)",
+    "term-cyan": "oklch(0.82 0.130 200)",
+
+    "radius-sm": "6px",
+    "radius": "10px",
+    "radius-lg": "14px",
+
+    "shadow-card": "0 0 0 1px var(--hairline), 0 12px 28px -20px rgba(0,0,0,0.6)",
+    "shadow-pop": "0 0 0 1px var(--border), 0 24px 60px -16px rgba(0,0,0,0.7), 0 4px 16px -6px rgba(0,0,0,0.4)",
+    "glow-amber": "0 0 0 1px color-mix(in oklch, var(--amber) 35%, transparent), 0 0 28px -4px color-mix(in oklch, var(--amber) 55%, transparent)",
+    "glow-pink": "0 0 0 1px color-mix(in oklch, var(--pink) 35%, transparent), 0 0 24px -4px color-mix(in oklch, var(--pink) 50%, transparent)",
+    "glow-neon": "0 0 18px -2px color-mix(in oklch, var(--neon) 50%, transparent)",
+
+    "font-sans": "\"Geist\", ui-sans-serif, system-ui, sans-serif",
+    "font-mono": "\"JetBrains Mono\", \"Geist Mono\", ui-monospace, \"SF Mono\", Menlo, monospace",
+
+    "pad-card": "16px 18px",
+    "pad-row": "14px 18px",
+    "nav-pad": "9px 10px",
+    "row-min": "124px",
+    "tab-pad": "12px 14px"
+  }
+}

@@ -1,0 +1,36 @@
+/* Accent values ported from Whiskers ct-theme.css; previews share these tokens. */
+:root {
+  --accent-amber: var(--theme-amber);
+  --accent-pink: oklch(0.76 0.180 350);
+  --accent-neon: oklch(0.86 0.200 145);
+  --accent-cyan: oklch(0.82 0.130 200);
+  --accent-violet: oklch(0.72 0.160 300);
+  --selected-accent: var(--accent-amber);
+  --selected-accent-soft: var(--theme-amber-soft);
+  --accent-foreground: #101015;
+}
+:root[data-accent="pink"]   { --selected-accent: var(--accent-pink);   --selected-accent-glow: oklch(0.80 0.190 352); --selected-accent-soft: oklch(0.30 0.065 350); }
+:root[data-accent="neon"]   { --selected-accent: var(--accent-neon);   --selected-accent-glow: oklch(0.90 0.210 145); --selected-accent-soft: oklch(0.30 0.060 145); }
+:root[data-accent="cyan"]   { --selected-accent: var(--accent-cyan);   --selected-accent-glow: oklch(0.86 0.140 200); --selected-accent-soft: oklch(0.30 0.055 200); }
+:root[data-accent="violet"] { --selected-accent: var(--accent-violet); --selected-accent-glow: oklch(0.76 0.170 302); --selected-accent-soft: oklch(0.30 0.065 300); }
+:root[data-accent="pink"]:root[data-theme="paper"]   { --selected-accent-glow: oklch(0.60 0.190 352); }
+:root[data-accent="neon"]:root[data-theme="paper"]   { --selected-accent-glow: oklch(0.60 0.180 145); }
+:root[data-accent="cyan"]:root[data-theme="paper"]   { --selected-accent-glow: oklch(0.55 0.140 220); }
+:root[data-accent="violet"]:root[data-theme="paper"] { --selected-accent-glow: oklch(0.60 0.170 302); }
+:root[data-accent="pink"]:root[data-theme="latte"]   { --selected-accent-glow: oklch(0.760 0.180 338); }
+:root[data-accent="neon"]:root[data-theme="latte"]   { --selected-accent-glow: oklch(0.680 0.185 140); }
+:root[data-accent="cyan"]:root[data-theme="latte"]   { --selected-accent-glow: oklch(0.710 0.130 218); }
+:root[data-accent="violet"]:root[data-theme="latte"] { --selected-accent-glow: oklch(0.600 0.250 297); }
+:root[data-theme="paper"] {
+  --accent-pink: oklch(0.55 0.180 350);
+  --accent-neon: oklch(0.55 0.170 145);
+  --accent-cyan: oklch(0.50 0.130 220);
+  --accent-violet: oklch(0.55 0.160 300);
+}
+:root[data-theme="latte"] {
+  --accent-pink: oklch(0.726 0.174 338);
+  --accent-neon: oklch(0.625 0.177 140);
+  --accent-cyan: oklch(0.667 0.119 218);
+  --accent-violet: oklch(0.555 0.250 297);
+}
+:root[data-theme="paper"], :root[data-theme="latte"][data-accent="violet"] { --accent-foreground: #fff; }

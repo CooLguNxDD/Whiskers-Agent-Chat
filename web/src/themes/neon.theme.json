@@ -1,0 +1,37 @@
+{
+  "id": "neon",
+  "label": "Neon Alley",
+  "description": "cool dark",
+  "default": true,
+  "extends": "cozy",
+  "vars": {
+    "bg": "oklch(0.16 0.040 285)",
+    "bg-sunken": "oklch(0.12 0.040 285)",
+    "bg-elevated": "oklch(0.20 0.050 290)",
+    "card": "oklch(0.21 0.055 290)",
+    "card-soft": "oklch(0.25 0.060 295)",
+
+    "fg": "oklch(0.96 0.020 280)",
+    "fg-muted": "oklch(0.72 0.040 280)",
+    "fg-subtle": "oklch(0.56 0.040 280)",
+
+    "border": "oklch(0.34 0.060 285)",
+    "border-strong": "oklch(0.46 0.080 290)",
+    "hairline": "oklch(0.28 0.055 285)",
+
+    "amber": "oklch(0.78 0.200 320)",
+    "amber-soft": "oklch(0.30 0.080 320)",
+    "amber-glow": "oklch(0.82 0.210 322)",
+    "peach": "oklch(0.80 0.150 300)",
+    "pink": "oklch(0.76 0.180 350)",
+    "pink-soft": "oklch(0.30 0.070 350)",
+    "neon": "oklch(0.82 0.180 195)",
+    "neon-dim": "oklch(0.62 0.150 195)",
+    "cyan": "oklch(0.82 0.130 200)",
+
+    "term-bg": "oklch(0.12 0.045 285)",
+    "term-amber": "oklch(0.80 0.200 320)",
+    "term-green": "oklch(0.82 0.180 195)",
+    "term-pink": "oklch(0.76 0.180 350)"
+  }
+}

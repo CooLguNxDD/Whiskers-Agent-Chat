@@ -1,0 +1,31 @@
+# Optional. The standalone quickstart does not need Docker or this network.
+# Joining whiskers-network lets the plugin use http://cat-fleet-chat:8787
+# instead of host.docker.internal. The compose project prefixes the network
+# name; override WHISKERS_DOCKER_NETWORK if yours differs.
+# Binding 0.0.0.0 requires CAT_FLEET_TOKEN. Never start this open.
+
+services:
+  cat-fleet-chat:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "8787:8787"
+    environment:
+      CAT_FLEET_HOST: 0.0.0.0
+      CAT_FLEET_PORT: "8787"
+      CAT_FLEET_TOKEN: ${CAT_FLEET_TOKEN:?set CAT_FLEET_TOKEN}
+      CAT_FLEET_DB_PATH: /data/cat_fleet_chat.sqlite
+      CAT_FLEET_ALLOWED_HOSTS: cat-fleet-chat
+    volumes:
+      - fleet-data:/data
+    networks:
+      - whiskers-network
+
+networks:
+  whiskers-network:
+    external: true
+    name: ${WHISKERS_DOCKER_NETWORK:-whiskers-agent_whiskers-network}
+
+volumes:
+  fleet-data:
