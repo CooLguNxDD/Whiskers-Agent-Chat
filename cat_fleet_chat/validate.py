@@ -220,6 +220,168 @@ def event_kinds(value: Any) -> frozenset[str] | None:
     return frozenset(items) or None
 
 
+WEBHOOK_DIRECTIONS = ("out", "in")
+WEBHOOK_FORMATS = ("discord", "slack", "generic")
+WEBHOOK_LIST_MAX = 50
+WEBHOOK_PATTERN_MAX = 64
+WEBHOOK_URL_MAX = 2_000
+
+
+def webhook_name(value: Any) -> str:
+    if not isinstance(value, str) or not CHANNEL_RE.fullmatch(value):
+        raise _fail(
+            "webhook name must match [a-z0-9][a-z0-9_-]{0,63}",
+            details={"field": "name"},
+        )
+    return value
+
+
+def webhook_direction(value: Any) -> str:
+    if not isinstance(value, str) or value not in WEBHOOK_DIRECTIONS:
+        raise _fail(
+            f"direction must be one of {', '.join(WEBHOOK_DIRECTIONS)}",
+            details={"field": "direction", "allowed": list(WEBHOOK_DIRECTIONS)},
+        )
+    return value
+
+
+def webhook_format(value: Any) -> str:
+    if value is None or value == "":
+        return "generic"
+    if not isinstance(value, str) or value not in WEBHOOK_FORMATS:
+        raise _fail(
+            f"format must be one of {', '.join(WEBHOOK_FORMATS)}",
+            details={"field": "format", "allowed": list(WEBHOOK_FORMATS)},
+        )
+    return value
+
+
+def webhook_url(value: Any) -> str:
+    """http(s) URL. Plain http is only accepted for a loopback host."""
+    from urllib.parse import urlsplit
+
+    from cat_fleet_chat.config import is_loopback_host
+
+    text = require_text(value, "url", WEBHOOK_URL_MAX)
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname
+    except ValueError as exc:
+        raise _fail("url is not valid", details={"field": "url"}) from exc
+    if parts.scheme not in {"http", "https"} or not host:
+        raise _fail("url must be an http(s) URL", details={"field": "url"})
+    if parts.scheme == "http" and not is_loopback_host(host):
+        raise _fail("url must use https unless the host is loopback", details={"field": "url"})
+    return text
+
+
+def _string_list(value: Any, field: str) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        items: Any = [part.strip() for part in value.split(",") if part.strip()]
+    else:
+        items = value
+    if not isinstance(items, (list, tuple)):
+        raise _fail(f"{field} must be a list or comma-separated string", details={"field": field})
+    if len(items) > WEBHOOK_LIST_MAX:
+        raise _fail(f"{field} has more than {WEBHOOK_LIST_MAX} entries", details={"field": field})
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise _fail(f"{field} entries must be strings", details={"field": field})
+        item = item.strip()
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def webhook_kinds(value: Any) -> list[str]:
+    return sorted(event_kinds(value) or ())
+
+
+def webhook_channels(value: Any) -> list[str]:
+    return [channel_name(item) for item in _string_list(value, "channels")]
+
+
+def webhook_handles(value: Any, field: str) -> list[str]:
+    return [handle(item, field) for item in _string_list(value, field)]
+
+
+def webhook_patterns(value: Any, field: str) -> list[str]:
+    items = _string_list(value, field)
+    for item in items:
+        if len(item) > WEBHOOK_PATTERN_MAX:
+            raise _fail(
+                f"{field} entries must be at most {WEBHOOK_PATTERN_MAX} characters",
+                details={"field": field},
+            )
+    return items
+
+
+ORIGIN_SOURCES = ("discord",)
+DESCRIPTION_MAX = 200
+ORIGIN_AUTHOR_MAX = 80
+SNOWFLAKE_RE = re.compile(r"^[0-9]{1,25}$")
+
+
+def snowflake(value: Any, field: str) -> str:
+    """A Discord id as a digit string. Ints are accepted, but ids stay strings: they overflow JS numbers."""
+    text = str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+    if not SNOWFLAKE_RE.fullmatch(text):
+        raise _fail(f"{field} must be a Discord id (digits only)", details={"field": field})
+    return text
+
+
+def optional_snowflake(value: Any, field: str) -> str | None:
+    if value is None or value == "":
+        return None
+    return snowflake(value, field)
+
+
+def webhook_description(value: Any) -> str | None:
+    text = optional_text(value, "description", DESCRIPTION_MAX)
+    return text or None
+
+
+def destination_name(value: Any) -> str | None:
+    """An outbound hook name a message is addressed to. ``None`` or empty means no destination."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not CHANNEL_RE.fullmatch(value):
+        raise _fail(
+            "destination must be the name of an outbound webhook",
+            details={"field": "destination"},
+        )
+    return value
+
+
+def origin(value: Any) -> dict[str, str] | None:
+    """Where a message came from. Only ``discord`` today. Unknown keys are dropped."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _fail("origin must be an object", details={"field": "origin"})
+    source = value.get("source")
+    if source not in ORIGIN_SOURCES:
+        raise _fail(
+            f"origin.source must be one of {', '.join(ORIGIN_SOURCES)}", details={"field": "origin"}
+        )
+    clean = {"source": source, "channel_id": snowflake(value.get("channel_id"), "origin.channel_id")}
+    message_id = optional_snowflake(value.get("message_id"), "origin.message_id")
+    if message_id is not None:
+        clean["message_id"] = message_id
+    author = value.get("author")
+    if author not in (None, ""):
+        if not isinstance(author, str) or len(author) > ORIGIN_AUTHOR_MAX:
+            raise _fail(
+                f"origin.author must be a string of at most {ORIGIN_AUTHOR_MAX} characters",
+                details={"field": "origin"},
+            )
+        clean["author"] = author.strip()
+    return clean
+
+
 def _attachment(value: Any, index: int) -> dict[str, Any]:
     field = f"attachments[{index}]"
     if not isinstance(value, dict):

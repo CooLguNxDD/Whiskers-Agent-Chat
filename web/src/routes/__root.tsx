@@ -31,6 +31,7 @@ export function RootLayout(props: ParentProps) {
           <nav class="flex items-center gap-3 text-sm">
             <A href="/" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Chat</A>
             <A href="/tasks" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Tasks</A>
+            <A href="/webhooks" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Webhooks</A>
           </nav>
           <div class="ml-auto flex flex-wrap items-center gap-2">
             <ConnectionPill />
@@ -56,8 +57,7 @@ export function RootLayout(props: ParentProps) {
           </div>
         </form>
       </Modal>
-      <Appearance open={appearanceOpen() && !showToken()} onOpenChange={setAppearanceOpen} />
-    </>
+      <Appearance open={appearanceOpen() && !showToken()} onOpenChange={setAppearanceOpen} />    </>
   )
 }
 

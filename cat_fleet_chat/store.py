@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiosqlite
-from sqlalchemy import func, insert, literal, select, union_all, update
+from sqlalchemy import delete, func, insert, literal, select, union_all, update
 
 from cat_fleet_chat.schema import (
     attachments,
@@ -26,6 +27,7 @@ from cat_fleet_chat.schema import (
     run,
     task_events,
     tasks,
+    webhooks,
 )
 
 CHANNEL_COLUMNS = (
@@ -78,12 +80,15 @@ def _message_select(source=messages):
         source.c.text,
         source.c.reply_to,
         source.c.created_at,
+        source.c.destination,
+        source.c.origin_json,
     ).join_from(source, channels, channels.c.id == source.c.channel_id)
 
 
 def _message_row(
     row: aiosqlite.Row, mention_names: list[str], files: list[dict[str, Any]]
 ) -> dict[str, Any]:
+    origin_json = row["origin_json"]
     return {
         "id": row["id"],
         "channel_id": row["channel_id"],
@@ -94,6 +99,10 @@ def _message_row(
         "created_at": row["created_at"],
         "mentions": mention_names,
         "attachments": files,
+        # Routing metadata: where it came from (Discord relay) and which
+        # outbound webhook it is addressed to. Both are null for plain messages.
+        "origin": json.loads(origin_json) if origin_json else None,
+        "destination": row["destination"],
     }
 
 
@@ -260,6 +269,8 @@ async def insert_message(
     created_at: str,
     mention_names: list[str],
     files: Iterable[dict[str, Any]] = (),
+    destination: str | None = None,
+    origin: dict[str, Any] | None = None,
 ) -> int:
     cursor = await run(
         conn,
@@ -269,6 +280,8 @@ async def insert_message(
             text=text,
             reply_to=reply_to,
             created_at=created_at,
+            destination=destination,
+            origin_json=json.dumps(origin, separators=(",", ":")) if origin else None,
         ),
     )
     message_id = int(cursor.lastrowid)
@@ -327,6 +340,8 @@ async def list_messages(
             messages.c.text,
             messages.c.reply_to,
             messages.c.created_at,
+            messages.c.destination,
+            messages.c.origin_json,
         ).where(messages.c.channel_id == channel_id)
         if before_id is not None:
             newest = newest.where(messages.c.id < before_id)
@@ -434,6 +449,120 @@ async def events_after(
         stmt = stmt.where(events.c.kind.in_(sorted(kinds)))
     rows = await fetch_all(conn, stmt.order_by(events.c.id.asc()).limit(limit))
     return [_event_row(row) for row in rows]
+
+
+_WEBHOOK_LISTS = ("kinds", "channels", "mentions", "exclude_authors")
+
+
+def _webhook_row(row: aiosqlite.Row) -> dict[str, Any]:
+    """Full webhook including ``secret``. Use :func:`public_webhook` for API output."""
+    body = dict(row)
+    for name in _WEBHOOK_LISTS:
+        body[name] = json.loads(body.pop(f"{name}_json"))
+    body["enabled"] = bool(body["enabled"])
+    body["allow_override"] = bool(body["allow_override"])
+    body["directed_only"] = bool(body["directed_only"])
+    return body
+
+
+def redact_url(url: str) -> str:
+    """Scheme, host and port only. A Discord or Slack hook URL carries its token in the path."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<invalid url>"
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}{port}/…"
+
+
+def public_webhook(hook: dict[str, Any]) -> dict[str, Any]:
+    """A webhook as the API shows it: no secret, a redacted URL, only the fields its direction uses."""
+    out = {key: value for key, value in hook.items() if key != "secret"}
+    if out.get("url"):
+        out["url"] = redact_url(out["url"])
+    if hook["direction"] == "out":
+        for key in ("channel", "author", "allow_override"):
+            out.pop(key, None)
+    else:
+        for key in (
+            "url",
+            "format",
+            *_WEBHOOK_LISTS,
+            "cursor",
+            "failure_count",
+            "last_status",
+            "last_error",
+            "last_delivery_at",
+            "description",
+            "directed_only",
+            "discord_channel_id",
+        ):
+            out.pop(key, None)
+    return out
+
+
+async def insert_webhook(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    row = dict(values)
+    for name in _WEBHOOK_LISTS:
+        if name in row:
+            row[f"{name}_json"] = json.dumps(row.pop(name), separators=(",", ":"))
+    cursor = await run(conn, insert(webhooks).values(**row))
+    return int(cursor.lastrowid)
+
+
+async def get_webhook(conn: aiosqlite.Connection, ident: int | str) -> dict[str, Any] | None:
+    """One webhook by numeric id or by name."""
+    column = webhooks.c.id if isinstance(ident, int) else webhooks.c.name
+    row = await fetch_one(conn, select(webhooks).where(column == ident))
+    return None if row is None else _webhook_row(row)
+
+
+async def list_webhooks(
+    conn: aiosqlite.Connection,
+    *,
+    direction: str | None = None,
+    enabled_only: bool = False,
+) -> list[dict[str, Any]]:
+    stmt = select(webhooks)
+    if direction is not None:
+        stmt = stmt.where(webhooks.c.direction == direction)
+    if enabled_only:
+        stmt = stmt.where(webhooks.c.enabled == 1)
+    rows = await fetch_all(conn, stmt.order_by(webhooks.c.id.asc()))
+    return [_webhook_row(row) for row in rows]
+
+
+async def find_destination_hook(
+    conn: aiosqlite.Connection, discord_channel_id: str
+) -> dict[str, Any] | None:
+    """The enabled outbound hook attached to this Discord channel, if any. Oldest wins."""
+    row = await fetch_one(
+        conn,
+        select(webhooks)
+        .where(
+            webhooks.c.direction == "out",
+            webhooks.c.enabled == 1,
+            webhooks.c.discord_channel_id == discord_channel_id,
+        )
+        .order_by(webhooks.c.id.asc())
+        .limit(1),
+    )
+    return None if row is None else _webhook_row(row)
+
+
+async def update_webhook(conn: aiosqlite.Connection, hook_id: int, values: dict[str, Any]) -> None:
+    row = dict(values)
+    for name in _WEBHOOK_LISTS:
+        if name in row:
+            row[f"{name}_json"] = json.dumps(row.pop(name), separators=(",", ":"))
+    await run(conn, update(webhooks).where(webhooks.c.id == hook_id).values(**row))
+
+
+async def delete_webhook(conn: aiosqlite.Connection, hook_id: int) -> None:
+    await run(conn, delete(webhooks).where(webhooks.c.id == hook_id))
 
 
 async def insert_task(

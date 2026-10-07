@@ -31,6 +31,9 @@ class Settings:
     db_path: str
     token: str | None
     dev_origins: tuple[str, ...]
+    # Kill switch for the outbound dispatcher (CAT_FLEET_WEBHOOKS=0). Inbound
+    # hooks and hook management stay available either way.
+    webhooks_enabled: bool = True
 
     @property
     def loopback_bind(self) -> bool:
@@ -69,6 +72,7 @@ def load_settings() -> Settings:
         db_path=_env_str("CAT_FLEET_DB_PATH", "cat_fleet_chat.sqlite"),
         token=_env_optional("CAT_FLEET_TOKEN"),
         dev_origins=dev_origins,
+        webhooks_enabled=_env_str("CAT_FLEET_WEBHOOKS", "1").lower() not in {"0", "false", "no", "off"},
     )
 
 

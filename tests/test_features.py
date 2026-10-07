@@ -9,7 +9,7 @@ import sqlite3
 import pytest
 
 from cat_fleet_chat import listen, mcp_app
-from cat_fleet_chat.db import Database
+from cat_fleet_chat.db import SCHEMA_VERSION, Database
 from cat_fleet_chat.hub import agent_relevant
 
 ATTACHMENT = {
@@ -449,6 +449,6 @@ async def test_v1_database_upgrades_in_place(tmp_path):
         old = conn.execute("SELECT text FROM messages").fetchall()
     assert {"archived_at", "archived_by", "state", "state_note"} <= columns
     assert {"attachments", "tasks", "events", "idempotency", "mentions"} <= tables
-    assert versions == [1, 2, 3]
+    assert versions == list(range(1, SCHEMA_VERSION + 1))
     assert fleets == 1
     assert old == [("old",)]

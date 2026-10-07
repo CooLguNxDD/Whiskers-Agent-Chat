@@ -1,5 +1,18 @@
 import { api } from "./client"
-import type { AgentActivity, Channel, ChannelState, FleetMessage, FleetTask, MessagePage, TaskStatus } from "./types"
+import type {
+  AgentActivity,
+  Channel,
+  ChannelState,
+  FleetMessage,
+  FleetTask,
+  MessagePage,
+  TaskStatus,
+  Webhook,
+  WebhookDirection,
+  WebhookFormat,
+  WebhookSecret,
+  WebhookTestResult,
+} from "./types"
 
 /** Every channel, archived ones included. The list view decides what to show. */
 export function listChannels() {
@@ -102,4 +115,53 @@ export function updateTaskStatus(
 
 export function listAgents() {
   return api<{ agents: AgentActivity[]; label: string }>("/api/v1/agents")
+}
+
+export function listWebhooks() {
+  return api<{ webhooks: Webhook[] }>("/api/v1/webhooks")
+}
+
+/** Fields the hub accepts when creating a hook. Lists may be arrays or comma-separated strings. */
+export interface NewWebhook {
+  name: string
+  direction: WebhookDirection
+  url?: string
+  format?: WebhookFormat
+  kinds?: string[]
+  channels?: string
+  mentions?: string
+  exclude_authors?: string
+  channel?: string
+  author?: string
+  allow_override?: boolean
+  description?: string
+  directed_only?: boolean
+  discord_channel_id?: string
+}
+
+/** The response carries the secret exactly once. */
+export function createWebhook(input: NewWebhook) {
+  return api<WebhookSecret>("/api/v1/webhooks", { method: "POST", body: JSON.stringify(input) })
+}
+
+export function updateWebhook(id: number, changes: Record<string, unknown>) {
+  return api<{ webhook: Webhook }>(`/api/v1/webhooks/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(changes),
+  })
+}
+
+export function deleteWebhook(id: number) {
+  return api<{ deleted: boolean; id: number; name: string }>(`/api/v1/webhooks/${id}`, {
+    method: "DELETE",
+  })
+}
+
+export function rotateWebhookSecret(id: number) {
+  return api<WebhookSecret>(`/api/v1/webhooks/${id}/rotate-secret`, { method: "POST" })
+}
+
+/** Send a ping through an outbound hook. A receiver failure is still a 200 with ok=false. */
+export function testWebhook(id: number) {
+  return api<WebhookTestResult>(`/api/v1/webhooks/${id}/test`, { method: "POST" })
 }

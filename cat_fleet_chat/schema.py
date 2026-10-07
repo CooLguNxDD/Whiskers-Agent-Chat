@@ -62,6 +62,11 @@ messages = Table(
     Column("text", Text, nullable=False),
     Column("reply_to", Integer, ForeignKey("messages.id")),
     Column("created_at", Text, nullable=False),
+    # Added in schema v5. ``destination`` names the outbound webhook that should
+    # receive this message; ``origin_json`` records where it came from (the
+    # Discord relay sets it), so a reply can be routed back there.
+    Column("destination", Text),
+    Column("origin_json", Text),
     Index("idx_messages_channel_id", "channel_id", "id"),
 )
 
@@ -140,6 +145,44 @@ attachments = Table(
     Index("idx_attachments_message", "message_id", "id"),
 )
 
+# Schema v4. One row per webhook. direction "out" pushes hub events to ``url``;
+# direction "in" accepts POST /hooks/in/{name} and posts into ``channel``.
+# The filter columns hold JSON arrays; an empty array means "no filter".
+webhooks = Table(
+    "webhooks",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", Text, nullable=False, unique=True),
+    Column("direction", Text, nullable=False),
+    Column("enabled", Integer, nullable=False, server_default=text("1")),
+    Column("secret", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    # Outbound.
+    Column("url", Text),
+    Column("format", Text),
+    Column("kinds_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("channels_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("mentions_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("exclude_authors_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("cursor", Integer, nullable=False, server_default=text("0")),
+    Column("failure_count", Integer, nullable=False, server_default=text("0")),
+    Column("last_status", Text),
+    Column("last_error", Text),
+    Column("last_delivery_at", Text),
+    # Added in schema v5. An outbound hook is also a named destination agents can
+    # address. ``directed_only`` makes it receive nothing but addressed messages.
+    # ``discord_channel_id`` links it to a Discord channel, so a reply to a
+    # message that came from that channel finds its way back.
+    Column("description", Text),
+    Column("directed_only", Integer, nullable=False, server_default=text("0")),
+    Column("discord_channel_id", Text),
+    # Inbound.
+    Column("channel", Text),
+    Column("author", Text),
+    Column("allow_override", Integer, nullable=False, server_default=text("0")),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (
@@ -149,6 +192,11 @@ ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (
     (channels, "state_note"),
     (channels, "state_updated_at"),
     (channels, "state_updated_by"),
+    (messages, "destination"),
+    (messages, "origin_json"),
+    (webhooks, "description"),
+    (webhooks, "directed_only"),
+    (webhooks, "discord_channel_id"),
 )
 
 DIALECT = sqlite.dialect(paramstyle="qmark")

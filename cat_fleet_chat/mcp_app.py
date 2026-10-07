@@ -10,11 +10,17 @@ from cat_fleet_chat.errors import HubError
 from cat_fleet_chat.hub import Hub
 
 _hub: Hub | None = None
+_dispatcher: Any = None  # WebhookDispatcher | None; only test_webhook needs it
 
 
 def set_hub(hub: Hub | None) -> None:
     global _hub
     _hub = hub
+
+
+def set_dispatcher(dispatcher: Any) -> None:
+    global _dispatcher
+    _dispatcher = dispatcher
 
 
 def get_hub() -> Hub:
@@ -30,6 +36,7 @@ async def post_message(
     reply_to: int | None = None,
     client_request_id: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    destination: str | None = None,
 ) -> dict[str, Any]:
     """Post a message into a channel.
 
@@ -37,6 +44,12 @@ async def post_message(
     stored at write time. ``client_request_id`` makes a retry return the
     original message instead of posting a second one. A different payload
     with the same key is a conflict.
+
+    To also send the message to a Discord channel, pass ``destination``: the
+    name of an outbound webhook from ``list_destinations``. To answer a message
+    that came from Discord (it carries ``origin``), pass ``reply_to=<its id>``
+    and the reply is sent back to the Discord channel it came from. If the
+    result has ``warnings``, nothing was sent to Discord.
 
     ``attachments`` are descriptors of objects already uploaded to the object
     store (``filename``, ``content_type``, ``size_bytes``, ``storage="minio"``,
@@ -51,7 +64,21 @@ async def post_message(
             reply_to=reply_to,
             client_request_id_value=client_request_id,
             attachments_value=attachments,
+            destination_value=destination,
         )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def list_destinations() -> dict[str, Any]:
+    """Discord channels (outbound webhooks) you can send to with ``post_message(destination=...)``.
+
+    Each has a ``name``, a ``description`` of what it is for, and its
+    ``discord_channel_id`` when known. ``directed_only`` means it receives only
+    messages addressed to it.
+    """
+    try:
+        return await get_hub().list_destinations()
     except HubError as exc:
         return exc.mcp_body()
 
@@ -293,6 +320,105 @@ async def list_agents() -> dict[str, Any]:
         return exc.mcp_body()
 
 
+async def list_webhooks(direction: str | None = None) -> dict[str, Any]:
+    """List webhooks (``out`` pushes hub events to a URL, ``in`` receives posts). Secrets are never shown."""
+    try:
+        return await get_hub().list_webhooks(direction)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def create_webhook(
+    name: str,
+    direction: str,
+    url: str | None = None,
+    format: str | None = None,
+    kinds: list[str] | None = None,
+    channels: list[str] | None = None,
+    mentions: list[str] | None = None,
+    exclude_authors: list[str] | None = None,
+    channel: str | None = None,
+    author: str | None = None,
+    allow_override: bool = False,
+    description: str | None = None,
+    directed_only: bool = False,
+    discord_channel_id: str | None = None,
+) -> dict[str, Any]:
+    """Create a webhook. The returned ``secret`` is shown once and cannot be read again.
+
+    ``direction="out"``: POST hub events to ``url`` (https, or http on loopback).
+    ``format`` is ``discord``, ``slack`` or ``generic`` (signed JSON, one event
+    per request). Filters, all optional and empty meaning everything: ``kinds``
+    (event kinds), ``channels``, ``mentions`` (only messages mentioning, or
+    tasks assigned to, these handles) and ``exclude_authors`` (fnmatch patterns
+    such as ``dc-*``, to stop a relayed Discord message echoing back).
+    A new hook starts at the end of the log and does not replay history.
+
+    ``direction="in"``: external apps POST ``{"text": ...}`` to
+    ``/hooks/in/<name>`` with ``Authorization: Bearer <secret>`` and the
+    message lands in ``channel`` as ``author`` (default ``hook-<name>``).
+    ``allow_override`` lets the caller pick the channel and author.
+
+    An outbound hook is also a destination agents address by name
+    (``post_message(destination=...)``). ``description`` tells agents what it is
+    for. ``directed_only`` makes it receive nothing but addressed messages.
+    ``discord_channel_id`` links it to a Discord channel so replies to messages
+    from that channel go back to it; the hub looks it up for Discord hooks.
+    """
+    try:
+        return await get_hub().create_webhook(
+            name,
+            direction,
+            url=url,
+            format=format,
+            kinds=kinds,
+            channels=channels,
+            mentions=mentions,
+            exclude_authors=exclude_authors,
+            channel=channel,
+            author=author,
+            allow_override=allow_override,
+            description=description,
+            directed_only=directed_only,
+            discord_channel_id=discord_channel_id,
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def update_webhook(webhook: str, changes: dict[str, Any]) -> dict[str, Any]:
+    """Change a webhook by id or name. ``changes`` may hold ``enabled`` plus the fields its direction uses.
+
+    Outbound: url, format, kinds, channels, mentions, exclude_authors.
+    Inbound: channel, author, allow_override. Re-enabling clears the last error.
+    """
+    try:
+        return await get_hub().update_webhook(webhook, changes)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def delete_webhook(webhook: str) -> dict[str, Any]:
+    """Delete a webhook by id or name."""
+    try:
+        return await get_hub().delete_webhook(webhook)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def test_webhook(webhook: str) -> dict[str, Any]:
+    """Send a test ping through an outbound webhook. Returns ``ok``, the receiver's ``status`` and any ``error``."""
+    try:
+        if _dispatcher is None:
+            raise HubError("webhooks_disabled", "outbound webhooks are disabled", 409)
+        hook = await get_hub().webhook_with_secret(webhook)
+        if hook["direction"] != "out":
+            raise HubError("validation_error", "only outbound webhooks can be tested", 400)
+        return await _dispatcher.send_test(hook)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 def build_mcp() -> FastMCP:
     """Register the hub tools on a new FastMCP instance."""
     mcp = FastMCP("cat-fleet-chat")
@@ -312,6 +438,12 @@ def build_mcp() -> FastMCP:
         update_task_status,
         list_tasks,
         list_agents,
+        list_destinations,
+        list_webhooks,
+        create_webhook,
+        update_webhook,
+        delete_webhook,
+        test_webhook,
     ):
         mcp.tool(run_in_thread=False)(fn)
     return mcp

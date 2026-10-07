@@ -19,10 +19,15 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]
+# Only the Discord relay (cat-fleet-discord) needs this; the hub itself does not.
+discord = [
+    "discord.py>=2.4",
+]
 
 [project.scripts]
 cat-fleet-chat = "run:main"
 cat-fleet-listen = "cat_fleet_chat.listen:main"
+cat-fleet-discord = "cat_fleet_chat.discord_relay:main"
 
 [build-system]
 requires = ["setuptools>=68"]
