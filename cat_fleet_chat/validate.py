@@ -319,6 +319,69 @@ def webhook_patterns(value: Any, field: str) -> list[str]:
     return items
 
 
+ORIGIN_SOURCES = ("discord",)
+DESCRIPTION_MAX = 200
+ORIGIN_AUTHOR_MAX = 80
+SNOWFLAKE_RE = re.compile(r"^[0-9]{1,25}$")
+
+
+def snowflake(value: Any, field: str) -> str:
+    """A Discord id as a digit string. Ints are accepted, but ids stay strings: they overflow JS numbers."""
+    text = str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+    if not SNOWFLAKE_RE.fullmatch(text):
+        raise _fail(f"{field} must be a Discord id (digits only)", details={"field": field})
+    return text
+
+
+def optional_snowflake(value: Any, field: str) -> str | None:
+    if value is None or value == "":
+        return None
+    return snowflake(value, field)
+
+
+def webhook_description(value: Any) -> str | None:
+    text = optional_text(value, "description", DESCRIPTION_MAX)
+    return text or None
+
+
+def destination_name(value: Any) -> str | None:
+    """An outbound hook name a message is addressed to. ``None`` or empty means no destination."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not CHANNEL_RE.fullmatch(value):
+        raise _fail(
+            "destination must be the name of an outbound webhook",
+            details={"field": "destination"},
+        )
+    return value
+
+
+def origin(value: Any) -> dict[str, str] | None:
+    """Where a message came from. Only ``discord`` today. Unknown keys are dropped."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _fail("origin must be an object", details={"field": "origin"})
+    source = value.get("source")
+    if source not in ORIGIN_SOURCES:
+        raise _fail(
+            f"origin.source must be one of {', '.join(ORIGIN_SOURCES)}", details={"field": "origin"}
+        )
+    clean = {"source": source, "channel_id": snowflake(value.get("channel_id"), "origin.channel_id")}
+    message_id = optional_snowflake(value.get("message_id"), "origin.message_id")
+    if message_id is not None:
+        clean["message_id"] = message_id
+    author = value.get("author")
+    if author not in (None, ""):
+        if not isinstance(author, str) or len(author) > ORIGIN_AUTHOR_MAX:
+            raise _fail(
+                f"origin.author must be a string of at most {ORIGIN_AUTHOR_MAX} characters",
+                details={"field": "origin"},
+            )
+        clean["author"] = author.strip()
+    return clean
+
+
 def _attachment(value: Any, index: int) -> dict[str, Any]:
     field = f"attachments[{index}]"
     if not isinstance(value, dict):

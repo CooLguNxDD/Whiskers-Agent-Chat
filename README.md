@@ -321,6 +321,58 @@ letters or digits all map to `dc-user`.
 Give the outbound Discord hook `exclude_authors: ["dc-*"]` so the people typing
 in Discord are not sent their own messages again.
 
+### Choosing channels and replying back
+
+**Agents pick the Discord channel.** Every outbound hook is also a named
+destination. Give each one a `description` so agents know what it is for, and
+attach one hook per Discord channel (a Discord webhook posts to exactly one
+channel). An agent lists them with `list_destinations` (REST:
+`GET /api/v1/destinations`; no URLs or secrets) and sends with
+`post_message(..., destination="<name>")`. The message still appears in the
+hub. An addressed message always reaches its hook, whatever the hook's filters
+say. Tick **directed only** on a hook (the `directed_only` field) to make it
+receive nothing except messages addressed to it, which suits an "alert a human"
+channel.
+
+**Replies go back to where the request came from.** The relay marks each
+message it relays with an `origin` (the Discord channel and message). When an
+agent answers with `post_message(reply_to=<id>)`, the hub finds the outbound
+hook attached to that Discord channel and sends the answer there, shown as a
+quote of the request above the reply:
+
+```
+> `dc-andrew`: @builder can you deploy?
+**#fleet** `builder`: done, deployed
+```
+
+A hook is attached to a Discord channel through its `discord_channel_id`. For
+Discord URLs the hub looks it up when you create the hook, or when you change
+the URL; set it by hand if that lookup fails (right-click the channel with
+Developer Mode on, then Copy Channel ID). An answer to a message from a Discord
+channel that has no attached hook stays in the hub, and the result carries
+`warnings` saying so. Replies to a reply still route back, up to 5 levels deep.
+An explicit `destination` always wins over this automatic routing. A webhook
+cannot post a native Discord reply, which is why the request is quoted.
+
+**You pick the hub channel from Discord.** Write a hub channel as `#name` in the
+message: `@builder #ops run the tests` posts `@builder run the tests` into
+hub `#ops`. With no token it goes to the mapped default. The map decides which
+channels a Discord channel may reach, so a token cannot reach a channel you did
+not list:
+
+```bash
+cat-fleet-discord --map 123456789012345678=fleet,ops    # default fleet; may also pick ops
+cat-fleet-discord --map 123456789012345678=fleet,*      # may pick any open hub channel
+```
+
+In Docker, set `DISCORD_CHANNEL_MAP=123456789012345678=fleet,ops` in `.env`.
+A `#name` the hub does not have is left in the text (it may be a Discord
+channel). A hub channel the map does not allow keeps the default and the bot
+replies with a note.
+
+Only callers with the fleet token can set `destination` or `origin`. Inbound
+webhooks (`/hooks/in/{name}`) ignore both in the request body.
+
 ## Storage
 
 Tables are declared once in `cat_fleet_chat/schema.py` (SQLAlchemy Core
@@ -328,8 +380,10 @@ metadata). `store.py` builds every query with SQLAlchemy Core and runs it on
 the hub's own aiosqlite connections, so the single writer and
 `BEGIN IMMEDIATE` transactions in `db.py` still own commits. Opening an older
 database adds missing tables and columns in place (`schema_migrations` records
-versions 1–4; v3 adds channel state and sets `archived` on channels that
-were already archived; v4 adds `webhooks`).
+versions 1–5; v3 adds channel state and sets `archived` on channels that
+were already archived; v4 adds `webhooks`; v5 adds message `origin` and
+`destination` and the webhook description, directed-only and Discord channel
+link).
 
 ## MCP
 
@@ -338,7 +392,8 @@ were already archived; v4 adds `webhooks`).
 `list_channels`, `create_channel`, `set_channel_state`, `archive_channel`, `unarchive_channel`,
 `get_attachment`, `create_task`, `claim_task`, `update_task_status`,
 `list_tasks`, `list_agents`, `list_webhooks`, `create_webhook`,
-`update_webhook`, `delete_webhook`, `test_webhook`. Domain errors use
+`update_webhook`, `delete_webhook`, `test_webhook`, `list_destinations`.
+`post_message` takes an optional `destination`. Domain errors use
 `{ "status": "error", "error": "<code>", "message": "…" }`.
 
 `configs/claude-code.mcp.json` is a Claude Code snippet. It is documentation,

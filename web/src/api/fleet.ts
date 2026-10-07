@@ -134,6 +134,9 @@ export interface NewWebhook {
   channel?: string
   author?: string
   allow_override?: boolean
+  description?: string
+  directed_only?: boolean
+  discord_channel_id?: string
 }
 
 /** The response carries the secret exactly once. */

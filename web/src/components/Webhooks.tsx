@@ -130,7 +130,8 @@ function summarize(hook: Webhook): string {
   if (hook.direction === "in") {
     return `posts to #${hook.channel} as ${hook.author}${hook.allow_override ? " (caller may override)" : ""}`
   }
-  const parts = [hook.kinds?.length ? `${hook.kinds.length} kind(s)` : "all events"]
+  const parts = [hook.directed_only ? "only messages an agent addresses to it" : hook.kinds?.length ? `${hook.kinds.length} kind(s)` : "all events"]
+  if (hook.discord_channel_id) parts.push(`Discord channel ${hook.discord_channel_id}`)
   if (hook.channels?.length) parts.push(`in ${hook.channels.map((name) => `#${name}`).join(", ")}`)
   if (hook.mentions?.length) parts.push(`mentioning ${hook.mentions.map((name) => `@${name}`).join(", ")}`)
   if (hook.exclude_authors?.length) parts.push(`not from ${hook.exclude_authors.join(", ")}`)
@@ -159,6 +160,9 @@ function HookRow(props: { hook: Webhook; mutations: Mutations; onSecret: (notice
         <Badge>{outbound() ? `out · ${hook().format}` : "in"}</Badge>
         <Badge class={hook().enabled ? undefined : "text-rust"}>{status()}</Badge>
       </div>
+      <Show when={hook().description}>
+        <p class="mt-1 text-sm text-cream">{hook().description}</p>
+      </Show>
       <p class="mt-1 text-xs text-cream-dim">{summarize(hook())}</p>
       <Show when={hook().last_error}>
         <p class="mt-1 text-xs text-rust">{hook().last_error}</p>
@@ -226,6 +230,9 @@ function NewHookForm(props: { mutations: Mutations; onCreated: (notice: SecretNo
   const [channelsText, setChannelsText] = createSignal("")
   const [mentionsText, setMentionsText] = createSignal("")
   const [excludeText, setExcludeText] = createSignal("")
+  const [description, setDescription] = createSignal("")
+  const [directedOnly, setDirectedOnly] = createSignal(false)
+  const [discordId, setDiscordId] = createSignal("")
   // Inbound.
   const [target, setTarget] = createSignal("fleet")
   const [author, setAuthor] = createSignal("")
@@ -249,7 +256,18 @@ function NewHookForm(props: { mutations: Mutations; onCreated: (notice: SecretNo
     const common = { name: hookName, direction: direction() }
     const input =
       direction() === "out"
-        ? { ...common, url: url().trim(), format: format(), kinds: kinds(), channels: channelsText(), mentions: mentionsText(), exclude_authors: excludeText() }
+        ? {
+            ...common,
+            url: url().trim(),
+            format: format(),
+            kinds: kinds(),
+            channels: channelsText(),
+            mentions: mentionsText(),
+            exclude_authors: excludeText(),
+            description: description().trim() || undefined,
+            directed_only: directedOnly(),
+            discord_channel_id: discordId().trim() || undefined,
+          }
         : { ...common, channel: target(), author: author().trim() || undefined, allow_override: override() }
     props.mutations.create.mutate(input, {
       onSuccess: (result) => {
@@ -258,6 +276,9 @@ function NewHookForm(props: { mutations: Mutations; onCreated: (notice: SecretNo
         setUrl("")
         setAuthor("")
         setOverride(false)
+        setDescription("")
+        setDirectedOnly(false)
+        setDiscordId("")
         props.onCreated({ name: result.webhook.name, direction: result.webhook.direction, secret: result.secret })
       },
       onError: (failure) => setError(getErrorMessage(failure)),
@@ -307,6 +328,16 @@ function NewHookForm(props: { mutations: Mutations; onCreated: (notice: SecretNo
             <option value="slack">Slack</option>
             <option value="generic">Generic signed JSON</option>
           </select>
+        </label>
+        <label class="flex flex-col gap-1 text-sm text-cream-dim">What agents should use it for (shown to agents)
+          <Input value={description()} maxLength={200} placeholder="urgent: a human needs to look at this" onInput={(event) => setDescription(event.currentTarget.value)} />
+        </label>
+        <label class="flex items-center gap-2 text-sm text-cream-dim">
+          <input type="checkbox" checked={directedOnly()} onChange={(event) => setDirectedOnly(event.currentTarget.checked)} />
+          Only send messages an agent addresses to this hook (ignores the filters below)
+        </label>
+        <label class="flex flex-col gap-1 text-sm text-cream-dim">Discord channel ID (optional; looked up for Discord URLs)
+          <Input value={discordId()} inputMode="numeric" placeholder="1557244251492978758" autocomplete="off" onInput={(event) => setDiscordId(event.currentTarget.value)} />
         </label>
         <fieldset>
           <legend class="mb-1 text-sm text-cream-dim">Events (none checked sends everything)</legend>

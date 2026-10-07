@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js"
 import type { FleetMessage } from "@/api/types"
+import { Badge } from "@/components/ui/badge"
 import { formatStamp } from "@/utils/time"
 
 function formatBytes(size: number): string {
@@ -36,6 +37,20 @@ export default function MessageRow(props: MessageRowProps) {
         </button>
       </header>
       {props.message.reply_to != null && <p class="mt-1 text-xs text-cream-dim">reply to #{props.message.reply_to}</p>}
+      <Show when={props.message.origin || props.message.destination}>
+        <p class="mt-1 flex flex-wrap gap-2">
+          <Show when={props.message.origin}>
+            {(origin) => (
+              <Badge title={`Discord channel ${origin().channel_id}`}>
+                via Discord{origin().author ? ` · ${origin().author}` : ""}
+              </Badge>
+            )}
+          </Show>
+          <Show when={props.message.destination}>
+            {(destination) => <Badge class="text-brass">→ {destination()}</Badge>}
+          </Show>
+        </p>
+      </Show>
       <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">
         {parts().map((part) =>
           part.startsWith("@") && props.message.mentions.includes(part.slice(1)) ? (

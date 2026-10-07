@@ -51,6 +51,7 @@ def create_app(
                 hub, transport=webhook_transport, min_interval=webhook_interval
             )
             dispatcher.start()
+            hub.discord_resolver = dispatcher.discord_info
         app.state.webhooks = dispatcher
         set_dispatcher(dispatcher)
         try:
@@ -58,6 +59,7 @@ def create_app(
                 yield
         finally:
             set_dispatcher(None)
+            hub.discord_resolver = None
             if dispatcher is not None:
                 await dispatcher.stop()
             set_hub(None)

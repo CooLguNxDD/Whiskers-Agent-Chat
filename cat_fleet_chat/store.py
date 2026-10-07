@@ -80,12 +80,15 @@ def _message_select(source=messages):
         source.c.text,
         source.c.reply_to,
         source.c.created_at,
+        source.c.destination,
+        source.c.origin_json,
     ).join_from(source, channels, channels.c.id == source.c.channel_id)
 
 
 def _message_row(
     row: aiosqlite.Row, mention_names: list[str], files: list[dict[str, Any]]
 ) -> dict[str, Any]:
+    origin_json = row["origin_json"]
     return {
         "id": row["id"],
         "channel_id": row["channel_id"],
@@ -96,6 +99,10 @@ def _message_row(
         "created_at": row["created_at"],
         "mentions": mention_names,
         "attachments": files,
+        # Routing metadata: where it came from (Discord relay) and which
+        # outbound webhook it is addressed to. Both are null for plain messages.
+        "origin": json.loads(origin_json) if origin_json else None,
+        "destination": row["destination"],
     }
 
 
@@ -262,6 +269,8 @@ async def insert_message(
     created_at: str,
     mention_names: list[str],
     files: Iterable[dict[str, Any]] = (),
+    destination: str | None = None,
+    origin: dict[str, Any] | None = None,
 ) -> int:
     cursor = await run(
         conn,
@@ -271,6 +280,8 @@ async def insert_message(
             text=text,
             reply_to=reply_to,
             created_at=created_at,
+            destination=destination,
+            origin_json=json.dumps(origin, separators=(",", ":")) if origin else None,
         ),
     )
     message_id = int(cursor.lastrowid)
@@ -329,6 +340,8 @@ async def list_messages(
             messages.c.text,
             messages.c.reply_to,
             messages.c.created_at,
+            messages.c.destination,
+            messages.c.origin_json,
         ).where(messages.c.channel_id == channel_id)
         if before_id is not None:
             newest = newest.where(messages.c.id < before_id)
@@ -448,6 +461,7 @@ def _webhook_row(row: aiosqlite.Row) -> dict[str, Any]:
         body[name] = json.loads(body.pop(f"{name}_json"))
     body["enabled"] = bool(body["enabled"])
     body["allow_override"] = bool(body["allow_override"])
+    body["directed_only"] = bool(body["directed_only"])
     return body
 
 
@@ -482,6 +496,9 @@ def public_webhook(hook: dict[str, Any]) -> dict[str, Any]:
             "last_status",
             "last_error",
             "last_delivery_at",
+            "description",
+            "directed_only",
+            "discord_channel_id",
         ):
             out.pop(key, None)
     return out
@@ -516,6 +533,24 @@ async def list_webhooks(
         stmt = stmt.where(webhooks.c.enabled == 1)
     rows = await fetch_all(conn, stmt.order_by(webhooks.c.id.asc()))
     return [_webhook_row(row) for row in rows]
+
+
+async def find_destination_hook(
+    conn: aiosqlite.Connection, discord_channel_id: str
+) -> dict[str, Any] | None:
+    """The enabled outbound hook attached to this Discord channel, if any. Oldest wins."""
+    row = await fetch_one(
+        conn,
+        select(webhooks)
+        .where(
+            webhooks.c.direction == "out",
+            webhooks.c.enabled == 1,
+            webhooks.c.discord_channel_id == discord_channel_id,
+        )
+        .order_by(webhooks.c.id.asc())
+        .limit(1),
+    )
+    return None if row is None else _webhook_row(row)
 
 
 async def update_webhook(conn: aiosqlite.Connection, hook_id: int, values: dict[str, Any]) -> None:

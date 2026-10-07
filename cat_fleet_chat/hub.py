@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,12 +20,15 @@ from cat_fleet_chat.validate import (
     channel_states,
     clamp_timeout,
     client_request_id,
+    destination_name,
     event_kinds,
     fingerprint,
     handle,
     optional_handle,
     optional_id,
+    optional_snowflake,
     optional_text,
+    origin,
     page_limit,
     parse_mentions,
     require_id,
@@ -32,6 +37,7 @@ from cat_fleet_chat.validate import (
     transition_allowed,
     wait_timeout,
     webhook_channels,
+    webhook_description,
     webhook_direction,
     webhook_format,
     webhook_handles,
@@ -42,7 +48,11 @@ from cat_fleet_chat.validate import (
 )
 from cat_fleet_chat.waiters import WaitHub
 
+logger = logging.getLogger("cat_fleet_chat.hub")
+
 SSE_BATCH = 100
+# How many parents a reply may climb to find the message that came from Discord.
+REPLY_CHAIN_MAX = 5
 # A notification call scans at most this many events before it returns the
 # advanced cursor, so an agent with no matches cannot pin a read connection.
 SCAN_MAX = 2_000
@@ -91,6 +101,9 @@ class Hub:
     def __init__(self, db: Database, waiters: WaitHub) -> None:
         self.db = db
         self.waiters = waiters
+        # Looks up which Discord channel a webhook URL posts to. The app wires
+        # in the dispatcher; the hub itself makes no HTTP calls.
+        self.discord_resolver: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None
 
     async def _write(self, fn):
         result = await self.db.write(fn)
@@ -334,7 +347,16 @@ class Hub:
         reply_to: Any = None,
         client_request_id_value: Any = None,
         attachments_value: Any = None,
+        destination_value: Any = None,
+        origin_value: Any = None,
     ) -> dict[str, Any]:
+        """Post a message.
+
+        ``destination`` addresses it to an outbound webhook (a Discord channel).
+        With no destination and a ``reply_to`` whose thread started in Discord,
+        the hub addresses the reply to the hook attached to that Discord
+        channel. ``origin`` says where the message came from; only the relay sets it.
+        """
         clean_channel = channel_name(channel)
         clean_author = handle(author, "author")
         files = attachments(attachments_value)
@@ -343,6 +365,8 @@ class Hub:
         if reply == 0:
             reply = None
         key = client_request_id(client_request_id_value)
+        explicit_destination = destination_name(destination_value)
+        clean_origin = origin(origin_value)
         mentions = parse_mentions(clean_text)
         payload = {
             "channel": clean_channel,
@@ -353,6 +377,10 @@ class Hub:
         if files:
             # Only added when present so pre-attachment idempotency keys still match.
             payload["attachments"] = files
+        if explicit_destination:
+            payload["destination"] = explicit_destination
+        if clean_origin:
+            payload["origin"] = clean_origin
         digest = fingerprint("message", payload) if key else None
 
         async def op(conn):
@@ -371,6 +399,7 @@ class Hub:
             if found is None:
                 raise HubError("not_found", f"channel {clean_channel} not found", 404)
             _require_writable(found)
+            parent = None
             if reply is not None:
                 parent = await store.get_message(conn, reply)
                 if parent is None or parent["channel_id"] != found["id"]:
@@ -380,6 +409,7 @@ class Hub:
                         400,
                         {"field": "reply_to"},
                     )
+            destination, warnings = await self._resolve_destination(conn, explicit_destination, parent)
             created_at = utc_now()
             message_id = await store.insert_message(
                 conn,
@@ -390,6 +420,8 @@ class Hub:
                 created_at,
                 mentions,
                 files,
+                destination=destination,
+                origin=clean_origin,
             )
             message = await store.get_message(conn, message_id)
             assert message is not None
@@ -401,12 +433,66 @@ class Hub:
                 message,
                 created_at,
             )
-            result = {"message": message}
+            result: dict[str, Any] = {"message": message}
+            if warnings:
+                result["warnings"] = warnings
             if key and digest is not None:
                 await store.insert_idempotency(conn, key, "message", digest, result, created_at)
             return result
 
         return await self._txn(op)
+
+    @staticmethod
+    async def _resolve_destination(
+        conn, explicit: str | None, parent: dict[str, Any] | None
+    ) -> tuple[str | None, list[str]]:
+        """The outbound hook a new message goes to, plus warnings for the poster.
+
+        An explicit name must be an enabled outbound hook. Otherwise a reply
+        inherits the destination of the Discord channel its thread started in.
+        """
+        if explicit is not None:
+            hook = await store.get_webhook(conn, explicit)
+            if hook is None or hook["direction"] != "out":
+                names = [
+                    h["name"] for h in await store.list_webhooks(conn, direction="out", enabled_only=True)
+                ]
+                raise HubError(
+                    "destination_not_found",
+                    f"destination {explicit} is not an outbound webhook",
+                    404,
+                    {"destinations": names},
+                )
+            if not hook["enabled"]:
+                raise HubError(
+                    "destination_disabled",
+                    f"destination {explicit} is disabled",
+                    409,
+                    {"destination": explicit},
+                )
+            return explicit, []
+        if parent is None:
+            return None, []
+        # Walk up the reply chain for the message that came from Discord.
+        current: dict[str, Any] | None = parent
+        origin_found = None
+        for _ in range(REPLY_CHAIN_MAX):
+            if current is None:
+                break
+            if current.get("origin"):
+                origin_found = current["origin"]
+                break
+            reply_to = current.get("reply_to")
+            current = await store.get_message(conn, reply_to) if reply_to else None
+        if origin_found is None:
+            return None, []
+        hook = await store.find_destination_hook(conn, origin_found["channel_id"])
+        if hook is None:
+            return None, [
+                f"no destination is attached for Discord channel {origin_found['channel_id']}; "
+                "this reply stays in the hub"
+            ]
+        return hook["name"], []
 
     async def get_messages(
         self,
@@ -809,19 +895,36 @@ class Hub:
         channel: Any = None,
         author: Any = None,
         allow_override: Any = False,
+        description: Any = None,
+        directed_only: Any = False,
+        discord_channel_id: Any = None,
     ) -> dict[str, Any]:
-        """Create a webhook. The generated ``secret`` is returned once, here only."""
+        """Create a webhook. The generated ``secret`` is returned once, here only.
+
+        An outbound hook is also a destination agents can address by name.
+        ``discord_channel_id`` links it to a Discord channel so replies to
+        messages from that channel return to it; for a Discord hook the hub
+        looks it up itself when it is not given.
+        """
         clean_name = webhook_name(name)
         clean_direction = webhook_direction(direction)
         values: dict[str, Any] = {"name": clean_name, "direction": clean_direction}
         if clean_direction == "out":
+            clean_url = webhook_url(url)
+            clean_format = webhook_format(format)
+            linked_channel = optional_snowflake(discord_channel_id, "discord_channel_id")
+            if linked_channel is None and clean_format == "discord":
+                linked_channel = await self._resolve_discord_channel(clean_url)
             values.update(
-                url=webhook_url(url),
-                format=webhook_format(format),
+                url=clean_url,
+                format=clean_format,
                 kinds=webhook_kinds(kinds),
                 channels=webhook_channels(channels),
                 mentions=webhook_handles(mentions, "mentions"),
                 exclude_authors=webhook_patterns(exclude_authors, "exclude_authors"),
+                description=webhook_description(description),
+                directed_only=int(_flag(directed_only)),
+                discord_channel_id=linked_channel,
             )
         else:
             values.update(
@@ -861,11 +964,36 @@ class Hub:
         if not isinstance(changes, dict):
             raise HubError("validation_error", "changes must be an object", 400)
 
+        # A new URL may point at a different Discord channel, so the old link is
+        # stale. Look the new one up before the transaction: it is a network call.
+        relink = False
+        relinked_channel: str | None = None
+        if "url" in changes and "discord_channel_id" not in changes:
+            current = await self.webhook_with_secret(ident)
+            if current["direction"] == "out":
+                relink = True
+                new_format = (
+                    webhook_format(changes["format"]) if "format" in changes else current["format"]
+                )
+                if new_format == "discord":
+                    relinked_channel = await self._resolve_discord_channel(webhook_url(changes["url"]))
+
         async def op(conn):
             hook = await self._require_hook(conn, ident)
             outbound = hook["direction"] == "out"
             allowed = (
-                {"enabled", "url", "format", "kinds", "channels", "mentions", "exclude_authors"}
+                {
+                    "enabled",
+                    "url",
+                    "format",
+                    "kinds",
+                    "channels",
+                    "mentions",
+                    "exclude_authors",
+                    "description",
+                    "directed_only",
+                    "discord_channel_id",
+                }
                 if outbound
                 else {"enabled", "channel", "author", "allow_override"}
             )
@@ -897,6 +1025,17 @@ class Hub:
                 values["exclude_authors"] = webhook_patterns(
                     changes["exclude_authors"], "exclude_authors"
                 )
+            if "description" in changes:
+                values["description"] = webhook_description(changes["description"])
+            if "directed_only" in changes:
+                values["directed_only"] = int(_flag(changes["directed_only"]))
+            if "discord_channel_id" in changes:
+                values["discord_channel_id"] = optional_snowflake(
+                    changes["discord_channel_id"], "discord_channel_id"
+                )
+            elif relink:
+                # None clears a link that the new URL may no longer match.
+                values["discord_channel_id"] = relinked_channel
             if "channel" in changes:
                 target = channel_name(changes["channel"])
                 if await store.get_channel_by_name(conn, target) is None:
@@ -912,6 +1051,54 @@ class Hub:
             return await store.get_webhook(conn, hook["id"])
 
         return {"webhook": store.public_webhook(await self._txn(op))}
+
+    async def _resolve_discord_channel(self, url: str) -> str | None:
+        """The Discord channel id a webhook URL posts to, or ``None``. Never raises."""
+        if self.discord_resolver is None:
+            return None
+        try:
+            info = await self.discord_resolver(url)
+        except Exception:  # a failed lookup must not block creating the hook
+            logger.warning("could not look up the Discord channel for a webhook", exc_info=True)
+            return None
+        channel_id = (info or {}).get("channel_id")
+        return str(channel_id) if channel_id else None
+
+    async def list_destinations(self) -> dict[str, Any]:
+        """Outbound hooks agents can address by name. No URL, no secret."""
+
+        async def op(conn):
+            return await store.list_webhooks(conn, direction="out", enabled_only=True)
+
+        return {
+            "destinations": [
+                {
+                    "name": hook["name"],
+                    "description": hook["description"],
+                    "format": hook["format"],
+                    "discord_channel_id": hook["discord_channel_id"],
+                    "directed_only": hook["directed_only"],
+                }
+                for hook in await self.db.read(op)
+            ]
+        }
+
+    async def message_context(self, ids: list[int]) -> dict[int, dict[str, Any]]:
+        """Author, text and origin of the given messages, for quoting a reply."""
+
+        async def op(conn):
+            found: dict[int, dict[str, Any]] = {}
+            for message_id in ids:
+                message = await store.get_message(conn, message_id)
+                if message is not None:
+                    found[message_id] = {
+                        "author": message["author"],
+                        "text": message["text"],
+                        "origin": message["origin"],
+                    }
+            return found
+
+        return await self.db.read(op)
 
     async def rotate_webhook_secret(self, ident: Any) -> dict[str, Any]:
         secret = secrets.token_urlsafe(32)

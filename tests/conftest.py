@@ -91,8 +91,22 @@ class Sink:
         self.error_text = "nope"
         # Raised instead of answering, to simulate a network failure.
         self.fail_with: Exception | None = None
+        # Discord answers a GET on a webhook URL with its channel. These GETs
+        # are lookups, not deliveries, so they are kept apart from ``requests``.
+        self.lookups: list[httpx.Request] = []
+        self.lookup_channel_id: str | None = "555000111222333444"
+        self.lookup_status = 200
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            self.lookups.append(request)
+            if self.fail_with is not None:
+                raise self.fail_with
+            if self.lookup_status != 200 or self.lookup_channel_id is None:
+                return httpx.Response(self.lookup_status if self.lookup_status != 200 else 404, json={})
+            return httpx.Response(
+                200, json={"id": "1", "name": "Captain Hook", "channel_id": self.lookup_channel_id}
+            )
         self.requests.append(request)
         if self.fail_with is not None:
             raise self.fail_with

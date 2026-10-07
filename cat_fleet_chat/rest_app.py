@@ -166,6 +166,8 @@ async def post_message(request: Request) -> JSONResponse:
             reply_to=body.get("reply_to"),
             client_request_id_value=body.get("client_request_id"),
             attachments_value=body.get("attachments"),
+            destination_value=body.get("destination"),
+            origin_value=body.get("origin"),
         )
         return JSONResponse(result, status_code=201)
     except HubError as exc:
@@ -350,8 +352,19 @@ async def create_webhook(request: Request) -> JSONResponse:
             channel=body.get("channel"),
             author=body.get("author"),
             allow_override=body.get("allow_override", False),
+            description=body.get("description"),
+            directed_only=body.get("directed_only", False),
+            discord_channel_id=body.get("discord_channel_id"),
         )
         return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def list_destinations(request: Request) -> JSONResponse:
+    """Outbound hooks an agent can address with ``destination``. Never shows a URL or secret."""
+    try:
+        return JSONResponse(await _hub(request).list_destinations())
     except HubError as exc:
         return _json_error(exc)
 
@@ -539,6 +552,7 @@ def api_routes() -> list[Route]:
         Route("/api/v1/tasks/{task_id:int}/status", update_task_status, methods=["POST"]),
         Route("/api/v1/agents", list_agents, methods=["GET"]),
         Route("/api/v1/events", events, methods=["GET"]),
+        Route("/api/v1/destinations", list_destinations, methods=["GET"]),
         Route("/api/v1/webhooks", list_webhooks, methods=["GET"]),
         Route("/api/v1/webhooks", create_webhook, methods=["POST"]),
         Route("/api/v1/webhooks/{hook_id:int}", get_webhook, methods=["GET"]),

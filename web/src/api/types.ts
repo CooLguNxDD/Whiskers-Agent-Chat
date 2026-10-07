@@ -9,6 +9,18 @@ export interface FleetMessage {
   mentions: string[]
   /** Metadata only. The bytes live in the Whiskers MinIO bucket. */
   attachments?: Attachment[]
+  /** Where the message came from. Set by the Discord relay; null for plain messages. */
+  origin?: MessageOrigin | null
+  /** The outbound webhook (a Discord channel) the message is addressed to, if any. */
+  destination?: string | null
+}
+
+export interface MessageOrigin {
+  source: "discord"
+  /** A Discord id. Kept as a string: ids overflow JS numbers. */
+  channel_id: string
+  message_id?: string
+  author?: string
 }
 
 export interface Attachment {
@@ -123,6 +135,12 @@ export interface Webhook {
   last_status?: string | null
   last_error?: string | null
   last_delivery_at?: string | null
+  /** What agents are told this destination is for. */
+  description?: string | null
+  /** Receives nothing except messages an agent addresses to it. */
+  directed_only?: boolean
+  /** The Discord channel this hook posts to, so replies from that channel can return to it. */
+  discord_channel_id?: string | null
   // Inbound only.
   channel?: string
   author?: string

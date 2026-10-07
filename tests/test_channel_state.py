@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from cat_fleet_chat import mcp_app
-from cat_fleet_chat.db import Database
+from cat_fleet_chat.db import SCHEMA_VERSION, Database
 from cat_fleet_chat.hub import agent_relevant
 
 
@@ -192,4 +192,4 @@ async def test_v2_archived_channel_backfills_state(tmp_path):
         rows = dict(conn.execute("SELECT name, state FROM channels"))
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
     assert rows == {"fleet": "active", "old": "archived"}
-    assert versions == [1, 2, 3, 4]
+    assert versions == list(range(1, SCHEMA_VERSION + 1))

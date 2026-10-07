@@ -52,8 +52,25 @@ def event_actor(event: dict[str, Any]) -> str | None:
     return payload.get("actor")
 
 
+def event_destination(event: dict[str, Any]) -> str | None:
+    """The outbound hook a message is addressed to, if any."""
+    if event["kind"] != "message.created":
+        return None
+    return (event.get("payload") or {}).get("destination") or None
+
+
 def matches(hook: dict[str, Any], event: dict[str, Any]) -> bool:
-    """Whether ``event`` passes the hook's filters. An empty filter lets everything through."""
+    """Whether ``event`` should be sent to ``hook``.
+
+    A message addressed to this hook always matches, whatever its filters say.
+    A ``directed_only`` hook matches nothing else. Otherwise an empty filter
+    lets everything through.
+    """
+    destination = event_destination(event)
+    if hook.get("directed_only"):
+        return destination == hook["name"]
+    if destination is not None and destination == hook["name"]:
+        return True
     if hook["kinds"] and event["kind"] not in hook["kinds"]:
         return False
     if hook["channels"] and event.get("channel") not in hook["channels"]:
@@ -78,15 +95,28 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def event_line(event: dict[str, Any]) -> str:
-    """One human-readable line for ``event``. ``**x**`` marks bold."""
+QUOTE_CLIP = 120
+
+
+def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None = None) -> str:
+    """One human-readable entry for ``event``. ``**x**`` marks bold.
+
+    ``parents`` holds the messages that replies point at. An addressed reply
+    is shown as a quote of the request followed by the answer, since a
+    webhook cannot post a native Discord reply.
+    """
     kind = event["kind"]
     payload = event.get("payload") or {}
     channel = event.get("channel")
     where = f"**#{channel}** " if channel else ""
     if kind == "message.created":
         text = _clip(str(payload.get("text", "")), MESSAGE_CLIP)
-        return f"{where}`{payload.get('author', '?')}`: {text}"
+        line = f"{where}`{payload.get('author', '?')}`: {text}"
+        parent = (parents or {}).get(payload.get("reply_to")) if payload.get("destination") else None
+        if parent:
+            snippet = _clip(" ".join(str(parent.get("text", "")).split()), QUOTE_CLIP)
+            return f"> `{parent.get('author', '?')}`: {snippet}\n{line}"
+        return line
     if kind == "task.updated":
         history = payload.get("events") or []
         last = history[-1] if history else {}
@@ -121,9 +151,13 @@ def event_line(event: dict[str, Any]) -> str:
     return f"{kind} #{event.get('id')}"
 
 
-def chat_payloads(events: list[dict[str, Any]], fmt: str) -> list[dict[str, Any]]:
+def chat_payloads(
+    events: list[dict[str, Any]],
+    fmt: str,
+    parents: dict[int, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Discord or Slack bodies for ``events``. Lines are coalesced up to the 2000-char limit."""
-    lines = [event_line(event) for event in events]
+    lines = [event_line(event, parents) for event in events]
     if fmt == "slack":
         # Slack bold is *x*; defang <!channel>, <!here> and <@user> so message
         # text from an agent cannot ping people.
@@ -230,6 +264,7 @@ class WebhookDispatcher:
             timeout=10.0, transport=transport, headers={"User-Agent": USER_AGENT}
         )
         self._task: asyncio.Task | None = None
+        self._link_task: asyncio.Task | None = None
         self._retry_at: dict[int, float] = {}
         self._last_sent: dict[int, float] = {}
 
@@ -238,15 +273,18 @@ class WebhookDispatcher:
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run(), name="webhook-dispatcher")
+            # Separate task: a slow lookup must not hold up deliveries.
+            self._link_task = asyncio.create_task(self._link_at_startup(), name="webhook-link")
 
     async def stop(self) -> None:
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._task, self._link_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._task = self._link_task = None
         await self._client.aclose()
 
     # loop
@@ -305,10 +343,26 @@ class WebhookDispatcher:
 
     # one hook
 
-    def _requests(self, hook: dict[str, Any], chosen: list[dict[str, Any]]) -> list[_Request]:
+    async def _parents(self, chosen: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+        """The messages that addressed replies point at, so they can be quoted."""
+        ids = {
+            int(payload["reply_to"])
+            for event in chosen
+            if event["kind"] == "message.created"
+            and (payload := event.get("payload") or {}).get("reply_to")
+            and payload.get("destination")
+        }
+        return await self.hub.message_context(sorted(ids)) if ids else {}
+
+    def _requests(
+        self,
+        hook: dict[str, Any],
+        chosen: list[dict[str, Any]],
+        parents: dict[int, dict[str, Any]] | None = None,
+    ) -> list[_Request]:
         if hook["format"] == "generic":
             return [_Request(generic_request(hook, event), int(event["id"])) for event in chosen]
-        payloads = chat_payloads(chosen, hook["format"])
+        payloads = chat_payloads(chosen, hook["format"], parents)
         last = int(chosen[-1]["id"])
         # Only the final chunk moves the cursor to the end of the batch.
         return [
@@ -327,7 +381,7 @@ class WebhookDispatcher:
                 break
             reached = int(batch[-1]["id"])
             chosen = [event for event in batch if matches(hook, event)]
-            requests = self._requests(hook, chosen) if chosen else []
+            requests = self._requests(hook, chosen, await self._parents(chosen)) if chosen else []
             for request in requests:
                 outcome = await self._post(hook, request.kwargs)
                 if outcome.kind in {"retry", "disable"}:
@@ -387,6 +441,45 @@ class WebhookDispatcher:
         finally:
             self._last_sent[hook["id"]] = time.monotonic()
         return classify(response, hook)
+
+    # Discord lookup
+
+    async def discord_info(self, url: str) -> dict[str, Any] | None:
+        """Which channel a Discord webhook URL posts to (``channel_id``). ``None`` on any failure.
+
+        Discord answers a plain GET on the webhook URL, no auth needed. Kept
+        here so every outbound HTTP call in the hub lives in this class.
+        """
+        try:
+            response = await self._client.get(url, timeout=5.0)
+            data = response.json() if response.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            return None
+        return data if isinstance(data, dict) and data.get("channel_id") else None
+
+    async def link_discord_channels(self) -> None:
+        """Fill in ``discord_channel_id`` for Discord hooks that have none.
+
+        Hooks created before replies could be routed have no link, and a lookup
+        that failed at creation leaves none. Runs once at startup. A hook that
+        still cannot be resolved is left alone; set its id by hand.
+        """
+        for hook in await self.hub.outbound_webhooks():
+            if hook["format"] != "discord" or hook.get("discord_channel_id"):
+                continue
+            info = await self.discord_info(hook["url"])
+            if info:
+                await self.hub.update_webhook(
+                    hook["id"], {"discord_channel_id": str(info["channel_id"])}
+                )
+
+    async def _link_at_startup(self) -> None:
+        try:
+            await self.link_discord_channels()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("could not link Discord channels at startup", exc_info=True)
 
     # test ping
 

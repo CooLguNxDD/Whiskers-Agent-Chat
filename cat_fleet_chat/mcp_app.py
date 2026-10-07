@@ -36,6 +36,7 @@ async def post_message(
     reply_to: int | None = None,
     client_request_id: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    destination: str | None = None,
 ) -> dict[str, Any]:
     """Post a message into a channel.
 
@@ -43,6 +44,12 @@ async def post_message(
     stored at write time. ``client_request_id`` makes a retry return the
     original message instead of posting a second one. A different payload
     with the same key is a conflict.
+
+    To also send the message to a Discord channel, pass ``destination``: the
+    name of an outbound webhook from ``list_destinations``. To answer a message
+    that came from Discord (it carries ``origin``), pass ``reply_to=<its id>``
+    and the reply is sent back to the Discord channel it came from. If the
+    result has ``warnings``, nothing was sent to Discord.
 
     ``attachments`` are descriptors of objects already uploaded to the object
     store (``filename``, ``content_type``, ``size_bytes``, ``storage="minio"``,
@@ -57,7 +64,21 @@ async def post_message(
             reply_to=reply_to,
             client_request_id_value=client_request_id,
             attachments_value=attachments,
+            destination_value=destination,
         )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def list_destinations() -> dict[str, Any]:
+    """Discord channels (outbound webhooks) you can send to with ``post_message(destination=...)``.
+
+    Each has a ``name``, a ``description`` of what it is for, and its
+    ``discord_channel_id`` when known. ``directed_only`` means it receives only
+    messages addressed to it.
+    """
+    try:
+        return await get_hub().list_destinations()
     except HubError as exc:
         return exc.mcp_body()
 
@@ -319,6 +340,9 @@ async def create_webhook(
     channel: str | None = None,
     author: str | None = None,
     allow_override: bool = False,
+    description: str | None = None,
+    directed_only: bool = False,
+    discord_channel_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a webhook. The returned ``secret`` is shown once and cannot be read again.
 
@@ -334,6 +358,12 @@ async def create_webhook(
     ``/hooks/in/<name>`` with ``Authorization: Bearer <secret>`` and the
     message lands in ``channel`` as ``author`` (default ``hook-<name>``).
     ``allow_override`` lets the caller pick the channel and author.
+
+    An outbound hook is also a destination agents address by name
+    (``post_message(destination=...)``). ``description`` tells agents what it is
+    for. ``directed_only`` makes it receive nothing but addressed messages.
+    ``discord_channel_id`` links it to a Discord channel so replies to messages
+    from that channel go back to it; the hub looks it up for Discord hooks.
     """
     try:
         return await get_hub().create_webhook(
@@ -348,6 +378,9 @@ async def create_webhook(
             channel=channel,
             author=author,
             allow_override=allow_override,
+            description=description,
+            directed_only=directed_only,
+            discord_channel_id=discord_channel_id,
         )
     except HubError as exc:
         return exc.mcp_body()
@@ -405,6 +438,7 @@ def build_mcp() -> FastMCP:
         update_task_status,
         list_tasks,
         list_agents,
+        list_destinations,
         list_webhooks,
         create_webhook,
         update_webhook,

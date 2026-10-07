@@ -9,12 +9,20 @@ The other direction (hub to Discord) is an outbound webhook of format
 ``discord``; give it ``exclude_authors=["dc-*"]`` so relayed messages are not
 echoed back to the channel they came from.
 
+Each relayed message carries an ``origin`` (the Discord channel and message),
+so when an agent answers with ``reply_to``, the hub sends the answer through
+the outbound webhook attached to that Discord channel.
+
+Typing ``#ops`` in a message posts it to hub channel ``ops`` instead of the
+mapped default, if ``--map`` allows it.
+
 Needs the optional extra: ``pip install "cat-fleet-chat[discord]"``, and the
 Message Content intent enabled for the bot in the Discord developer portal.
 
-Example::
+Examples::
 
     DISCORD_BOT_TOKEN=... cat-fleet-discord --map 123456789012345678=fleet
+    DISCORD_BOT_TOKEN=... cat-fleet-discord --map 123456789012345678=fleet,ops
 """
 
 from __future__ import annotations
@@ -24,7 +32,9 @@ import asyncio
 import os
 import re
 import sys
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -41,17 +51,71 @@ RETRY_DELAY = 2.0
 Forward = Callable[[dict[str, Any]], Awaitable[tuple[bool, str]]]
 
 
-def parse_map(items: list[str]) -> dict[int, str]:
-    """``["123=fleet", "456=ops"]`` into ``{123: "fleet", 456: "ops"}``. Rejects malformed entries."""
-    mapping: dict[int, str] = {}
+@dataclass(frozen=True)
+class MapEntry:
+    """Where one Discord channel may post in the hub.
+
+    ``default`` takes every message with no ``#channel`` token. A token may
+    only pick a channel in ``allowed``, or any channel when ``any_channel`` is
+    set, so a Discord channel cannot reach hub channels you did not list.
+    """
+
+    default: str
+    allowed: frozenset[str]
+    any_channel: bool = False
+
+
+def parse_map(items: list[str]) -> dict[int, MapEntry]:
+    """``["123=fleet,ops", "456=*"]`` into per-channel entries. The first name is the default.
+
+    ``*`` lets a ``#token`` pick any hub channel. Rejects malformed entries.
+    """
+    mapping: dict[int, MapEntry] = {}
     for item in items:
         left, sep, right = item.partition("=")
-        if not sep or not left.strip().isdigit() or not CHANNEL_RE.fullmatch(right.strip()):
-            raise ValueError(f"--map expects <discord_channel_id>=<hub_channel>, got {item!r}")
-        mapping[int(left.strip())] = right.strip()
+        names = [part.strip() for part in right.split(",") if part.strip()]
+        valid = sep and left.strip().isdigit() and names
+        if not valid or not CHANNEL_RE.fullmatch(names[0]):
+            raise ValueError(
+                f"--map expects <discord_channel_id>=<hub_channel>[,<more channels>|*], got {item!r}"
+            )
+        any_channel = "*" in names[1:]
+        extras = [name for name in names[1:] if name != "*"]
+        if not all(CHANNEL_RE.fullmatch(name) for name in extras):
+            raise ValueError(f"--map has an invalid hub channel name in {item!r}")
+        mapping[int(left.strip())] = MapEntry(names[0], frozenset([names[0], *extras]), any_channel)
     if not mapping:
         raise ValueError("at least one --map is required")
     return mapping
+
+
+# A hub channel written as #name, standing alone: not part of a word, a URL
+# fragment or another token.
+TARGET_RE = re.compile(r"(?<![\w#/])#([a-z0-9][a-z0-9_-]{0,63})(?![\w-])")
+
+
+def parse_target(
+    text: str, entry: MapEntry, known: frozenset[str] | set[str] | None
+) -> tuple[str, str, str | None]:
+    """Pick the hub channel for ``text``. Returns ``(channel, text, note)``.
+
+    The first ``#name`` that is a hub channel becomes the target and is removed
+    from the text. A ``#name`` the hub does not have is left alone (it may be a
+    Discord channel). A hub channel this Discord channel may not reach keeps
+    the default and returns a note. With no channel list (``known`` is None)
+    nothing is targeted.
+    """
+    if known is None:
+        return entry.default, text, None
+    for match in TARGET_RE.finditer(text):
+        name = match.group(1)
+        if name not in known:
+            continue
+        if not (entry.any_channel or name in entry.allowed):
+            return entry.default, text, f"#{name} is not allowed from this Discord channel"
+        cleaned = re.sub(r"[ \t]{2,}", " ", text[: match.start()] + text[match.end() :]).strip()
+        return name, cleaned or text, None
+    return entry.default, text, None
 
 
 def author_handle(display_name: str, prefix: str = DEFAULT_PREFIX) -> str:
@@ -67,13 +131,28 @@ def message_text(message: Any) -> str:
     return "\n".join(parts)
 
 
-def build_post(message: Any, hub_channel: str, prefix: str = DEFAULT_PREFIX) -> dict[str, Any]:
+def build_post(
+    message: Any,
+    hub_channel: str,
+    prefix: str = DEFAULT_PREFIX,
+    *,
+    text: str | None = None,
+    origin_channel_id: int | None = None,
+) -> dict[str, Any]:
+    """The hub post for a Discord message, with the ``origin`` that lets a reply find its way back."""
     return {
         "channel": hub_channel,
         "author": author_handle(message.author.display_name, prefix),
-        "text": message_text(message),
+        "text": message_text(message) if text is None else text,
         # Idempotent: a retry after a timeout cannot post the message twice.
         "client_request_id": f"discord-{message.id}",
+        "origin": {
+            "source": "discord",
+            # The mapped channel, not a thread inside it: an attached webhook posts to the channel.
+            "channel_id": str(origin_channel_id if origin_channel_id is not None else message.channel.id),
+            "message_id": str(message.id),
+            "author": message.author.display_name[:80],
+        },
     }
 
 
@@ -107,32 +186,67 @@ def make_forward(client: httpx.AsyncClient, url: str, token: str) -> Forward:
     return forward
 
 
+ChannelList = Callable[[], Awaitable["set[str] | None"]]
+
+
+def make_channels(
+    client: httpx.AsyncClient, url: str, token: str, ttl: float = 30.0
+) -> ChannelList:
+    """The hub's open channel names, cached for ``ttl`` seconds. ``None`` when the hub was never reachable."""
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    endpoint = f"{url.rstrip('/')}/api/v1/channels"
+    cache: dict[str, Any] = {"at": 0.0, "names": None}
+
+    async def channels() -> set[str] | None:
+        now = time.monotonic()
+        if cache["names"] is not None and now - cache["at"] < ttl:
+            return cache["names"]
+        try:
+            response = await client.get(endpoint, headers=headers, timeout=10)
+            response.raise_for_status()
+            names = {item["name"] for item in response.json()["channels"]}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return cache["names"]  # a stale list beats none
+        cache.update(at=now, names=names)
+        return names
+
+    return channels
+
+
 async def handle_message(
     message: Any,
-    mapping: dict[int, str],
+    mapping: dict[int, MapEntry],
     forward: Forward,
     prefix: str = DEFAULT_PREFIX,
+    channels: ChannelList | None = None,
 ) -> str:
     """Relay one Discord message. Returns ``ignored``, ``sent`` or ``failed``.
 
     Bots and webhook posts are ignored, which stops the hub's own outbound
-    webhook (a Discord webhook post) from looping back in.
+    webhook (a Discord webhook post) from looping back in. A ``#hub-channel``
+    token picks the hub channel, within what the map allows.
     """
     if message.author.bot or message.webhook_id is not None:
         return "ignored"
     channel = message.channel
-    hub_channel = mapping.get(channel.id)
-    if hub_channel is None:
-        hub_channel = mapping.get(getattr(channel, "parent_id", None))  # a thread of a mapped channel
-    if hub_channel is None:
+    mapped_id = channel.id if channel.id in mapping else getattr(channel, "parent_id", None)  # or a thread of one
+    entry = mapping.get(mapped_id)
+    if entry is None:
         return "ignored"
-    payload = build_post(message, hub_channel, prefix)
-    if not payload["text"]:
+    text = message_text(message)
+    if not text:
         return "ignored"  # sticker-only or similar
+    known = await channels() if channels is not None and TARGET_RE.search(text) else None
+    hub_channel, text, note = parse_target(text, entry, known)
+    payload = build_post(message, hub_channel, prefix, text=text, origin_channel_id=mapped_id)
     ok, reason = await forward(payload)
     try:
         if ok:
             await message.add_reaction(OK_REACTION)
+            if note:
+                await message.reply(f"Sent to #{hub_channel} instead: {note}", mention_author=False)
         else:
             await message.add_reaction(FAIL_REACTION)
             await message.reply(f"Not delivered to the fleet: {reason}", mention_author=False)
@@ -165,8 +279,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--map",
         action="append",
         default=[],
-        metavar="DISCORD_CHANNEL_ID=HUB_CHANNEL",
-        help="relay this Discord channel into this hub channel (repeatable)",
+        metavar="DISCORD_CHANNEL_ID=HUB_CHANNEL[,MORE|*]",
+        help=(
+            "relay this Discord channel into a hub channel (repeatable). The first name is the "
+            "default; extra names are channels a #token may pick; * allows any"
+        ),
     )
     parser.add_argument(
         "--prefix",
@@ -201,6 +318,7 @@ def main(argv: list[str] | None = None) -> None:
         async def setup_hook(self) -> None:
             self.http_client = httpx.AsyncClient()
             self.forward = make_forward(self.http_client, args.url, args.token)
+            self.channels = make_channels(self.http_client, args.url, args.token)
 
         async def on_ready(self) -> None:
             sys.stderr.write(
@@ -208,7 +326,7 @@ def main(argv: list[str] | None = None) -> None:
             )
 
         async def on_message(self, message: Any) -> None:
-            await handle_message(message, mapping, self.forward, args.prefix)
+            await handle_message(message, mapping, self.forward, args.prefix, self.channels)
 
         async def close(self) -> None:
             await super().close()

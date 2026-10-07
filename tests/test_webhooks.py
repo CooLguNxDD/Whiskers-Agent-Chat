@@ -9,7 +9,7 @@ import sqlite3
 import httpx
 
 from cat_fleet_chat import mcp_app, webhooks
-from cat_fleet_chat.db import Database
+from cat_fleet_chat.db import SCHEMA_VERSION, Database
 from cat_fleet_chat.store import redact_url
 from cat_fleet_chat.webhooks import (
     CHAT_LIMIT,
@@ -744,4 +744,4 @@ async def test_database_without_the_webhooks_table_upgrades_in_place(tmp_path):
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
     assert "webhooks" in tables
-    assert versions == [1, 2, 3, 4]
+    assert versions == list(range(1, SCHEMA_VERSION + 1))
