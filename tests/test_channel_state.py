@@ -192,4 +192,4 @@ async def test_v2_archived_channel_backfills_state(tmp_path):
         rows = dict(conn.execute("SELECT name, state FROM channels"))
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
     assert rows == {"fleet": "active", "old": "archived"}
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]

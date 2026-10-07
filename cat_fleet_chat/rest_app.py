@@ -15,6 +15,7 @@ from cat_fleet_chat.config import Settings, allowed_hostnames, allowed_origins
 from cat_fleet_chat.errors import HubError
 from cat_fleet_chat.hub import Hub, SSE_BATCH, agent_relevant
 from cat_fleet_chat.validate import channel_name, event_kinds, handle, optional_id
+from cat_fleet_chat.webhooks import sign
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -327,6 +328,132 @@ async def list_agents(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+async def list_webhooks(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).list_webhooks(request.query_params.get("direction")))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def create_webhook(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).create_webhook(
+            body.get("name"),
+            body.get("direction"),
+            url=body.get("url"),
+            format=body.get("format"),
+            kinds=body.get("kinds"),
+            channels=body.get("channels"),
+            mentions=body.get("mentions"),
+            exclude_authors=body.get("exclude_authors"),
+            channel=body.get("channel"),
+            author=body.get("author"),
+            allow_override=body.get("allow_override", False),
+        )
+        return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def get_webhook(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).get_webhook(request.path_params["hook_id"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def update_webhook(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        return JSONResponse(await _hub(request).update_webhook(request.path_params["hook_id"], body))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def delete_webhook(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).delete_webhook(request.path_params["hook_id"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def rotate_webhook_secret(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(
+            await _hub(request).rotate_webhook_secret(request.path_params["hook_id"])
+        )
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def test_webhook(request: Request) -> JSONResponse:
+    """Send a ``webhook.ping`` through an outbound hook and report what the receiver said."""
+    try:
+        dispatcher = getattr(request.app.state, "webhooks", None)
+        if dispatcher is None:
+            raise HubError("webhooks_disabled", "outbound webhooks are disabled (CAT_FLEET_WEBHOOKS=0)", 409)
+        hook = await _hub(request).webhook_with_secret(request.path_params["hook_id"])
+        if hook["direction"] != "out":
+            raise HubError("validation_error", "only outbound webhooks can be tested", 400)
+        return JSONResponse(await dispatcher.send_test(hook))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+HOOK_BODY_MAX = 64 * 1024
+
+
+async def _read_capped(request: Request, limit: int) -> bytes:
+    length = request.headers.get("content-length", "")
+    if length.isdigit() and int(length) > limit:
+        raise HubError("payload_too_large", f"body exceeds {limit} bytes", 413)
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise HubError("payload_too_large", f"body exceeds {limit} bytes", 413)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _hook_authorized(hook: dict[str, Any], request: Request, raw: bytes) -> bool:
+    """Bearer secret, or an HMAC-SHA256 signature of the raw body. Constant-time on bytes."""
+    secret = hook["secret"]
+    bearer = request.headers.get("authorization", "")
+    if bearer and hmac.compare_digest(bearer.encode(), f"Bearer {secret}".encode()):
+        return True
+    signature = request.headers.get("x-catfleet-signature", "")
+    return bool(signature) and hmac.compare_digest(signature.encode(), sign(secret, raw).encode())
+
+
+async def inbound_hook(request: Request) -> JSONResponse:
+    """``POST /hooks/in/{name}``: an external app posts a message into the hub.
+
+    Outside ``Guard`` on purpose: the caller is not a fleet client and has no
+    fleet token. The hook's own secret authenticates it instead. An unknown or
+    disabled hook answers 404 so names cannot be probed.
+    """
+    try:
+        hub = _hub(request)
+        hook = await hub.webhook_secret_hook(request.path_params["name"], "in")
+        if hook is None:
+            raise HubError("not_found", "webhook not found", 404)
+        raw = await _read_capped(request, HOOK_BODY_MAX)
+        if not _hook_authorized(hook, request, raw):
+            return _unauthorized()
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError as exc:
+            raise HubError("validation_error", "request body must be JSON", 400) from exc
+        if not isinstance(body, dict):
+            raise HubError("validation_error", "request body must be a JSON object", 400)
+        return JSONResponse(await hub.post_via_webhook(hook, body), status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
 def _frame(event: dict[str, Any]) -> str:
     data = json.dumps(event, separators=(",", ":"))
     return f"id: {event['id']}\nevent: {event['kind']}\ndata: {data}\n\n"
@@ -412,4 +539,16 @@ def api_routes() -> list[Route]:
         Route("/api/v1/tasks/{task_id:int}/status", update_task_status, methods=["POST"]),
         Route("/api/v1/agents", list_agents, methods=["GET"]),
         Route("/api/v1/events", events, methods=["GET"]),
+        Route("/api/v1/webhooks", list_webhooks, methods=["GET"]),
+        Route("/api/v1/webhooks", create_webhook, methods=["POST"]),
+        Route("/api/v1/webhooks/{hook_id:int}", get_webhook, methods=["GET"]),
+        Route("/api/v1/webhooks/{hook_id:int}", update_webhook, methods=["PATCH"]),
+        Route("/api/v1/webhooks/{hook_id:int}", delete_webhook, methods=["DELETE"]),
+        Route("/api/v1/webhooks/{hook_id:int}/test", test_webhook, methods=["POST"]),
+        Route("/api/v1/webhooks/{hook_id:int}/rotate-secret", rotate_webhook_secret, methods=["POST"]),
     ]
+
+
+def hook_routes() -> list[Route]:
+    """Inbound webhook receiver. Register before the SPA catch-all."""
+    return [Route("/hooks/in/{name}", inbound_hook, methods=["POST"])]

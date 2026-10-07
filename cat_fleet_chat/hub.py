@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +10,7 @@ from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
 from cat_fleet_chat import store
 from cat_fleet_chat.validate import (
+    CHANNEL_RE,
     TERMINAL_STATUSES,
     attachments,
     channel_name,
@@ -29,6 +31,14 @@ from cat_fleet_chat.validate import (
     task_status,
     transition_allowed,
     wait_timeout,
+    webhook_channels,
+    webhook_direction,
+    webhook_format,
+    webhook_handles,
+    webhook_kinds,
+    webhook_name,
+    webhook_patterns,
+    webhook_url,
 )
 from cat_fleet_chat.waiters import WaitHub
 
@@ -754,6 +764,264 @@ class Hub:
         if found is None:
             raise HubError("not_found", f"attachment {clean_id} not found", 404)
         return {"attachment": found}
+
+    # ---- webhooks -------------------------------------------------------
+
+    @staticmethod
+    def _hook_ident(value: Any) -> int | str:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value)
+        return webhook_name(value)
+
+    async def _require_hook(self, conn, ident: Any) -> dict[str, Any]:
+        found = await store.get_webhook(conn, self._hook_ident(ident))
+        if found is None:
+            raise HubError("not_found", f"webhook {ident} not found", 404)
+        return found
+
+    async def list_webhooks(self, direction: Any = None) -> dict[str, Any]:
+        wanted = webhook_direction(direction) if direction not in (None, "") else None
+
+        async def op(conn):
+            return await store.list_webhooks(conn, direction=wanted)
+
+        return {"webhooks": [store.public_webhook(h) for h in await self.db.read(op)]}
+
+    async def get_webhook(self, ident: Any) -> dict[str, Any]:
+        async def op(conn):
+            return await self._require_hook(conn, ident)
+
+        return {"webhook": store.public_webhook(await self.db.read(op))}
+
+    async def create_webhook(
+        self,
+        name: Any,
+        direction: Any,
+        *,
+        url: Any = None,
+        format: Any = None,
+        kinds: Any = None,
+        channels: Any = None,
+        mentions: Any = None,
+        exclude_authors: Any = None,
+        channel: Any = None,
+        author: Any = None,
+        allow_override: Any = False,
+    ) -> dict[str, Any]:
+        """Create a webhook. The generated ``secret`` is returned once, here only."""
+        clean_name = webhook_name(name)
+        clean_direction = webhook_direction(direction)
+        values: dict[str, Any] = {"name": clean_name, "direction": clean_direction}
+        if clean_direction == "out":
+            values.update(
+                url=webhook_url(url),
+                format=webhook_format(format),
+                kinds=webhook_kinds(kinds),
+                channels=webhook_channels(channels),
+                mentions=webhook_handles(mentions, "mentions"),
+                exclude_authors=webhook_patterns(exclude_authors, "exclude_authors"),
+            )
+        else:
+            values.update(
+                channel=channel_name(channel),
+                author=(
+                    handle(author, "author")
+                    if author not in (None, "")
+                    else f"hook-{clean_name}"[:64]
+                ),
+                allow_override=int(_flag(allow_override)),
+            )
+        secret = secrets.token_urlsafe(32)
+
+        async def op(conn):
+            if await store.get_webhook(conn, clean_name) is not None:
+                raise HubError(
+                    "webhook_exists", f"webhook {clean_name} already exists", 409, {"name": clean_name}
+                )
+            if clean_direction == "in":
+                if await store.get_channel_by_name(conn, values["channel"]) is None:
+                    raise HubError("not_found", f"channel {values['channel']} not found", 404)
+            else:
+                # A new outbound hook starts at the end of the log: no history replay.
+                values["cursor"] = await store.max_event_id(conn)
+            now = utc_now()
+            hook_id = await store.insert_webhook(
+                conn, {**values, "secret": secret, "created_at": now, "updated_at": now}
+            )
+            return await store.get_webhook(conn, hook_id)
+
+        # _txn wakes waiters, which also makes the dispatcher reload its hooks.
+        hook = await self._txn(op)
+        return {"webhook": store.public_webhook(hook), "secret": secret}
+
+    async def update_webhook(self, ident: Any, changes: dict[str, Any]) -> dict[str, Any]:
+        """Change filters, target or ``enabled``. ``name``, ``direction`` and the secret are fixed."""
+        if not isinstance(changes, dict):
+            raise HubError("validation_error", "changes must be an object", 400)
+
+        async def op(conn):
+            hook = await self._require_hook(conn, ident)
+            outbound = hook["direction"] == "out"
+            allowed = (
+                {"enabled", "url", "format", "kinds", "channels", "mentions", "exclude_authors"}
+                if outbound
+                else {"enabled", "channel", "author", "allow_override"}
+            )
+            unknown = sorted(set(changes) - allowed)
+            if unknown:
+                raise HubError(
+                    "validation_error",
+                    f"cannot change on a {hook['direction']} webhook: {', '.join(unknown)}",
+                    400,
+                    {"allowed": sorted(allowed)},
+                )
+            values: dict[str, Any] = {}
+            if "enabled" in changes:
+                values["enabled"] = int(_flag(changes["enabled"]))
+                if values["enabled"] and outbound and not hook["enabled"]:
+                    # Re-enabling clears the failure that disabled it.
+                    values.update(failure_count=0, last_error=None)
+            if "url" in changes:
+                values["url"] = webhook_url(changes["url"])
+            if "format" in changes:
+                values["format"] = webhook_format(changes["format"])
+            if "kinds" in changes:
+                values["kinds"] = webhook_kinds(changes["kinds"])
+            if "channels" in changes:
+                values["channels"] = webhook_channels(changes["channels"])
+            if "mentions" in changes:
+                values["mentions"] = webhook_handles(changes["mentions"], "mentions")
+            if "exclude_authors" in changes:
+                values["exclude_authors"] = webhook_patterns(
+                    changes["exclude_authors"], "exclude_authors"
+                )
+            if "channel" in changes:
+                target = channel_name(changes["channel"])
+                if await store.get_channel_by_name(conn, target) is None:
+                    raise HubError("not_found", f"channel {target} not found", 404)
+                values["channel"] = target
+            if "author" in changes:
+                values["author"] = handle(changes["author"], "author")
+            if "allow_override" in changes:
+                values["allow_override"] = int(_flag(changes["allow_override"]))
+            if values:
+                values["updated_at"] = utc_now()
+                await store.update_webhook(conn, hook["id"], values)
+            return await store.get_webhook(conn, hook["id"])
+
+        return {"webhook": store.public_webhook(await self._txn(op))}
+
+    async def rotate_webhook_secret(self, ident: Any) -> dict[str, Any]:
+        secret = secrets.token_urlsafe(32)
+
+        async def op(conn):
+            hook = await self._require_hook(conn, ident)
+            await store.update_webhook(conn, hook["id"], {"secret": secret, "updated_at": utc_now()})
+            return await store.get_webhook(conn, hook["id"])
+
+        hook = await self._txn(op)
+        return {"webhook": store.public_webhook(hook), "secret": secret}
+
+    async def delete_webhook(self, ident: Any) -> dict[str, Any]:
+        async def op(conn):
+            hook = await self._require_hook(conn, ident)
+            await store.delete_webhook(conn, hook["id"])
+            return {"deleted": True, "id": hook["id"], "name": hook["name"]}
+
+        return await self._txn(op)
+
+    async def webhook_secret_hook(self, name: Any, direction: str) -> dict[str, Any] | None:
+        """The full row (with secret) for an enabled hook, or ``None``. For the dispatcher and the inbound route."""
+        if not isinstance(name, str) or not CHANNEL_RE.fullmatch(name):
+            return None
+
+        async def op(conn):
+            return await store.get_webhook(conn, name)
+
+        hook = await self.db.read(op)
+        if hook is None or not hook["enabled"] or hook["direction"] != direction:
+            return None
+        return hook
+
+    async def webhook_with_secret(self, ident: Any) -> dict[str, Any]:
+        """Full row including the secret, for sending a test ping. Never return this from an API."""
+
+        async def op(conn):
+            return await self._require_hook(conn, ident)
+
+        return await self.db.read(op)
+
+    async def outbound_webhooks(self) -> list[dict[str, Any]]:
+        """Enabled outbound hooks, full rows with secrets. Internal to the dispatcher."""
+
+        async def op(conn):
+            return await store.list_webhooks(conn, direction="out", enabled_only=True)
+
+        return await self.db.read(op)
+
+    async def record_delivery(
+        self,
+        hook_id: int,
+        *,
+        status: str | None,
+        cursor: int | None = None,
+        error: str | None = None,
+        failure_count: int = 0,
+        disable: bool = False,
+    ) -> None:
+        """Persist the outcome of a delivery attempt.
+
+        ``status=None`` moves only the cursor (nothing was sent), leaving the
+        last delivery's status and error alone. Writes straight through the
+        database, without waking waiters, so delivery bookkeeping never
+        triggers the dispatcher or an SSE reader.
+        """
+        values: dict[str, Any] = {"failure_count": failure_count}
+        if status is not None:
+            values.update(last_status=status, last_error=error, last_delivery_at=utc_now())
+        if cursor is not None:
+            values["cursor"] = cursor
+        if disable:
+            values["enabled"] = 0
+
+        async def op(conn):
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                await store.update_webhook(conn, hook_id, values)
+            except BaseException:
+                await conn.rollback()
+                raise
+            await conn.commit()
+
+        await self.db.write(op)
+
+    async def post_via_webhook(self, hook: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+        """Post for an authenticated inbound hook.
+
+        The hook fixes the channel and author unless ``allow_override`` is set.
+        ``content`` is accepted as an alias of ``text`` for Discord-shaped senders.
+        """
+        channel = hook["channel"]
+        author = hook["author"]
+        if hook["allow_override"]:
+            channel = body.get("channel") or channel
+            author = body.get("author") or author
+        key = client_request_id(body.get("client_request_id"))
+        if key is not None and len(key) > 120:
+            raise HubError("validation_error", "client_request_id must be 1..120 characters", 400)
+        text = body.get("text")
+        if text in (None, ""):
+            text = body.get("content")
+        return await self.post_message(
+            channel,
+            author,
+            text,
+            reply_to=body.get("reply_to"),
+            # Namespaced so two hooks cannot collide on the global idempotency key.
+            client_request_id_value=f"hook:{hook['name']}:{key}" if key else None,
+        )
 
     async def event_cursor(self) -> dict[str, Any]:
         return {"event_cursor": await self.db.read(store.max_event_id)}

@@ -449,6 +449,6 @@ async def test_v1_database_upgrades_in_place(tmp_path):
         old = conn.execute("SELECT text FROM messages").fetchall()
     assert {"archived_at", "archived_by", "state", "state_note"} <= columns
     assert {"attachments", "tasks", "events", "idempotency", "mentions"} <= tables
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
     assert fleets == 1
     assert old == [("old",)]

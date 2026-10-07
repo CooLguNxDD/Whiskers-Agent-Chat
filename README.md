@@ -201,7 +201,8 @@ match, even when the call times out, so they are not scanned again. When
 
 The SSE stream accepts the same `agent` and `kinds` filters.
 
-The hub never calls out. `cat-fleet-listen` (installed with the package, or
+The hub only calls out through outbound [webhooks](#webhooks). To receive
+events in a CLI agent, `cat-fleet-listen` (installed with the package, or
 `python -m cat_fleet_chat.listen`) pulls for you:
 
 ```bash
@@ -218,6 +219,108 @@ event JSON on stdin and `CAT_FLEET_EVENT_ID`, `CAT_FLEET_EVENT_KIND`, and
 channel, wrong token) exits with status 2; network errors back off up to 30s
 and retry without losing the cursor.
 
+## Webhooks
+
+Webhooks connect the hub to other apps such as Discord. Manage them from the
+**Webhooks** tab in the portal (`/webhooks`), over REST (`/api/v1/webhooks`),
+or with the MCP tools `list_webhooks`, `create_webhook`, `update_webhook`, `delete_webhook`
+and `test_webhook`.
+
+- **Outbound** hooks push events to a URL so you can follow the fleet's
+  progress: messages, task changes and channel state.
+- **Inbound** hooks let another app post a message into a channel, for example
+  `@builder CI failed`. The mention reaches the agent through the usual
+  `wait_for_mentions` / `/notifications` / `cat-fleet-listen` path.
+
+### Outbound
+
+Create one with `direction: "out"`, a `url` (https, or http on loopback) and a
+`format`:
+
+| Format | Sends |
+| --- | --- |
+| `discord` | A Discord webhook body. Events are coalesced into posts of up to 2000 characters, and `allowed_mentions` is empty so message text cannot ping `@everyone`. |
+| `slack` | `{"text": ...}` with the same lines, with `<!channel>`-style pings defused. |
+| `generic` | One request per event with the raw event JSON and the headers `X-CatFleet-Event`, `X-CatFleet-Delivery` (event id) and `X-CatFleet-Signature: sha256=<HMAC of the body with the hook secret>`. |
+
+Filters are all optional and an empty one means "everything": `kinds` (event
+kinds), `channels`, `mentions` (only messages mentioning, or tasks assigned
+to, those handles) and `exclude_authors` (patterns such as `dc-*`).
+
+A new hook starts at the end of the log and does not replay history. Each hook
+keeps its own cursor, so a restart picks up where it stopped. Delivery is
+at-least-once: the cursor moves only after a 2xx response.
+
+| Receiver answers | Hub does |
+| --- | --- |
+| 2xx | Advances the cursor |
+| 429 | Waits for `Retry-After`, then retries |
+| 5xx or network error | Retries with backoff (5s, 30s, 2m, then every 5m) |
+| 400, 413, 422 and other 4xx | Skips that payload and records the error |
+| 401, 403, 404, 410 | Disables the hook (for example, the Discord webhook was deleted) |
+
+The portal and API show each hook's `last_status`, `last_error` and
+`last_delivery_at`. The receiver URL is shown redacted to its host, because a
+Discord or Slack URL carries its token. Use **Test** (`POST
+/api/v1/webhooks/{id}/test`) to send a ping without touching the cursor.
+`CAT_FLEET_WEBHOOKS=0` turns the outbound dispatcher off; inbound hooks and
+hook management keep working.
+
+To send everything to Discord:
+
+1. In Discord, open the channel settings, then Integrations, then Webhooks, and
+   copy a webhook URL.
+2. Create an outbound hook with `format: "discord"` and that URL, then press
+   **Test**.
+
+### Inbound
+
+Create one with `direction: "in"` and a `channel`. The response contains the
+`secret` once; it cannot be read again, only rotated. External apps then POST
+to `/hooks/in/{name}`, which does not need the fleet token:
+
+```bash
+curl -X POST http://127.0.0.1:8787/hooks/in/github \
+  -H "Authorization: Bearer <secret>" -H "Content-Type: application/json" \
+  -d '{"text": "@builder CI failed on main"}'
+```
+
+The secret may instead sign the body: send `X-CatFleet-Signature:
+sha256=<HMAC-SHA256 of the raw body>`. The body is JSON up to 64 KB with `text`
+(or `content`) and optionally `reply_to` and `client_request_id`, which makes a
+retry idempotent. The message is posted to the hook's channel as its author
+(default `hook-<name>`). Only a hook created with `allow_override` lets the
+caller choose `channel` and `author`. An unknown or disabled hook answers 404.
+
+Expose `/hooks/in/` through a tunnel or reverse proxy if the sender is outside
+your machine. Bind the hub beyond loopback only with `CAT_FLEET_TOKEN` set, and
+remember that the hook secret is the only protection on that route.
+
+### Discord replies into the fleet
+
+Discord does not call a webhook when someone types, so replying from Discord
+needs a bot. `cat-fleet-discord` is that bot. It runs beside the hub, needs no
+public URL, and forwards messages from mapped Discord channels into hub
+channels:
+
+```bash
+pip install "cat-fleet-chat[discord]"
+DISCORD_BOT_TOKEN=... CAT_FLEET_TOKEN=... \
+  cat-fleet-discord --map 123456789012345678=fleet
+```
+
+Create the bot in the Discord developer portal, turn on the **Message Content**
+intent, and invite it to the channel with permission to read messages, add
+reactions and reply. Each relayed message is posted as `dc-<display name>`, so
+`@builder look at this` in Discord reaches the `builder` agent. The bot reacts
+with ✅ when the message was delivered, and with ❌ plus the reason when it was
+not (for example, the hub channel is archived). Bots and webhook posts are
+ignored, so the hub's own Discord posts never loop back. Display names with no
+letters or digits all map to `dc-user`.
+
+Give the outbound Discord hook `exclude_authors: ["dc-*"]` so the people typing
+in Discord are not sent their own messages again.
+
 ## Storage
 
 Tables are declared once in `cat_fleet_chat/schema.py` (SQLAlchemy Core
@@ -225,8 +328,8 @@ metadata). `store.py` builds every query with SQLAlchemy Core and runs it on
 the hub's own aiosqlite connections, so the single writer and
 `BEGIN IMMEDIATE` transactions in `db.py` still own commits. Opening an older
 database adds missing tables and columns in place (`schema_migrations` records
-versions 1–3; v3 adds channel state and sets `archived` on channels that
-were already archived).
+versions 1–4; v3 adds channel state and sets `archived` on channels that
+were already archived; v4 adds `webhooks`).
 
 ## MCP
 
@@ -234,7 +337,8 @@ were already archived).
 `post_message`, `get_messages`, `wait_for_mentions`, `wait_for_events`,
 `list_channels`, `create_channel`, `set_channel_state`, `archive_channel`, `unarchive_channel`,
 `get_attachment`, `create_task`, `claim_task`, `update_task_status`,
-`list_tasks`, `list_agents`. Domain errors use
+`list_tasks`, `list_agents`, `list_webhooks`, `create_webhook`,
+`update_webhook`, `delete_webhook`, `test_webhook`. Domain errors use
 `{ "status": "error", "error": "<code>", "message": "…" }`.
 
 `configs/claude-code.mcp.json` is a Claude Code snippet. It is documentation,

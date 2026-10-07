@@ -220,6 +220,105 @@ def event_kinds(value: Any) -> frozenset[str] | None:
     return frozenset(items) or None
 
 
+WEBHOOK_DIRECTIONS = ("out", "in")
+WEBHOOK_FORMATS = ("discord", "slack", "generic")
+WEBHOOK_LIST_MAX = 50
+WEBHOOK_PATTERN_MAX = 64
+WEBHOOK_URL_MAX = 2_000
+
+
+def webhook_name(value: Any) -> str:
+    if not isinstance(value, str) or not CHANNEL_RE.fullmatch(value):
+        raise _fail(
+            "webhook name must match [a-z0-9][a-z0-9_-]{0,63}",
+            details={"field": "name"},
+        )
+    return value
+
+
+def webhook_direction(value: Any) -> str:
+    if not isinstance(value, str) or value not in WEBHOOK_DIRECTIONS:
+        raise _fail(
+            f"direction must be one of {', '.join(WEBHOOK_DIRECTIONS)}",
+            details={"field": "direction", "allowed": list(WEBHOOK_DIRECTIONS)},
+        )
+    return value
+
+
+def webhook_format(value: Any) -> str:
+    if value is None or value == "":
+        return "generic"
+    if not isinstance(value, str) or value not in WEBHOOK_FORMATS:
+        raise _fail(
+            f"format must be one of {', '.join(WEBHOOK_FORMATS)}",
+            details={"field": "format", "allowed": list(WEBHOOK_FORMATS)},
+        )
+    return value
+
+
+def webhook_url(value: Any) -> str:
+    """http(s) URL. Plain http is only accepted for a loopback host."""
+    from urllib.parse import urlsplit
+
+    from cat_fleet_chat.config import is_loopback_host
+
+    text = require_text(value, "url", WEBHOOK_URL_MAX)
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname
+    except ValueError as exc:
+        raise _fail("url is not valid", details={"field": "url"}) from exc
+    if parts.scheme not in {"http", "https"} or not host:
+        raise _fail("url must be an http(s) URL", details={"field": "url"})
+    if parts.scheme == "http" and not is_loopback_host(host):
+        raise _fail("url must use https unless the host is loopback", details={"field": "url"})
+    return text
+
+
+def _string_list(value: Any, field: str) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        items: Any = [part.strip() for part in value.split(",") if part.strip()]
+    else:
+        items = value
+    if not isinstance(items, (list, tuple)):
+        raise _fail(f"{field} must be a list or comma-separated string", details={"field": field})
+    if len(items) > WEBHOOK_LIST_MAX:
+        raise _fail(f"{field} has more than {WEBHOOK_LIST_MAX} entries", details={"field": field})
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise _fail(f"{field} entries must be strings", details={"field": field})
+        item = item.strip()
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def webhook_kinds(value: Any) -> list[str]:
+    return sorted(event_kinds(value) or ())
+
+
+def webhook_channels(value: Any) -> list[str]:
+    return [channel_name(item) for item in _string_list(value, "channels")]
+
+
+def webhook_handles(value: Any, field: str) -> list[str]:
+    return [handle(item, field) for item in _string_list(value, field)]
+
+
+def webhook_patterns(value: Any, field: str) -> list[str]:
+    items = _string_list(value, field)
+    for item in items:
+        if len(item) > WEBHOOK_PATTERN_MAX:
+            raise _fail(
+                f"{field} entries must be at most {WEBHOOK_PATTERN_MAX} characters",
+                details={"field": field},
+            )
+    return items
+
+
 def _attachment(value: Any, index: int) -> dict[str, Any]:
     field = f"attachments[{index}]"
     if not isinstance(value, dict):

@@ -16,6 +16,7 @@ const queryClient = new QueryClient({
 })
 
 const TasksPage = lazy(() => import("@/components/TaskBoard"))
+const WebhooksPage = lazy(() => import("@/components/Webhooks"))
 const root = document.getElementById("root")
 if (!root) throw new Error("root element missing")
 applyAppearance(prefs.theme(), prefs.accent())
@@ -29,6 +30,7 @@ render(
         <Router root={RootLayout}>
           <Route path="/" component={FleetPage} />
           <Route path="/tasks" component={TasksPage} />
+          <Route path="/webhooks" component={WebhooksPage} />
         </Router>
       </FleetStreamProvider>
     </QueryClientProvider>

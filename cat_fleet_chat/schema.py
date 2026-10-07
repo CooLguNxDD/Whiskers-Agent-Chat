@@ -140,6 +140,37 @@ attachments = Table(
     Index("idx_attachments_message", "message_id", "id"),
 )
 
+# Schema v4. One row per webhook. direction "out" pushes hub events to ``url``;
+# direction "in" accepts POST /hooks/in/{name} and posts into ``channel``.
+# The filter columns hold JSON arrays; an empty array means "no filter".
+webhooks = Table(
+    "webhooks",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", Text, nullable=False, unique=True),
+    Column("direction", Text, nullable=False),
+    Column("enabled", Integer, nullable=False, server_default=text("1")),
+    Column("secret", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    # Outbound.
+    Column("url", Text),
+    Column("format", Text),
+    Column("kinds_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("channels_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("mentions_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("exclude_authors_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("cursor", Integer, nullable=False, server_default=text("0")),
+    Column("failure_count", Integer, nullable=False, server_default=text("0")),
+    Column("last_status", Text),
+    Column("last_error", Text),
+    Column("last_delivery_at", Text),
+    # Inbound.
+    Column("channel", Text),
+    Column("author", Text),
+    Column("allow_override", Integer, nullable=False, server_default=text("0")),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (

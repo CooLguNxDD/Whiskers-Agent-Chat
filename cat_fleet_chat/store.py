@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiosqlite
-from sqlalchemy import func, insert, literal, select, union_all, update
+from sqlalchemy import delete, func, insert, literal, select, union_all, update
 
 from cat_fleet_chat.schema import (
     attachments,
@@ -26,6 +27,7 @@ from cat_fleet_chat.schema import (
     run,
     task_events,
     tasks,
+    webhooks,
 )
 
 CHANNEL_COLUMNS = (
@@ -434,6 +436,98 @@ async def events_after(
         stmt = stmt.where(events.c.kind.in_(sorted(kinds)))
     rows = await fetch_all(conn, stmt.order_by(events.c.id.asc()).limit(limit))
     return [_event_row(row) for row in rows]
+
+
+_WEBHOOK_LISTS = ("kinds", "channels", "mentions", "exclude_authors")
+
+
+def _webhook_row(row: aiosqlite.Row) -> dict[str, Any]:
+    """Full webhook including ``secret``. Use :func:`public_webhook` for API output."""
+    body = dict(row)
+    for name in _WEBHOOK_LISTS:
+        body[name] = json.loads(body.pop(f"{name}_json"))
+    body["enabled"] = bool(body["enabled"])
+    body["allow_override"] = bool(body["allow_override"])
+    return body
+
+
+def redact_url(url: str) -> str:
+    """Scheme, host and port only. A Discord or Slack hook URL carries its token in the path."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<invalid url>"
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}{port}/…"
+
+
+def public_webhook(hook: dict[str, Any]) -> dict[str, Any]:
+    """A webhook as the API shows it: no secret, a redacted URL, only the fields its direction uses."""
+    out = {key: value for key, value in hook.items() if key != "secret"}
+    if out.get("url"):
+        out["url"] = redact_url(out["url"])
+    if hook["direction"] == "out":
+        for key in ("channel", "author", "allow_override"):
+            out.pop(key, None)
+    else:
+        for key in (
+            "url",
+            "format",
+            *_WEBHOOK_LISTS,
+            "cursor",
+            "failure_count",
+            "last_status",
+            "last_error",
+            "last_delivery_at",
+        ):
+            out.pop(key, None)
+    return out
+
+
+async def insert_webhook(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    row = dict(values)
+    for name in _WEBHOOK_LISTS:
+        if name in row:
+            row[f"{name}_json"] = json.dumps(row.pop(name), separators=(",", ":"))
+    cursor = await run(conn, insert(webhooks).values(**row))
+    return int(cursor.lastrowid)
+
+
+async def get_webhook(conn: aiosqlite.Connection, ident: int | str) -> dict[str, Any] | None:
+    """One webhook by numeric id or by name."""
+    column = webhooks.c.id if isinstance(ident, int) else webhooks.c.name
+    row = await fetch_one(conn, select(webhooks).where(column == ident))
+    return None if row is None else _webhook_row(row)
+
+
+async def list_webhooks(
+    conn: aiosqlite.Connection,
+    *,
+    direction: str | None = None,
+    enabled_only: bool = False,
+) -> list[dict[str, Any]]:
+    stmt = select(webhooks)
+    if direction is not None:
+        stmt = stmt.where(webhooks.c.direction == direction)
+    if enabled_only:
+        stmt = stmt.where(webhooks.c.enabled == 1)
+    rows = await fetch_all(conn, stmt.order_by(webhooks.c.id.asc()))
+    return [_webhook_row(row) for row in rows]
+
+
+async def update_webhook(conn: aiosqlite.Connection, hook_id: int, values: dict[str, Any]) -> None:
+    row = dict(values)
+    for name in _WEBHOOK_LISTS:
+        if name in row:
+            row[f"{name}_json"] = json.dumps(row.pop(name), separators=(",", ":"))
+    await run(conn, update(webhooks).where(webhooks.c.id == hook_id).values(**row))
+
+
+async def delete_webhook(conn: aiosqlite.Connection, hook_id: int) -> None:
+    await run(conn, delete(webhooks).where(webhooks.c.id == hook_id))
 
 
 async def insert_task(

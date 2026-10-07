@@ -2,7 +2,8 @@
 
 Long-polls ``GET /api/v1/notifications`` and emits every relevant event as a
 JSON line on stdout, or runs ``--exec`` once per event with the event JSON on
-stdin. The hub makes no outbound calls; this process pulls.
+stdin. This process pulls; to have the hub push to a URL instead, use an
+outbound webhook (see webhooks.py).
 
 Examples::
 
