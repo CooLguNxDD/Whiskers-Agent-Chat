@@ -109,18 +109,95 @@ async def wait_for_mentions(
     channel: str | None = None,
     timeout: int | None = None,
     limit: int | None = None,
+    mail_since_id: int | None = None,
 ) -> dict[str, Any]:
-    """Park until ``agent`` is mentioned in a message with id greater than ``since_id``.
+    """Park until ``agent`` is mentioned in a message with id greater than ``since_id``, or gets mail.
 
     ``timeout`` is clamped to 1..300 seconds (default 60). An empty result
     keeps the cursor you passed and sets ``timed_out`` true. Drain ``has_more``
     pages before waiting again. Pass a shorter timeout when the MCP client
     cuts tools off sooner than the hub would return.
+
+    Direct mail also wakes the wait: ``mail`` lists mail after
+    ``mail_since_id`` and ``mail_unread`` counts unread mail. Send back
+    ``mail_cursor`` as ``mail_since_id``; without it only mail that arrives
+    during this call wakes you.
     """
     try:
         return await get_hub().wait_for_mentions(
-            agent, since_id, channel=channel, timeout=timeout, limit=limit
+            agent,
+            since_id,
+            channel=channel,
+            timeout=timeout,
+            limit=limit,
+            mail_since_id=mail_since_id,
         )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_mail_send(
+    sender: str,
+    recipient: str,
+    body: str,
+    subject: str | None = None,
+    reply_to: int | None = None,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Send a direct mail to one handle's private inbox. It wakes that agent's wait.
+
+    ``subject`` is optional (one line, up to 200 characters). ``reply_to`` is
+    the id of a mail you sent or received. ``client_request_id`` makes a retry
+    return the original mail. Use channels for anything the fleet should see.
+    """
+    try:
+        return await get_hub().send_mail(
+            sender,
+            recipient,
+            body,
+            subject=subject,
+            reply_to=reply_to,
+            client_request_id=client_request_id,
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_mail_list(
+    agent: str,
+    state: str = "unread",
+    since_id: int | None = 0,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """List ``agent``'s mail, oldest first. ``state`` is unread (default), read or all.
+
+    Page forward by sending the returned ``cursor`` as ``since_id`` while
+    ``has_more`` is true. Listing does not mark anything read.
+    """
+    try:
+        result = await get_hub().list_mail(agent, state=state, since_id=since_id, limit=limit)
+        result.update(await get_hub().mail_counts(agent))
+        return result
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_mail_read(
+    agent: str,
+    ids: list[int] | None = None,
+    up_to_id: int | None = None,
+) -> dict[str, Any]:
+    """Mark your mail read: the given ``ids``, or everything up to ``up_to_id``. Safe to repeat."""
+    try:
+        return await get_hub().mark_mail_read(agent, ids=ids, up_to_id=up_to_id)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_mail_ack(agent: str, ids: list[int]) -> dict[str, Any]:
+    """Acknowledge your mail (you acted on it). Ack implies read. Safe to repeat."""
+    try:
+        return await get_hub().ack_mail(agent, ids=ids)
     except HubError as exc:
         return exc.mcp_body()
 
@@ -207,8 +284,10 @@ async def wait_for_events(
     """Park until an event relevant to ``agent`` lands after ``after_event_id``.
 
     Relevant means: a message that mentions the agent (not its own), a task
-    assigned to it that someone else changed, or any channel lifecycle event
-    (created, archived, unarchived). Omit ``agent`` for every event.
+    assigned to it that someone else changed, mail addressed to it, or any
+    channel lifecycle event (created, archived, unarchived). Omit ``agent``
+    for every event. With ``agent``, ``mail`` holds the full mail behind
+    its ``mail`` events.
     ``kinds`` narrows by event kind. ``timeout`` is 1..300 seconds (default
     60); ``0`` returns at once. Always send back the returned ``cursor``.
     """
@@ -444,6 +523,10 @@ def build_mcp() -> FastMCP:
         update_webhook,
         delete_webhook,
         test_webhook,
+        fleet_mail_send,
+        fleet_mail_list,
+        fleet_mail_read,
+        fleet_mail_ack,
     ):
         mcp.tool(run_in_thread=False)(fn)
     return mcp

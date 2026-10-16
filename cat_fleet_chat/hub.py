@@ -10,7 +10,7 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import store
+from cat_fleet_chat import mailbox, store, validate
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
     TERMINAL_STATUSES,
@@ -81,12 +81,15 @@ def agent_relevant(event: dict[str, Any], agent: str | None) -> bool:
     """Whether ``event`` should notify ``agent``. No agent means every event.
 
     Mentions and task assignments go to that agent, never for its own action.
+    Mail goes to its recipient, including mail an agent sent itself.
     Channel lifecycle events are broadcast.
     """
     if agent is None:
         return True
     kind = event["kind"]
     payload = event.get("payload") or {}
+    if kind == "mail":
+        return payload.get("recipient") == agent
     if kind == "message.created":
         return agent in (payload.get("mentions") or []) and payload.get("author") != agent
     if kind == "task.updated":
@@ -570,6 +573,24 @@ class Hub:
             "channel": channel,
         }
 
+    async def read_mail_after(self, agent: str, since_id: int, limit: int) -> dict[str, Any]:
+        """Mail for ``agent`` after the mail cursor, plus the unread count. For wait responses."""
+
+        async def op(conn):
+            found, has_more = await store.list_mail(
+                conn, agent, state="all", since_id=since_id, limit=limit
+            )
+            counts = await store.mail_counts(conn, agent)
+            return found, has_more, counts
+
+        found, has_more, counts = await self.db.read(op)
+        return {
+            "mail": found,
+            "mail_cursor": found[-1]["id"] if found else since_id,
+            "mail_has_more": has_more,
+            "mail_unread": counts["unread"],
+        }
+
     async def wait_for_mentions(
         self,
         agent: Any,
@@ -578,13 +599,20 @@ class Hub:
         channel: Any = None,
         timeout: Any = None,
         limit: Any = None,
+        mail_since_id: Any = None,
     ) -> dict[str, Any]:
-        """Park until ``agent`` is mentioned after ``since_id``, or the deadline.
+        """Park until ``agent`` is mentioned after ``since_id`` or gets mail, or the deadline.
 
         The condition lock is held across the empty check and the sleep. A
         commit that happens in between blocks on the same lock, then notifies,
         so the wake cannot be lost. The deadline is monotonic and is not
         extended by unrelated notifications. Cancellation leaves the waiter.
+
+        Mail after ``mail_since_id`` wakes the waiter too; send back the
+        returned ``mail_cursor``. Without ``mail_since_id`` only mail that
+        arrives during this call wakes it, so a caller that never reads its
+        mail is not woken again and again by the same unread mail.
+        ``mail_unread`` always says how much is waiting.
         """
         import asyncio
         import time
@@ -594,29 +622,202 @@ class Hub:
         clean_channel = channel_name(channel) if channel not in (None, "") else None
         seconds = clamp_timeout(timeout)
         clean_limit = page_limit(limit)
+        explicit_mail = optional_id(mail_since_id, "mail_since_id")
         deadline = time.monotonic() + seconds
 
+        async def check() -> dict[str, Any]:
+            page = await self.read_mentions(
+                clean_agent, cursor, channel=clean_channel, limit=clean_limit
+            )
+            page.update(await self.read_mail_after(clean_agent, mail_cursor, clean_limit))
+            return page
+
         async with self.waiters.condition:
-            while True:
-                page = await self.read_mentions(
-                    clean_agent, cursor, channel=clean_channel, limit=clean_limit
+            # Taken under the lock: mail committed after this point notifies us.
+            if explicit_mail is not None:
+                mail_cursor = explicit_mail
+            else:
+                mail_cursor = await self.db.read(
+                    lambda conn: store.max_mail_id(conn, clean_agent)
                 )
-                if page["messages"]:
+            while True:
+                page = await check()
+                if page["messages"] or page["mail"]:
                     return page
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    final = await self.read_mentions(
-                        clean_agent, cursor, channel=clean_channel, limit=clean_limit
-                    )
-                    if final["messages"]:
+                    final = await check()
+                    if final["messages"] or final["mail"]:
                         return final
                     final["timed_out"] = True
                     final["cursor"] = cursor
+                    final["mail_cursor"] = mail_cursor
                     return final
                 try:
                     await asyncio.wait_for(self.waiters.condition.wait(), remaining)
                 except asyncio.TimeoutError:
                     continue
+
+    # ---- mailbox --------------------------------------------------------
+
+    async def send_mail(
+        self,
+        sender: Any,
+        recipient: Any,
+        body: Any,
+        subject: Any = None,
+        reply_to: Any = None,
+        client_request_id: Any = None,
+    ) -> dict[str, Any]:
+        """Send a direct mail. Any valid handle may receive it, the sender included.
+
+        ``reply_to`` must be a mail the sender sent or received.
+        ``client_request_id`` makes a retry return the original mail. The
+        ``mail`` event carries ids, sender and subject, never the body.
+        """
+        clean_sender = mailbox.sender(sender)
+        clean_recipient = mailbox.recipient(recipient)
+        clean_body = mailbox.body(body)
+        clean_subject = mailbox.subject(subject)
+        parent_id = mailbox.reply_to(reply_to)
+        # The parameter shadows validate.client_request_id here.
+        key = validate.client_request_id(client_request_id)
+        payload = {
+            "sender": clean_sender,
+            "recipient": clean_recipient,
+            "subject": clean_subject,
+            "body": clean_body,
+            "reply_to": parent_id,
+        }
+        digest = fingerprint("mail", payload) if key else None
+
+        async def op(conn):
+            if key and digest is not None:
+                prior = await store.get_idempotency(conn, key)
+                if prior is not None:
+                    if prior["fingerprint"] != digest or prior["kind"] != "mail":
+                        raise HubError(
+                            "idempotency_conflict",
+                            "client_request_id was already used with a different payload",
+                            409,
+                            {"client_request_id": key},
+                        )
+                    return prior["result"]
+            if parent_id is not None:
+                parent = await store.get_mail(conn, parent_id)
+                if parent is None or clean_sender not in (parent["sender"], parent["recipient"]):
+                    raise HubError(
+                        "validation_error",
+                        "reply_to must be a mail you sent or received",
+                        400,
+                        {"field": "reply_to"},
+                    )
+            created_at = utc_now()
+            mail_id = await store.insert_mail(
+                conn,
+                recipient=clean_recipient,
+                sender=clean_sender,
+                subject=clean_subject,
+                body=clean_body,
+                reply_to=parent_id,
+                created_at=created_at,
+            )
+            mail = await store.get_mail(conn, mail_id)
+            assert mail is not None
+            await store.insert_event(
+                conn, "mail", None, mail_id, mailbox.event_payload(mail), created_at
+            )
+            result = {"mail": mail}
+            if key and digest is not None:
+                await store.insert_idempotency(conn, key, "mail", digest, result, created_at)
+            return result
+
+        return await self._txn(op)
+
+    async def list_mail(
+        self,
+        agent: Any,
+        *,
+        state: Any = "unread",
+        since_id: Any = 0,
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        """``agent``'s mail after ``since_id``, oldest first. Page with the returned ``cursor``."""
+        clean_agent = handle(agent, "agent")
+        clean_state = mailbox.state(state)
+        since = optional_id(since_id, "since_id") or 0
+        clean_limit = page_limit(limit)
+
+        async def op(conn):
+            return await store.list_mail(
+                conn, clean_agent, state=clean_state, since_id=since, limit=clean_limit
+            )
+
+        found, has_more = await self.db.read(op)
+        return {
+            "mail": found,
+            "cursor": found[-1]["id"] if found else since,
+            "has_more": has_more,
+            "agent": clean_agent,
+            "state": clean_state,
+        }
+
+    async def mail_counts(self, agent: Any) -> dict[str, Any]:
+        clean_agent = handle(agent, "agent")
+
+        async def op(conn):
+            return await store.mail_counts(conn, clean_agent)
+
+        return {"agent": clean_agent, **await self.db.read(op)}
+
+    @staticmethod
+    async def _require_own_mail(conn, agent: str, ids: list[int]) -> None:
+        """Every id must exist and be addressed to ``agent``."""
+        found = {mail["id"]: mail for mail in await store.get_mail_many(conn, ids)}
+        missing = [mail_id for mail_id in ids if mail_id not in found]
+        if missing:
+            raise HubError("not_found", "mail not found", 404, {"ids": missing})
+        foreign = [mail_id for mail_id in ids if found[mail_id]["recipient"] != agent]
+        if foreign:
+            raise HubError(
+                "forbidden", "only the recipient may read or ack a mail", 403, {"ids": foreign}
+            )
+
+    async def mark_mail_read(
+        self, agent: Any, ids: Any = None, up_to_id: Any = None
+    ) -> dict[str, Any]:
+        """Mark ``ids``, or all of ``agent``'s mail up to ``up_to_id``, read. Repeating is a no-op."""
+        clean_agent = handle(agent, "agent")
+        clean_ids = mailbox.ids(ids) if ids not in (None, "", []) else None
+        up_to = optional_id(up_to_id, "up_to_id")
+        if (clean_ids is None) == (up_to is None):
+            raise HubError(
+                "validation_error", "send exactly one of ids or up_to_id", 400, {"field": "ids"}
+            )
+
+        async def op(conn):
+            if clean_ids is not None:
+                await self._require_own_mail(conn, clean_agent, clean_ids)
+            changed = await store.mark_mail_read(
+                conn, clean_agent, mail_ids=clean_ids, up_to_id=up_to, read_at=utc_now()
+            )
+            counts = await store.mail_counts(conn, clean_agent)
+            return {"agent": clean_agent, "updated": changed, **counts}
+
+        return await self._txn(op)
+
+    async def ack_mail(self, agent: Any, ids: Any = None) -> dict[str, Any]:
+        """Acknowledge ``ids``. Ack implies read. Repeating is a no-op."""
+        clean_agent = handle(agent, "agent")
+        clean_ids = mailbox.ids(ids)
+
+        async def op(conn):
+            await self._require_own_mail(conn, clean_agent, clean_ids)
+            changed = await store.ack_mail(conn, clean_agent, clean_ids, utc_now())
+            counts = await store.mail_counts(conn, clean_agent)
+            return {"agent": clean_agent, "updated": changed, **counts}
+
+        return await self._txn(op)
 
     async def create_task(
         self,
@@ -1260,6 +1461,8 @@ class Hub:
         Same lock discipline as :meth:`wait_for_mentions`. ``timeout=0``
         returns at once. The returned ``cursor`` is always safe to send back,
         including on timeout, and skips events that were not relevant.
+        With an ``agent``, ``mail`` holds the full mail behind its ``mail``
+        events and ``mail_unread`` the number still unread.
         """
         import asyncio
         import time
@@ -1274,14 +1477,19 @@ class Hub:
         if clean_channel is not None:
             await self._require_channel(clean_channel)
 
-        def page(found: list[dict[str, Any]], at: int, more: bool, timed_out: bool):
-            return {
+        async def page(found: list[dict[str, Any]], at: int, more: bool, timed_out: bool):
+            result: dict[str, Any] = {
                 "events": found,
                 "cursor": at,
                 "has_more": more,
                 "timed_out": timed_out,
                 "agent": clean_agent,
+                # The full mail behind each ``mail`` event, for its recipient only.
+                "mail": [],
             }
+            if clean_agent is not None:
+                result.update(await self._mail_for_events(clean_agent, found))
+            return result
 
         async with self.waiters.condition:
             while True:
@@ -1293,14 +1501,30 @@ class Hub:
                     limit=clean_limit,
                 )
                 if found or more:
-                    return page(found, cursor, more, False)
+                    return await page(found, cursor, more, False)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return page([], cursor, False, seconds > 0)
+                    return await page([], cursor, False, seconds > 0)
                 try:
                     await asyncio.wait_for(self.waiters.condition.wait(), remaining)
                 except asyncio.TimeoutError:
                     continue
+
+    async def _mail_for_events(self, agent: str, found: list[dict[str, Any]]) -> dict[str, Any]:
+        ids = [
+            int(event["entity_id"])
+            for event in found
+            if event["kind"] == "mail" and (event.get("payload") or {}).get("recipient") == agent
+        ]
+
+        async def op(conn):
+            rows = await store.get_mail_many(conn, ids)
+            return [row for row in rows if row["recipient"] == agent], await store.mail_counts(
+                conn, agent
+            )
+
+        rows, counts = await self.db.read(op)
+        return {"mail": rows, "mail_unread": counts["unread"]}
 
     async def _require_channel(self, name: str) -> None:
         async def op(conn):

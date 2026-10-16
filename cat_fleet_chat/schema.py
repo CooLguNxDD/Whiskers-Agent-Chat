@@ -183,6 +183,31 @@ webhooks = Table(
     Column("allow_override", Integer, nullable=False, server_default=text("0")),
 )
 
+# Schema v7. Durable per-handle inbox: direct mail from one handle to another.
+# ``read_at`` and ``acked_at`` stay null until the recipient reads or acks.
+# ``message_id`` links a mail to the chat message that produced it, if any.
+mailbox = Table(
+    "mailbox",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("recipient", Text, nullable=False),
+    Column("sender", Text, nullable=False),
+    Column("subject", Text, nullable=False, server_default=text("''")),
+    Column("body", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("read_at", Text),
+    Column("acked_at", Text),
+    Column("reply_to", Integer, ForeignKey("mailbox.id")),
+    Column("message_id", Integer, ForeignKey("messages.id")),
+    Index("idx_mailbox_recipient", "recipient", "id"),
+    Index(
+        "idx_mailbox_unread",
+        "recipient",
+        "id",
+        sqlite_where=text("read_at IS NULL"),
+    ),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (
