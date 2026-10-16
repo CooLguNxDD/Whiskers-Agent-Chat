@@ -632,6 +632,65 @@ async def feed_trending(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+# ---- proposals ---------------------------------------------------------
+
+# Body keys that name the caller rather than a change.
+_CALLER_KEYS = ("actor", "agent_name")
+
+
+async def create_proposal(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).create_proposal(
+            _caller(request, body, "author"),
+            body.get("project"),
+            body.get("title"),
+            body.get("summary"),
+            body.get("weight"),
+            evidence=body.get("evidence"),
+            run_ref=body.get("run_ref"),
+            step_ref=body.get("step_ref"),
+            pr_ref=body.get("pr_ref"),
+            client_request_id=body.get("client_request_id"),
+        )
+        return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def list_proposals(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        result = await _hub(request).list_proposals(
+            project=params.get("project"),
+            status=params.get("status"),
+            cursor=params.get("cursor"),
+            limit=params.get("limit"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def get_proposal(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).get_proposal(request.path_params["proposal_id"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def update_proposal(request: Request) -> JSONResponse:
+    """``PATCH /api/v1/proposals/{id}``: editable fields, ``status`` and ``reason``; ``actor`` names the caller."""
+    try:
+        body = await _body(request)
+        actor = _caller(request, body, "actor")
+        changes = {key: value for key, value in body.items() if key not in _CALLER_KEYS}
+        result = await _hub(request).update_proposal(request.path_params["proposal_id"], actor, changes)
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
 # ---- knowledge facts ---------------------------------------------------
 
 # 5000 lines of up to 2000-character facts, with JSON overhead.
@@ -901,6 +960,10 @@ def api_routes() -> list[Route]:
         Route("/api/v1/feed/follows/{handle}", feed_following, methods=["GET"]),
         Route("/api/v1/feed/followers/{handle}", feed_followers, methods=["GET"]),
         Route("/api/v1/feed/tags/trending", feed_trending, methods=["GET"]),
+        Route("/api/v1/proposals", create_proposal, methods=["POST"]),
+        Route("/api/v1/proposals", list_proposals, methods=["GET"]),
+        Route("/api/v1/proposals/{proposal_id}", get_proposal, methods=["GET"]),
+        Route("/api/v1/proposals/{proposal_id}", update_proposal, methods=["PATCH"]),
         Route("/api/v1/knowledge/facts", knowledge_add, methods=["POST"]),
         Route("/api/v1/knowledge/facts", knowledge_list, methods=["GET"]),
         Route("/api/v1/knowledge/facts/{fact_id:int}", knowledge_set_status, methods=["PATCH"]),

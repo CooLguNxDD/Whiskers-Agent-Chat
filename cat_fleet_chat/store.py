@@ -36,6 +36,7 @@ from cat_fleet_chat.schema import (
     mailbox,
     mentions,
     messages,
+    proposals,
     run,
     search_rowid,
     task_events,
@@ -1667,3 +1668,44 @@ async def knowledge_topics(
         conn, stmt.group_by(knowledge_facts.c.topic).order_by(count.desc(), knowledge_facts.c.topic.asc())
     )
     return [{"topic": row["topic"], "count": int(row["count"])} for row in rows]
+
+
+# ---- proposals (schema v11) ------------------------------------------------
+
+PROPOSAL_COLUMNS = tuple(proposals.c)
+
+
+async def insert_proposal(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(proposals).values(**values))
+    return int(cursor.lastrowid)
+
+
+async def get_proposal(conn: aiosqlite.Connection, proposal_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(*PROPOSAL_COLUMNS).where(proposals.c.id == proposal_id))
+    return dict(row) if row is not None else None
+
+
+async def update_proposal(
+    conn: aiosqlite.Connection, proposal_id: int, values: dict[str, Any]
+) -> None:
+    await run(conn, update(proposals).where(proposals.c.id == proposal_id).values(**values))
+
+
+async def list_proposals(
+    conn: aiosqlite.Connection,
+    *,
+    project: str | None,
+    status: str | None,
+    before_id: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Proposals newest first (by id), older than ``before_id`` when given."""
+    stmt = select(*PROPOSAL_COLUMNS)
+    if project is not None:
+        stmt = stmt.where(proposals.c.project == project)
+    if status is not None:
+        stmt = stmt.where(proposals.c.status == status)
+    if before_id is not None:
+        stmt = stmt.where(proposals.c.id < before_id)
+    rows = await fetch_all(conn, stmt.order_by(proposals.c.id.desc()).limit(limit))
+    return [dict(row) for row in rows]

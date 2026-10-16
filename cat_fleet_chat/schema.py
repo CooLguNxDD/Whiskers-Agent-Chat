@@ -306,6 +306,35 @@ knowledge_facts = Table(
     Index("idx_knowledge_facts_status", "status", "id"),
 )
 
+# Schema v11. Proposals: suggested work for a project, public id ``P<id>``.
+# ``evidence`` is a JSON list of strings. ``post_id`` is the feed root post the
+# discussion hangs off; it is set in the same transaction that creates the row.
+# Status values and transitions live in ``proposals.py``.
+proposals = Table(
+    "proposals",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("project", Text, nullable=False),
+    Column("title", Text, nullable=False),
+    Column("summary", Text, nullable=False),
+    Column("evidence", Text, nullable=False, server_default=text("'[]'")),
+    Column("weight", Integer, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'open'")),
+    Column("author", Text, nullable=False),
+    Column("decided_by", Text),
+    Column("decided_at", Text),
+    Column("reason", Text),
+    Column("run_ref", Text),
+    Column("step_ref", Text),
+    Column("pr_ref", Text),
+    Column("post_id", Integer, ForeignKey("feed_posts.id")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Index("idx_proposals_project", "project", "id"),
+    Index("idx_proposals_status", "status", "id"),
+    Index("idx_proposals_post", "post_id"),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (

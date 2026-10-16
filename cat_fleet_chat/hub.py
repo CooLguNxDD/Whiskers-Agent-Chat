@@ -11,7 +11,7 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import embed, feed, knowledge, mailbox, store, validate
+from cat_fleet_chat import embed, feed, knowledge, mailbox, proposals, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -1372,6 +1372,53 @@ class Hub:
             raise HubError("post_deleted", f"post {found['id']} was deleted", 409, {"field": field})
         return found
 
+    async def _feed_insert(
+        self,
+        conn,
+        *,
+        author: str,
+        body: str,
+        parent_id: int | None,
+        root_id: int | None,
+        quote_of: int | None,
+        depth: int,
+        created_at: str,
+    ) -> dict[str, Any]:
+        """Insert one validated post with its hashtags and ``feed_post`` event, in the caller's transaction."""
+        tags = feed.extract_hashtags(body)
+        post_id = await store.insert_feed_post(
+            conn,
+            author=author,
+            body=body,
+            parent_id=parent_id,
+            root_id=root_id,
+            repost_of=None,
+            quote_of=quote_of,
+            depth=depth,
+            created_at=created_at,
+            tags=tags,
+        )
+        post = await self._feed_post_shape(conn, post_id)
+        await store.insert_event(
+            conn,
+            "feed_post",
+            None,
+            post_id,
+            {
+                "id": post_id,
+                "kind": post["kind"],
+                "author": author,
+                "parent_id": parent_id,
+                "root_id": post["root_id"],
+                "quote_of": quote_of,
+                "depth": depth,
+                "hashtags": tags,
+                "body": feed.event_snippet(body),
+            },
+            created_at,
+        )
+        return post
+
     async def feed_post(
         self,
         author: Any,
@@ -1398,7 +1445,6 @@ class Hub:
         key = client_request_id_fn(client_request_id)
         payload = {"author": clean_author, "body": clean_body, "parent_id": parent, "quote_of": quoted}
         digest = fingerprint("feed_post", payload) if key else None
-        tags = feed.extract_hashtags(clean_body)
 
         async def op(conn):
             if key and digest is not None:
@@ -1435,36 +1481,15 @@ class Hub:
             if quoted is not None:
                 quote_target = (await self._live_original(conn, quoted, "quote_of"))["id"]
             created_at = utc_now()
-            post_id = await store.insert_feed_post(
+            post = await self._feed_insert(
                 conn,
                 author=clean_author,
                 body=clean_body,
                 parent_id=parent,
                 root_id=root_id,
-                repost_of=None,
                 quote_of=quote_target,
                 depth=depth,
                 created_at=created_at,
-                tags=tags,
-            )
-            post = await self._feed_post_shape(conn, post_id)
-            await store.insert_event(
-                conn,
-                "feed_post",
-                None,
-                post_id,
-                {
-                    "id": post_id,
-                    "kind": post["kind"],
-                    "author": clean_author,
-                    "parent_id": parent,
-                    "root_id": post["root_id"],
-                    "quote_of": quote_target,
-                    "depth": depth,
-                    "hashtags": tags,
-                    "body": feed.event_snippet(clean_body),
-                },
-                created_at,
             )
             result = {"post": post}
             if key and digest is not None:
@@ -2016,6 +2041,202 @@ class Hub:
                 exc.message,
             )
             result["knowledge_error"] = exc.message
+
+    # ---- proposals --------------------------------------------------------
+
+    async def create_proposal(
+        self,
+        author: Any,
+        project: Any,
+        title: Any,
+        summary: Any,
+        weight: Any,
+        evidence: Any = None,
+        run_ref: Any = None,
+        step_ref: Any = None,
+        pr_ref: Any = None,
+        client_request_id: Any = None,
+    ) -> dict[str, Any]:
+        """Open a proposal ``P<n>`` and its ``#proposal`` feed root post, in one transaction.
+
+        Discussion is replies to ``post_id``. ``client_request_id`` makes a retry
+        return the first result. Feed post hooks (LEARNED facts) do not run for
+        the root post.
+        """
+        clean = {
+            "author": handle(author, "author"),
+            "project": proposals.project_slug(project),
+            "title": proposals.title_text(title),
+            "summary": proposals.summary_text(summary),
+            "weight": proposals.weight_value(weight),
+            "evidence": proposals.evidence_list(evidence),
+        }
+        for name, value in (("run_ref", run_ref), ("step_ref", step_ref), ("pr_ref", pr_ref)):
+            ref = proposals.ref_text(value, name)
+            if ref is not None:
+                clean[name] = ref
+        key = client_request_id_fn(client_request_id)
+        digest = fingerprint("proposal", clean) if key else None
+
+        async def op(conn):
+            if key and digest is not None:
+                prior = await store.get_idempotency(conn, key)
+                if prior is not None:
+                    if prior["fingerprint"] != digest or prior["kind"] != "proposal":
+                        raise HubError(
+                            "idempotency_conflict",
+                            "client_request_id was already used with a different payload",
+                            409,
+                            {"client_request_id": key},
+                        )
+                    return prior["result"]
+            now = utc_now()
+            number = await store.insert_proposal(
+                conn,
+                {
+                    **clean,
+                    "evidence": proposals.evidence_json(clean["evidence"]),
+                    "status": "open",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            post = await self._feed_insert(
+                conn,
+                author=clean["author"],
+                body=proposals.post_body(number, clean["title"], clean["summary"]),
+                parent_id=None,
+                root_id=None,
+                quote_of=None,
+                depth=0,
+                created_at=now,
+            )
+            await store.update_proposal(conn, number, {"post_id": post["id"]})
+            row = await store.get_proposal(conn, number)
+            assert row is not None
+            shaped = proposals.shape_proposal(row)
+            await store.insert_event(
+                conn,
+                "proposal_created",
+                None,
+                number,
+                proposals.event_payload(shaped, actor=clean["author"]),
+                now,
+            )
+            result = {"proposal": shaped}
+            if key and digest is not None:
+                await store.insert_idempotency(conn, key, "proposal", digest, result, now)
+            return result
+
+        return await self._txn(op)
+
+    async def get_proposal(self, proposal_id: Any) -> dict[str, Any]:
+        """One proposal by ``P<n>`` or ``n``."""
+        number = proposals.proposal_number(proposal_id)
+
+        async def op(conn):
+            return await store.get_proposal(conn, number)
+
+        row = await self.db.read(op)
+        if row is None:
+            raise HubError("not_found", f"proposal {proposals.public_id(number)} not found", 404)
+        return {"proposal": proposals.shape_proposal(row)}
+
+    async def list_proposals(
+        self,
+        project: Any = None,
+        status: Any = None,
+        cursor: Any = None,
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        """Proposals newest first with opaque ``cursor`` paging. Filters are exact matches."""
+        clean_project = proposals.optional_project(project)
+        clean_status = proposals.optional_status(status)
+        before = feed.decode_cursor(cursor)
+        clean_limit = page_limit(limit)
+
+        async def op(conn):
+            return await store.list_proposals(
+                conn, project=clean_project, status=clean_status, before_id=before, limit=clean_limit + 1
+            )
+
+        rows = await self.db.read(op)
+        has_more = len(rows) > clean_limit
+        found = [proposals.shape_proposal(row) for row in rows[:clean_limit]]
+        return {
+            "proposals": found,
+            "next_cursor": feed.encode_cursor(found[-1]["number"]) if has_more and found else None,
+            "has_more": has_more,
+        }
+
+    async def update_proposal(self, proposal_id: Any, actor: Any, changes: Any) -> dict[str, Any]:
+        """Edit fields and/or change status. ``changes`` keys: ``proposals.EDITABLE_FIELDS``,
+        ``status`` and ``reason``.
+
+        Fields are editable while the proposal is ``open`` or ``accepted``;
+        ``building`` / ``built`` take only the refs. A status change follows
+        ``proposals.TRANSITIONS``. Moving to accepted, rejected or withdrawn
+        records ``decided_by``, ``decided_at`` and ``reason`` (required to
+        reject); reopening clears them. A change that alters nothing returns
+        ``idempotent: true`` and emits no event.
+        """
+        number = proposals.proposal_number(proposal_id)
+        clean_actor = handle(actor, "actor")
+        fields, target, reason = proposals.clean_changes(changes)
+        if target in proposals.REASON_REQUIRED and reason is None:
+            raise HubError(
+                "validation_error", f"a reason is required to mark a proposal {target}", 400, {"field": "reason"}
+            )
+
+        async def op(conn):
+            row = await store.get_proposal(conn, number)
+            if row is None:
+                raise HubError("not_found", f"proposal {proposals.public_id(number)} not found", 404)
+            current = proposals.shape_proposal(row)
+            previous = current["status"]
+            if target is not None:
+                proposals.check_transition(previous, target)
+            try:
+                proposals.check_editable(previous, fields)
+            except HubError:
+                # A reopen (or other move) may carry edits the new status allows.
+                if target is None:
+                    raise
+                proposals.check_editable(target, fields)
+            changed = [name for name, value in fields.items() if current[name] != value]
+            if not changed and target is None:
+                return {"proposal": current, "previous_status": previous, "idempotent": True}
+            now = utc_now()
+            values: dict[str, Any] = {name: fields[name] for name in changed}
+            if "evidence" in values:
+                values["evidence"] = proposals.evidence_json(values["evidence"])
+            if target is not None:
+                values["status"] = target
+                if target in proposals.DECISION_STATUSES:
+                    values.update(decided_by=clean_actor, decided_at=now, reason=reason)
+                elif target == "open":
+                    values.update(decided_by=None, decided_at=None, reason=None)
+            values["updated_at"] = now
+            await store.update_proposal(conn, number, values)
+            fresh = await store.get_proposal(conn, number)
+            assert fresh is not None
+            shaped = proposals.shape_proposal(fresh)
+            await store.insert_event(
+                conn,
+                "proposal_updated",
+                None,
+                number,
+                proposals.event_payload(
+                    shaped,
+                    actor=clean_actor,
+                    previous_status=previous if target is not None else None,
+                    changed=changed,
+                ),
+                now,
+            )
+            return {"proposal": shaped, "previous_status": previous, "idempotent": False}
+
+        return await self._txn(op)
 
     @staticmethod
     def _hook_ident(value: Any) -> int | str:
