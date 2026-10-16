@@ -309,6 +309,42 @@ async def list_tasks(
         return exc.mcp_body()
 
 
+async def fleet_search(
+    query: str,
+    kind: list[str] | str | None = None,
+    channel: str | None = None,
+    author: str | None = None,
+    since: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """Full-text search (BM25) over messages, task titles and descriptions, and attachment filenames.
+
+    Words are matched as plain terms (all must appear); a trailing ``*`` makes
+    a word a prefix. Filters: ``kind`` (``message``, ``task``, ``attachment``;
+    one or a list), ``channel`` name, ``author`` handle, ``since`` (ISO time or
+    a window like ``24h`` / ``7d``). ``limit`` defaults to 20 (max 100); page
+    with ``offset`` / ``next_offset``. Archived channels are included. Each hit
+    has ``kind``, ``id``, ``channel``, ``author``, ``created_at``, a
+    ``snippet`` with matches in ``[brackets]``, and ``score`` (higher is better).
+    ``mode`` is ``bm25``; ``vector`` and ``hybrid`` are not available yet.
+    """
+    try:
+        return await get_hub().search(
+            query,
+            kind=kind,
+            channel=channel,
+            author=author,
+            since=since,
+            limit=limit,
+            offset=offset,
+            mode=mode,
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 async def list_agents() -> dict[str, Any]:
     """Handles seen on messages or task history, with last activity.
 
@@ -437,6 +473,7 @@ def build_mcp() -> FastMCP:
         claim_task,
         update_task_status,
         list_tasks,
+        fleet_search,
         list_agents,
         list_destinations,
         list_webhooks,

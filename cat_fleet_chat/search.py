@@ -1,0 +1,193 @@
+"""Search input rules and result shaping. No SQL here: the FTS5 query lives in ``store.py``.
+
+User text never reaches ``MATCH`` as written. :func:`build_match` keeps only
+word tokens, quotes each one as an FTS5 string, and joins them with an
+implicit AND, so quotes, ``*``, ``NEAR(``, ``AND``/``OR`` and column filters
+in the input cannot form FTS5 syntax. A trailing ``*`` on a word is kept as a
+prefix search on that word.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from cat_fleet_chat.errors import HubError
+
+# Kinds the index holds today. S05 adds "knowledge" (its rowid code is reserved
+# in schema.SEARCH_KIND_CODES).
+SEARCH_KINDS = ("message", "task", "attachment")
+SEARCH_MODES = ("bm25", "vector", "hybrid")
+AVAILABLE_MODES = frozenset({"bm25"})
+
+QUERY_MAX = 10_000
+TERMS_MAX = 32
+TERM_MAX = 64
+LIMIT_DEFAULT = 20
+LIMIT_MAX = 100
+OFFSET_MAX = 10_000
+
+# bm25 column weights: (title, body). A word in a task title or a filename
+# outranks the same word somewhere in a long message.
+BM25_WEIGHTS = (4.0, 1.0)
+SNIPPET_MARKERS = ("[", "]", "…")
+SNIPPET_TOKENS = 16
+
+# Words FTS5 reads as operators when bare. Quoted they are ordinary terms, but
+# a query of only these words is almost always an operator typed by habit.
+_OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
+# Letters and digits only. The unicode61 tokenizer splits on "_" too.
+_TOKEN_RE = re.compile(r"([^\W_]+)(\*?)", re.UNICODE)
+_RELATIVE_RE = re.compile(r"^\s*(\d{1,6})\s*([mhdw])\s*$", re.IGNORECASE)
+_UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
+
+
+def _fail(message: str, field: str) -> HubError:
+    return HubError("validation_error", message, 400, {"field": field})
+
+
+def query_text(value: Any) -> str:
+    """The raw query string. Missing or non-text is a 400; empty text is allowed."""
+    if not isinstance(value, str):
+        raise _fail("q must be a string", "q")
+    if len(value) > QUERY_MAX:
+        raise _fail(f"q must be at most {QUERY_MAX} characters", "q")
+    return value
+
+
+def query_terms(value: str) -> list[tuple[str, bool]]:
+    """Word tokens and whether each ends in ``*`` (prefix). At most :data:`TERMS_MAX`."""
+    found = [(word[:TERM_MAX], bool(star) and len(word) <= TERM_MAX) for word, star in _TOKEN_RE.findall(value)]
+    words = [item for item in found if item[0] not in _OPERATORS]
+    return words[:TERMS_MAX]
+
+
+def build_match(value: str) -> str | None:
+    """A safe FTS5 MATCH expression for ``value``, or ``None`` when nothing is searchable."""
+    terms = query_terms(value)
+    if not terms:
+        return None
+    # \w never matches '"', but double it anyway so the quoting stays correct
+    # if the token rule ever changes.
+    return " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' + ("*" if prefix else "") for word, prefix in terms)
+
+
+def search_mode(value: Any) -> str:
+    if value is None or value == "":
+        return "bm25"
+    mode = str(value).strip().lower()
+    if mode not in SEARCH_MODES:
+        raise _fail(f"mode must be one of {', '.join(SEARCH_MODES)}", "mode")
+    if mode not in AVAILABLE_MODES:
+        raise HubError(
+            "not_available",
+            f"search mode {mode} is not available yet; use bm25",
+            400,
+            {"mode": mode, "available": sorted(AVAILABLE_MODES)},
+        )
+    return mode
+
+
+def search_kinds(value: Any) -> frozenset[str] | None:
+    """One kind, a comma list, or a list. ``None`` means every kind."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        items = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        items = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        raise _fail("kind must be a string or a list", "kind")
+    unknown = sorted(set(items) - set(SEARCH_KINDS))
+    if unknown:
+        raise _fail(
+            f"unknown kind {', '.join(unknown)}; expected {', '.join(SEARCH_KINDS)}", "kind"
+        )
+    return frozenset(items) or None
+
+
+def search_limit(value: Any) -> int:
+    if value is None or value == "":
+        return LIMIT_DEFAULT
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise _fail("limit must be an integer", "limit") from exc
+    if parsed < 1:
+        raise _fail("limit must be at least 1", "limit")
+    return min(parsed, LIMIT_MAX)
+
+
+def search_offset(value: Any) -> int:
+    if value is None or value == "":
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise _fail("offset must be an integer", "offset") from exc
+    if parsed < 0 or parsed > OFFSET_MAX:
+        raise _fail(f"offset must be 0..{OFFSET_MAX}", "offset")
+    return parsed
+
+
+def search_since(value: Any, now: datetime | None = None) -> str | None:
+    """An ISO timestamp, or a relative window (``30m``, ``24h``, ``7d``, ``2w``), as UTC ISO text.
+
+    Stored ``created_at`` values are ``datetime.isoformat()`` in UTC, so the
+    returned string compares correctly as text.
+    """
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise _fail("since must be an ISO timestamp or a window like 24h", "since")
+    relative = _RELATIVE_RE.match(value)
+    if relative:
+        amount, unit = int(relative.group(1)), relative.group(2).lower()
+        start = (now or datetime.now(timezone.utc)) - timedelta(**{_UNITS[unit]: amount})
+        return start.astimezone(timezone.utc).isoformat()
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise _fail("since must be an ISO timestamp or a window like 24h", "since") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def score(bm25_rank: float) -> float:
+    """``bm25()`` is negative and lower-is-better; expose a positive higher-is-better score."""
+    return round(max(0.0, -float(bm25_rank)), 6)
+
+
+def shape_hit(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": row["kind"],
+        "id": int(row["ref_id"]),
+        "channel": row["channel"],
+        "author": row["author"] or None,
+        "created_at": row["created_at"],
+        "snippet": row["snippet"],
+        "score": score(row["bm25_rank"]),
+    }
+
+
+def shape_results(
+    rows: list[dict[str, Any]], total: int, *, limit: int, offset: int, mode: str = "bm25"
+) -> dict[str, Any]:
+    end = offset + len(rows)
+    return {
+        "results": [shape_hit(row) for row in rows],
+        "total_estimate": total,
+        "mode": mode,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": end if end < total else None,
+    }
+
+
+def empty_results(*, limit: int, offset: int, mode: str = "bm25") -> dict[str, Any]:
+    return shape_results([], 0, limit=limit, offset=offset, mode=mode)

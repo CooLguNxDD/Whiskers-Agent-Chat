@@ -10,6 +10,7 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
+from cat_fleet_chat import search as search_rules
 from cat_fleet_chat import store
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -136,6 +137,15 @@ class Hub:
         if channel is not None:
             _require_writable(channel)
 
+    async def _index(self, conn, kind: str, ref_id: int) -> None:
+        """Refresh the search entry for one row, inside the caller's write transaction."""
+        if not self.db.fts5_available:
+            return
+        if kind == "message":
+            await store.index_message(conn, ref_id)
+        else:
+            await store.reindex(conn, kind, ref_id)
+
     async def list_channels(
         self, include_archived: Any = False, state: Any = None
     ) -> dict[str, Any]:
@@ -241,6 +251,7 @@ class Hub:
                 await store.insert_task_event(
                     conn, task["id"], actor, task["status"], "cancelled", reason, created_at
                 )
+                await self._index(conn, "task", task["id"])
                 fresh_task = await store.get_task(conn, task["id"])
                 await store.insert_event(
                     conn, "task.updated", found["id"], task["id"], fresh_task, created_at
@@ -423,6 +434,7 @@ class Hub:
                 destination=destination,
                 origin=clean_origin,
             )
+            await self._index(conn, "message", message_id)
             message = await store.get_message(conn, message_id)
             assert message is not None
             await store.insert_event(
@@ -675,6 +687,7 @@ class Hub:
             await store.insert_task_event(
                 conn, task_id, clean_actor, None, status, "", created_at
             )
+            await self._index(conn, "task", task_id)
             task = await store.get_task(conn, task_id)
             assert task is not None
             await store.insert_event(
@@ -733,6 +746,7 @@ class Hub:
             await store.insert_task_event(
                 conn, clean_id, clean_actor, "open", "claimed", "", created_at
             )
+            await self._index(conn, "task", clean_id)
             task = await store.get_task(conn, clean_id)
             assert task is not None
             await store.insert_event(
@@ -805,6 +819,7 @@ class Hub:
                 clean_note,
                 created_at,
             )
+            await self._index(conn, "task", clean_id)
             task = await store.get_task(conn, clean_id)
             assert task is not None
             await store.insert_event(
@@ -839,6 +854,68 @@ class Hub:
 
         tasks = await self.db.read(op)
         return {"tasks": tasks}
+
+    async def search(
+        self,
+        q: Any,
+        *,
+        kind: Any = None,
+        channel: Any = None,
+        author: Any = None,
+        since: Any = None,
+        limit: Any = None,
+        offset: Any = None,
+        mode: Any = None,
+    ) -> dict[str, Any]:
+        """BM25 full-text search over messages, tasks and attachment filenames.
+
+        Archived channels are searched too. A query with no searchable words
+        returns no results rather than an error. ``mode`` other than ``bm25``
+        is reserved and answers ``not_available``.
+        """
+        clean_mode = search_rules.search_mode(mode)
+        text = search_rules.query_text(q)
+        kinds = search_rules.search_kinds(kind)
+        clean_channel = channel_name(channel) if channel not in (None, "") else None
+        clean_author = handle(author, "author") if author not in (None, "") else None
+        clean_since = search_rules.search_since(since)
+        clean_limit = search_rules.search_limit(limit)
+        clean_offset = search_rules.search_offset(offset)
+        if not self.db.fts5_available:
+            raise HubError(
+                "search_unavailable",
+                "full-text search needs SQLite with FTS5, which this build lacks",
+                501,
+            )
+        match = search_rules.build_match(text)
+
+        async def op(conn):
+            channel_id = None
+            if clean_channel is not None:
+                found = await store.get_channel_by_name(conn, clean_channel)
+                if found is None:
+                    raise HubError("not_found", f"channel {clean_channel} not found", 404)
+                channel_id = found["id"]
+            if match is None:
+                return [], 0
+            return await store.search_index(
+                conn,
+                match,
+                kinds=kinds,
+                channel_id=channel_id,
+                author=clean_author,
+                since=clean_since,
+                limit=clean_limit,
+                offset=clean_offset,
+                weights=search_rules.BM25_WEIGHTS,
+                snippet_markers=search_rules.SNIPPET_MARKERS,
+                snippet_tokens=search_rules.SNIPPET_TOKENS,
+            )
+
+        rows, total = await self.db.read(op)
+        return search_rules.shape_results(
+            rows, total, limit=clean_limit, offset=clean_offset, mode=clean_mode
+        )
 
     async def get_attachment(self, attachment_id: Any) -> dict[str, Any]:
         clean_id = require_id(attachment_id, "attachment_id")

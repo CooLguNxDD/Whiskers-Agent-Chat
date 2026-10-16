@@ -1,4 +1,4 @@
-"""All SQL for channels, messages, mentions, tasks, attachments, and the event stream.
+"""All SQL for channels, messages, mentions, tasks, attachments, the event stream, and search.
 
 Statements are built with SQLAlchemy Core (see ``schema.py``) and run on the
 caller's aiosqlite connection. Callers own the transaction. This module does
@@ -13,9 +13,12 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import aiosqlite
-from sqlalchemy import delete, func, insert, literal, select, union_all, update
+from sqlalchemy import bindparam, delete, func, insert, literal, select, text, union_all, update
 
 from cat_fleet_chat.schema import (
+    SEARCH_INDEX,
+    SEARCH_KIND_CODES,
+    SEARCH_ROWID_STRIDE,
     attachments,
     channels,
     events,
@@ -25,6 +28,7 @@ from cat_fleet_chat.schema import (
     mentions,
     messages,
     run,
+    search_rowid,
     task_events,
     tasks,
     webhooks,
@@ -719,6 +723,144 @@ async def list_tasks(
         stmt = stmt.where(tasks.c.status.not_in(skipped))
     rows = await fetch_all(conn, stmt.order_by(tasks.c.id.asc()))
     return [await pack_task(conn, row) for row in rows]
+
+
+# ---- full-text search (FTS5, schema v6) ----------------------------------
+#
+# The index is a virtual table, so these statements are ``text()`` rather than
+# Core table expressions. Every value is a bound parameter; the MATCH string
+# is built by ``search.build_match`` and never comes raw from a caller.
+
+_INDEX_COLUMNS = (
+    f"INSERT INTO {SEARCH_INDEX} (rowid, title, body, kind, ref_id, channel_id, author, created_at) "
+)
+
+_INDEX_MESSAGE = text(
+    _INDEX_COLUMNS
+    + f"SELECT m.id * {SEARCH_ROWID_STRIDE} + {SEARCH_KIND_CODES['message']}, '', m.text, "
+    "'message', m.id, m.channel_id, m.author, m.created_at FROM messages m WHERE m.id = :ref_id"
+)
+
+_INDEX_TASK = text(
+    _INDEX_COLUMNS
+    + f"SELECT t.id * {SEARCH_ROWID_STRIDE} + {SEARCH_KIND_CODES['task']}, t.title, t.description, "
+    "'task', t.id, t.channel_id, COALESCE(t.assignee, (SELECT e.actor FROM task_events e "
+    "WHERE e.task_id = t.id ORDER BY e.id DESC LIMIT 1), ''), t.created_at "
+    "FROM tasks t WHERE t.id = :ref_id"
+)
+
+_INDEX_ATTACHMENT = text(
+    _INDEX_COLUMNS
+    + f"SELECT a.id * {SEARCH_ROWID_STRIDE} + {SEARCH_KIND_CODES['attachment']}, a.filename, "
+    "a.content_type, 'attachment', a.id, m.channel_id, m.author, a.created_at "
+    "FROM attachments a JOIN messages m ON m.id = a.message_id WHERE a.id = :ref_id"
+)
+
+_INDEX_SOURCES = {"message": _INDEX_MESSAGE, "task": _INDEX_TASK, "attachment": _INDEX_ATTACHMENT}
+
+_UNINDEX = text(f"DELETE FROM {SEARCH_INDEX} WHERE rowid = :rowid")
+
+
+async def unindex(conn: aiosqlite.Connection, kind: str, ref_id: int) -> None:
+    await run(conn, _UNINDEX.bindparams(rowid=search_rowid(kind, ref_id)))
+
+
+async def reindex(conn: aiosqlite.Connection, kind: str, ref_id: int) -> None:
+    """Replace the index entry for one source row with its current contents."""
+    await unindex(conn, kind, ref_id)
+    await run(conn, _INDEX_SOURCES[kind].bindparams(ref_id=ref_id))
+
+
+async def index_message(conn: aiosqlite.Connection, message_id: int) -> None:
+    """Index a message and every attachment it carries."""
+    await reindex(conn, "message", message_id)
+    rows = await fetch_all(
+        conn, select(attachments.c.id).where(attachments.c.message_id == message_id)
+    )
+    for row in rows:
+        await reindex(conn, "attachment", int(row["id"]))
+
+
+def _search_where(
+    *,
+    kinds: Iterable[str] | None,
+    channel_id: int | None,
+    author: str | None,
+    since: str | None,
+) -> tuple[str, dict[str, Any]]:
+    clauses = [f"{SEARCH_INDEX} MATCH :match"]
+    params: dict[str, Any] = {}
+    wanted = sorted(kinds or ())
+    if wanted:
+        clauses.append(f"{SEARCH_INDEX}.kind IN :kinds")
+        params["kinds"] = wanted
+    if channel_id is not None:
+        clauses.append(f"{SEARCH_INDEX}.channel_id = :channel_id")
+        params["channel_id"] = channel_id
+    if author is not None:
+        clauses.append(f"{SEARCH_INDEX}.author = :author")
+        params["author"] = author
+    if since is not None:
+        clauses.append(f"{SEARCH_INDEX}.created_at >= :since")
+        params["since"] = since
+    return " AND ".join(clauses), params
+
+
+def _bind(sql: str, params: dict[str, Any]):
+    stmt = text(sql)
+    if "kinds" in params:
+        stmt = stmt.bindparams(bindparam("kinds", expanding=True))
+    return stmt.bindparams(**params)
+
+
+async def search_index(
+    conn: aiosqlite.Connection,
+    match: str,
+    *,
+    kinds: Iterable[str] | None,
+    channel_id: int | None,
+    author: str | None,
+    since: str | None,
+    limit: int,
+    offset: int,
+    weights: tuple[float, float],
+    snippet_markers: tuple[str, str, str],
+    snippet_tokens: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """One page of BM25-ranked hits plus the total match count.
+
+    ``bm25()`` is lower-is-better; rows come back best first with the raw
+    value in ``rank``. Ties go to the newer row.
+    """
+    where, params = _search_where(kinds=kinds, channel_id=channel_id, author=author, since=since)
+    params["match"] = match
+    title_weight, body_weight = weights
+    opening, closing, ellipsis = snippet_markers
+    page_sql = (
+        f"SELECT {SEARCH_INDEX}.kind AS kind, {SEARCH_INDEX}.ref_id AS ref_id, "
+        f"{SEARCH_INDEX}.channel_id AS channel_id, channels.name AS channel, "
+        f"{SEARCH_INDEX}.author AS author, {SEARCH_INDEX}.created_at AS created_at, "
+        f"snippet({SEARCH_INDEX}, -1, :open, :close, :ellipsis, :tokens) AS snippet, "
+        f"bm25({SEARCH_INDEX}, {float(title_weight)}, {float(body_weight)}) AS bm25_rank "
+        f"FROM {SEARCH_INDEX} LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id "
+        f"WHERE {where} ORDER BY bm25_rank ASC, {SEARCH_INDEX}.created_at DESC, {SEARCH_INDEX}.rowid DESC "
+        "LIMIT :limit OFFSET :offset"
+    )
+    page_params = {
+        **params,
+        "open": opening,
+        "close": closing,
+        "ellipsis": ellipsis,
+        "tokens": snippet_tokens,
+        "limit": limit,
+        "offset": offset,
+    }
+    rows = await fetch_all(conn, _bind(page_sql, page_params))
+    count_row = await fetch_one(
+        conn, _bind(f"SELECT count(*) AS n FROM {SEARCH_INDEX} WHERE {where}", params)
+    )
+    total = int(count_row["n"]) if count_row is not None else 0
+    return [dict(row) for row in rows], total
 
 
 async def list_agents(conn: aiosqlite.Connection) -> list[dict[str, Any]]:
