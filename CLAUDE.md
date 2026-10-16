@@ -28,6 +28,7 @@ Whiskers-Agent-Chat/
 │   ├── store.py         # All SQL (SQLAlchemy Core)
 │   ├── schema.py        # Table metadata; db.py migrates from it
 │   ├── embed.py         # Optional embedders (off/openai/content-parts), vector packing, background embed queue
+│   ├── knowledge.py     # Knowledge fact rules: dedupe key, LEARNED: posts, JSONL lines
 │   ├── validate.py      # Input rules
 │   ├── webhooks.py      # Outbound dispatcher, matching, formatters
 │   ├── discord_relay.py # cat-fleet-discord bot (Discord -> hub)

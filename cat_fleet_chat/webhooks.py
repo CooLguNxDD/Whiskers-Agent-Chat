@@ -49,7 +49,7 @@ def event_actor(event: dict[str, Any]) -> str | None:
     if kind == "task.updated":
         history = payload.get("events") or []
         return history[-1].get("actor") if history else None
-    if kind in {"feed_post", "feed_repost"}:
+    if kind in {"feed_post", "feed_repost", "knowledge_fact"}:
         return payload.get("author")
     if kind == "feed_follow":
         return payload.get("follower")
@@ -172,6 +172,10 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
         subject = _clip(str(payload.get("subject") or ""), 120)
         about = f": {subject}" if subject else ""
         return f"📬 mail #{payload.get('id')} from `{payload.get('sender', '?')}` to `{payload.get('recipient', '?')}`{about}"
+    if kind == "knowledge_fact":
+        where = f"{payload.get('project', '?')}/{payload.get('topic', '?')}"
+        fact = _clip(" ".join(str(payload.get("fact", "")).split()), QUOTE_CLIP)
+        return f"💡 `{payload.get('author', '?')}` learned ({where}): {fact}"
     if kind == "webhook.ping":
         return f"🔔 Cat Fleet webhook **{payload.get('name')}** is connected"
     return f"{kind} #{event.get('id')}"

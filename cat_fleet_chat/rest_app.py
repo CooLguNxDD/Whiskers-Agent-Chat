@@ -8,7 +8,7 @@ import json
 from typing import Any
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from cat_fleet_chat.config import Settings, allowed_hostnames, allowed_origins
@@ -622,6 +622,97 @@ async def feed_trending(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+# ---- knowledge facts ---------------------------------------------------
+
+# 5000 lines of up to 2000-character facts, with JSON overhead.
+KNOWLEDGE_IMPORT_BODY_MAX = 16 * 1024 * 1024
+
+
+async def knowledge_add(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).knowledge_add(
+            body.get("project"),
+            body.get("fact"),
+            topic=body.get("topic"),
+            author=_author(body),
+            source_run=body.get("source_run", body.get("run")),
+            source_step=body.get("source_step", body.get("step")),
+        )
+        return JSONResponse(result, status_code=201 if result["created"] else 200)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_list(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        result = await _hub(request).knowledge_list(
+            project=params.get("project"),
+            topic=params.get("topic"),
+            status=params.get("status"),
+            author=params.get("author"),
+            cursor=params.get("cursor"),
+            limit=params.get("limit"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_set_status(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).knowledge_set_status(
+            _caller(request, body, "actor"), request.path_params["fact_id"], body.get("status")
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_topics(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).knowledge_topics(request.query_params.get("project")))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_import(request: Request) -> JSONResponse:
+    """``POST /api/v1/knowledge/import``: an ``application/x-ndjson`` body, or ``{"lines": [...]}``.
+
+    The importing ``author`` comes from the JSON body or the query string.
+    """
+    try:
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type in ("application/x-ndjson", "application/jsonl", "application/jsonlines"):
+            raw = await _read_capped(request, KNOWLEDGE_IMPORT_BODY_MAX)
+            try:
+                lines: Any = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise HubError("validation_error", "body must be UTF-8", 400) from exc
+            body: dict[str, Any] = {}
+        else:
+            body = await _body(request)
+            lines = body.get("lines")
+        result = await _hub(request).knowledge_import_jsonl(lines, _caller(request, body, "author"))
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_export(request: Request) -> Response:
+    """``GET /api/v1/knowledge/export``: facts as ``application/x-ndjson``."""
+    try:
+        params = request.query_params
+        result = await _hub(request).knowledge_export_jsonl(
+            project=params.get("project"), status=params.get("status") or "active"
+        )
+        return Response(result["jsonl"], media_type="application/x-ndjson")
+    except HubError as exc:
+        return _json_error(exc)
+
+
 HOOK_BODY_MAX = 64 * 1024
 
 
@@ -784,6 +875,12 @@ def api_routes() -> list[Route]:
         Route("/api/v1/feed/follows/{handle}", feed_following, methods=["GET"]),
         Route("/api/v1/feed/followers/{handle}", feed_followers, methods=["GET"]),
         Route("/api/v1/feed/tags/trending", feed_trending, methods=["GET"]),
+        Route("/api/v1/knowledge/facts", knowledge_add, methods=["POST"]),
+        Route("/api/v1/knowledge/facts", knowledge_list, methods=["GET"]),
+        Route("/api/v1/knowledge/facts/{fact_id:int}", knowledge_set_status, methods=["PATCH"]),
+        Route("/api/v1/knowledge/topics", knowledge_topics, methods=["GET"]),
+        Route("/api/v1/knowledge/import", knowledge_import, methods=["POST"]),
+        Route("/api/v1/knowledge/export", knowledge_export, methods=["GET"]),
     ]
 
 

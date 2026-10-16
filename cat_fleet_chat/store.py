@@ -18,6 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from cat_fleet_chat.mailbox import mail_row
 from cat_fleet_chat.schema import (
+    KNOWLEDGE_TITLE_SQL,
     SEARCH_INDEX,
     SEARCH_KIND_CODES,
     SEARCH_ROWID_STRIDE,
@@ -31,6 +32,7 @@ from cat_fleet_chat.schema import (
     fetch_all,
     fetch_one,
     idempotency,
+    knowledge_facts,
     mailbox,
     mentions,
     messages,
@@ -915,7 +917,27 @@ _INDEX_ATTACHMENT = text(
     "FROM attachments a JOIN messages m ON m.id = a.message_id WHERE a.id = :ref_id"
 )
 
-_INDEX_SOURCES = {"message": _INDEX_MESSAGE, "task": _INDEX_TASK, "attachment": _INDEX_ATTACHMENT}
+# Only active facts are indexed, so a reindex after a status change drops the rest.
+_INDEX_KNOWLEDGE = text(
+    _INDEX_COLUMNS
+    + f"SELECT k.id * {SEARCH_ROWID_STRIDE} + {SEARCH_KIND_CODES['knowledge']}, {KNOWLEDGE_TITLE_SQL}, "
+    "k.fact, 'knowledge', k.id, NULL, k.author, k.created_at FROM knowledge_facts k "
+    "WHERE k.id = :ref_id AND k.status = 'active'"
+)
+
+_INDEX_SOURCES = {
+    "message": _INDEX_MESSAGE,
+    "task": _INDEX_TASK,
+    "attachment": _INDEX_ATTACHMENT,
+    "knowledge": _INDEX_KNOWLEDGE,
+}
+
+# Hits on a fact carry its project and topic. The join is by primary key and
+# never drives the query: search_index stays the outer table.
+_KNOWLEDGE_JOIN = (
+    f"LEFT JOIN knowledge_facts kf ON {SEARCH_INDEX}.kind = 'knowledge' AND kf.id = {SEARCH_INDEX}.ref_id "
+)
+_KNOWLEDGE_FIELDS = "kf.project AS project, kf.topic AS topic, "
 
 _UNINDEX = text(f"DELETE FROM {SEARCH_INDEX} WHERE rowid = :rowid")
 
@@ -1000,10 +1022,12 @@ async def search_index(
         f"SELECT {SEARCH_INDEX}.kind AS kind, {SEARCH_INDEX}.ref_id AS ref_id, "
         f"{SEARCH_INDEX}.channel_id AS channel_id, channels.name AS channel, "
         f"{SEARCH_INDEX}.author AS author, {SEARCH_INDEX}.created_at AS created_at, "
-        f"snippet({SEARCH_INDEX}, -1, :open, :close, :ellipsis, :tokens) AS snippet, "
+        + _KNOWLEDGE_FIELDS
+        + f"snippet({SEARCH_INDEX}, -1, :open, :close, :ellipsis, :tokens) AS snippet, "
         f"bm25({SEARCH_INDEX}, {float(title_weight)}, {float(body_weight)}) AS bm25_rank "
         f"FROM {SEARCH_INDEX} LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id "
-        f"WHERE {where} ORDER BY bm25_rank ASC, {SEARCH_INDEX}.created_at DESC, {SEARCH_INDEX}.rowid DESC "
+        + _KNOWLEDGE_JOIN
+        + f"WHERE {where} ORDER BY bm25_rank ASC, {SEARCH_INDEX}.created_at DESC, {SEARCH_INDEX}.rowid DESC "
         "LIMIT :limit OFFSET :offset"
     )
     page_params = {
@@ -1157,9 +1181,12 @@ async def vector_candidates(
         f"{SEARCH_INDEX}.channel_id AS channel_id, channels.name AS channel, "
         f"{SEARCH_INDEX}.author AS author, {SEARCH_INDEX}.created_at AS created_at, "
         f"{SEARCH_INDEX}.title AS title, {SEARCH_INDEX}.body AS body, "
-        "embeddings.vector AS vector "
+        + _KNOWLEDGE_FIELDS
+        + "embeddings.vector AS vector "
         f"FROM {SEARCH_INDEX} CROSS JOIN embeddings ON {_EMBED_JOIN} AND embeddings.dim = :dim "
-        f"LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id WHERE {where}{tail}"
+        f"LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id "
+        + _KNOWLEDGE_JOIN
+        + f"WHERE {where}{tail}"
     )
     cursor = await run(conn, _bind(sql, params))
     async for row in cursor:
@@ -1439,3 +1466,108 @@ async def trending_tags(
         .limit(limit),
     )
     return [{"tag": row["tag"], "count": int(row["count"])} for row in rows]
+
+
+# ---- knowledge facts (schema v10) ------------------------------------------
+
+KNOWLEDGE_COLUMNS = (
+    knowledge_facts.c.id,
+    knowledge_facts.c.project,
+    knowledge_facts.c.topic,
+    knowledge_facts.c.fact,
+    knowledge_facts.c.source_run,
+    knowledge_facts.c.source_step,
+    knowledge_facts.c.author,
+    knowledge_facts.c.status,
+    knowledge_facts.c.created_at,
+    knowledge_facts.c.updated_at,
+)
+
+
+async def insert_knowledge(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(knowledge_facts).values(**values))
+    return int(cursor.lastrowid)
+
+
+async def get_knowledge(conn: aiosqlite.Connection, fact_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(*KNOWLEDGE_COLUMNS).where(knowledge_facts.c.id == fact_id))
+    return dict(row) if row is not None else None
+
+
+async def find_knowledge(conn: aiosqlite.Connection, project: str, norm: str) -> dict[str, Any] | None:
+    """The fact with dedupe key ``norm`` in ``project``, whatever its status."""
+    row = await fetch_one(
+        conn,
+        select(*KNOWLEDGE_COLUMNS).where(
+            knowledge_facts.c.project == project, knowledge_facts.c.norm == norm
+        ),
+    )
+    return dict(row) if row is not None else None
+
+
+def _knowledge_filters(stmt, *, project, topic, status, author):
+    if project is not None:
+        stmt = stmt.where(knowledge_facts.c.project == project)
+    if topic is not None:
+        stmt = stmt.where(knowledge_facts.c.topic == topic)
+    if status is not None:
+        stmt = stmt.where(knowledge_facts.c.status == status)
+    if author is not None:
+        stmt = stmt.where(knowledge_facts.c.author == author)
+    return stmt
+
+
+async def list_knowledge(
+    conn: aiosqlite.Connection,
+    *,
+    project: str | None,
+    topic: str | None,
+    status: str | None,
+    author: str | None,
+    before_id: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Facts newest first (by id), older than ``before_id`` when given."""
+    stmt = _knowledge_filters(
+        select(*KNOWLEDGE_COLUMNS), project=project, topic=topic, status=status, author=author
+    )
+    if before_id is not None:
+        stmt = stmt.where(knowledge_facts.c.id < before_id)
+    rows = await fetch_all(conn, stmt.order_by(knowledge_facts.c.id.desc()).limit(limit))
+    return [dict(row) for row in rows]
+
+
+async def export_knowledge(
+    conn: aiosqlite.Connection, *, project: str | None, status: str | None
+) -> list[dict[str, Any]]:
+    """Every matching fact, oldest first."""
+    stmt = _knowledge_filters(
+        select(*KNOWLEDGE_COLUMNS), project=project, topic=None, status=status, author=None
+    )
+    rows = await fetch_all(conn, stmt.order_by(knowledge_facts.c.id.asc()))
+    return [dict(row) for row in rows]
+
+
+async def set_knowledge_status(
+    conn: aiosqlite.Connection, fact_id: int, status: str, updated_at: str
+) -> None:
+    await run(
+        conn,
+        update(knowledge_facts)
+        .where(knowledge_facts.c.id == fact_id)
+        .values(status=status, updated_at=updated_at),
+    )
+
+
+async def knowledge_topics(
+    conn: aiosqlite.Connection, *, project: str | None, status: str | None
+) -> list[dict[str, Any]]:
+    """Fact counts per topic, most facts first."""
+    count = func.count().label("count")
+    stmt = _knowledge_filters(
+        select(knowledge_facts.c.topic, count), project=project, topic=None, status=status, author=None
+    )
+    rows = await fetch_all(
+        conn, stmt.group_by(knowledge_facts.c.topic).order_by(count.desc(), knowledge_facts.c.topic.asc())
+    )
+    return [{"topic": row["topic"], "count": int(row["count"])} for row in rows]
