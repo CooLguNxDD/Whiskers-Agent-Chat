@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -103,6 +104,8 @@ class Database:
         self._write: aiosqlite.Connection | None = None
         self._reads: list[aiosqlite.Connection] = []
         self._read_q: asyncio.Queue[aiosqlite.Connection] | None = None
+        # Set by _migrate. False when this SQLite build lacks FTS5.
+        self.fts5_available = False
 
     async def open(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +154,9 @@ class Database:
             )
             .values(state="archived"),
         )
+        # v6: the FTS5 search index. Optional: a SQLite built without FTS5
+        # still runs the hub, and search answers 501 instead.
+        self.fts5_available = await self._create_search_index(conn)
         now = func.datetime("now")
         for version in range(1, SCHEMA_VERSION + 1):
             await schema.run(
@@ -169,6 +175,17 @@ class Database:
         )
         await conn.commit()
         logger.info("schema ready at %s", self.db_path)
+
+    async def _create_search_index(self, conn: aiosqlite.Connection) -> bool:
+        """Create the FTS5 table if missing and index rows it does not hold yet."""
+        try:
+            await conn.execute(schema.SEARCH_INDEX_DDL)
+        except sqlite3.OperationalError as exc:
+            logger.warning("SQLite has no FTS5 (%s); search is disabled", exc)
+            return False
+        for statement in schema.search_backfill_sql():
+            await conn.execute(statement)
+        return True
 
     async def write(self, fn):
         """Run ``fn(conn)`` as the only writer. ``fn`` owns its transaction."""

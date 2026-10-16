@@ -49,6 +49,8 @@ EVENT_KINDS = frozenset(
         "feed_post",
         "feed_repost",
         "feed_follow",
+        # A direct mail was sent. The payload never carries the body.
+        "mail",
     }
 )
 

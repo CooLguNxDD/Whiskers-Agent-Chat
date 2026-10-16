@@ -1,4 +1,4 @@
-"""All SQL for channels, messages, mentions, tasks, attachments, the feed, and the event stream.
+"""All SQL for channels, messages, mentions, tasks, attachments, mail, the feed, the event stream, and search.
 
 Statements are built with SQLAlchemy Core (see ``schema.py``) and run on the
 caller's aiosqlite connection. Callers own the transaction. This module does
@@ -13,9 +13,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import aiosqlite
-from sqlalchemy import delete, func, insert, literal, select, union_all, update
+from sqlalchemy import bindparam, case, delete, func, insert, literal, select, text, union_all, update
 
+from cat_fleet_chat.mailbox import mail_row
 from cat_fleet_chat.schema import (
+    SEARCH_INDEX,
+    SEARCH_KIND_CODES,
+    SEARCH_ROWID_STRIDE,
     attachments,
     channels,
     events,
@@ -25,9 +29,11 @@ from cat_fleet_chat.schema import (
     fetch_all,
     fetch_one,
     idempotency,
+    mailbox,
     mentions,
     messages,
     run,
+    search_rowid,
     task_events,
     tasks,
     webhooks,
@@ -454,6 +460,140 @@ async def events_after(
     return [_event_row(row) for row in rows]
 
 
+async def insert_mail(
+    conn: aiosqlite.Connection,
+    *,
+    recipient: str,
+    sender: str,
+    subject: str,
+    body: str,
+    reply_to: int | None,
+    created_at: str,
+    message_id: int | None = None,
+) -> int:
+    cursor = await run(
+        conn,
+        insert(mailbox).values(
+            recipient=recipient,
+            sender=sender,
+            subject=subject,
+            body=body,
+            reply_to=reply_to,
+            created_at=created_at,
+            message_id=message_id,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+async def get_mail(conn: aiosqlite.Connection, mail_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(mailbox).where(mailbox.c.id == mail_id))
+    return None if row is None else mail_row(row)
+
+
+async def get_mail_many(conn: aiosqlite.Connection, mail_ids: Iterable[int]) -> list[dict[str, Any]]:
+    wanted = sorted(set(mail_ids))
+    if not wanted:
+        return []
+    rows = await fetch_all(
+        conn, select(mailbox).where(mailbox.c.id.in_(wanted)).order_by(mailbox.c.id.asc())
+    )
+    return [mail_row(row) for row in rows]
+
+
+async def list_mail(
+    conn: aiosqlite.Connection,
+    recipient: str,
+    *,
+    state: str,
+    since_id: int,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Mail for ``recipient`` after ``since_id``, ascending, plus ``has_more``.
+
+    ``state`` is ``unread`` (never read), ``read`` (read or acked) or ``all``.
+    """
+    stmt = select(mailbox).where(mailbox.c.recipient == recipient, mailbox.c.id > since_id)
+    if state == "unread":
+        stmt = stmt.where(mailbox.c.read_at.is_(None))
+    elif state == "read":
+        stmt = stmt.where(mailbox.c.read_at.is_not(None))
+    rows = await fetch_all(conn, stmt.order_by(mailbox.c.id.asc()).limit(limit + 1))
+    return [mail_row(row) for row in rows[:limit]], len(rows) > limit
+
+
+async def max_mail_id(conn: aiosqlite.Connection, recipient: str) -> int:
+    row = await fetch_one(
+        conn,
+        select(func.coalesce(func.max(mailbox.c.id), 0).label("n")).where(
+            mailbox.c.recipient == recipient
+        ),
+    )
+    return int(row["n"])
+
+
+async def mail_counts(conn: aiosqlite.Connection, recipient: str) -> dict[str, int]:
+    row = await fetch_one(
+        conn,
+        select(
+            func.count().label("total"),
+            func.coalesce(
+                func.sum(case((mailbox.c.read_at.is_(None), 1), else_=0)), 0
+            ).label("unread"),
+            func.coalesce(
+                func.sum(case((mailbox.c.acked_at.is_(None), 1), else_=0)), 0
+            ).label("unacked"),
+        ).where(mailbox.c.recipient == recipient),
+    )
+    return {"unread": int(row["unread"]), "unacked": int(row["unacked"]), "total": int(row["total"])}
+
+
+async def mark_mail_read(
+    conn: aiosqlite.Connection,
+    recipient: str,
+    *,
+    mail_ids: list[int] | None,
+    up_to_id: int | None,
+    read_at: str,
+) -> list[int]:
+    """Stamp ``read_at`` on unread mail of ``recipient``. Returns the ids that changed."""
+    where = [mailbox.c.recipient == recipient, mailbox.c.read_at.is_(None)]
+    if mail_ids is not None:
+        where.append(mailbox.c.id.in_(mail_ids))
+    if up_to_id is not None:
+        where.append(mailbox.c.id <= up_to_id)
+    changed = [
+        int(row["id"])
+        for row in await fetch_all(conn, select(mailbox.c.id).where(*where).order_by(mailbox.c.id))
+    ]
+    if changed:
+        await run(conn, update(mailbox).where(mailbox.c.id.in_(changed)).values(read_at=read_at))
+    return changed
+
+
+async def ack_mail(
+    conn: aiosqlite.Connection, recipient: str, mail_ids: list[int], acked_at: str
+) -> list[int]:
+    """Stamp ``acked_at`` (and ``read_at`` when unset). Returns the ids that changed."""
+    where = (
+        mailbox.c.recipient == recipient,
+        mailbox.c.id.in_(mail_ids),
+        mailbox.c.acked_at.is_(None),
+    )
+    changed = [
+        int(row["id"])
+        for row in await fetch_all(conn, select(mailbox.c.id).where(*where).order_by(mailbox.c.id))
+    ]
+    if changed:
+        await run(
+            conn,
+            update(mailbox)
+            .where(mailbox.c.id.in_(changed))
+            .values(acked_at=acked_at, read_at=func.coalesce(mailbox.c.read_at, acked_at)),
+        )
+    return changed
+
+
 _WEBHOOK_LISTS = ("kinds", "channels", "mentions", "exclude_authors")
 
 
@@ -722,6 +862,144 @@ async def list_tasks(
         stmt = stmt.where(tasks.c.status.not_in(skipped))
     rows = await fetch_all(conn, stmt.order_by(tasks.c.id.asc()))
     return [await pack_task(conn, row) for row in rows]
+
+
+# ---- full-text search (FTS5, schema v6) ----------------------------------
+#
+# The index is a virtual table, so these statements are ``text()`` rather than
+# Core table expressions. Every value is a bound parameter; the MATCH string
+# is built by ``search.build_match`` and never comes raw from a caller.
+
+_INDEX_COLUMNS = (
+    f"INSERT INTO {SEARCH_INDEX} (rowid, title, body, kind, ref_id, channel_id, author, created_at) "
+)
+
+_INDEX_MESSAGE = text(
+    _INDEX_COLUMNS
+    + f"SELECT m.id * {SEARCH_ROWID_STRIDE} + {SEARCH_KIND_CODES['message']}, '', m.text, "
+    "'message', m.id, m.channel_id, m.author, m.created_at FROM messages m WHERE m.id = :ref_id"
+)
+
+_INDEX_TASK = text(
+    _INDEX_COLUMNS
+    + f"SELECT t.id * {SEARCH_ROWID_STRIDE} + {SEARCH_KIND_CODES['task']}, t.title, t.description, "
+    "'task', t.id, t.channel_id, COALESCE(t.assignee, (SELECT e.actor FROM task_events e "
+    "WHERE e.task_id = t.id ORDER BY e.id DESC LIMIT 1), ''), t.created_at "
+    "FROM tasks t WHERE t.id = :ref_id"
+)
+
+_INDEX_ATTACHMENT = text(
+    _INDEX_COLUMNS
+    + f"SELECT a.id * {SEARCH_ROWID_STRIDE} + {SEARCH_KIND_CODES['attachment']}, a.filename, "
+    "a.content_type, 'attachment', a.id, m.channel_id, m.author, a.created_at "
+    "FROM attachments a JOIN messages m ON m.id = a.message_id WHERE a.id = :ref_id"
+)
+
+_INDEX_SOURCES = {"message": _INDEX_MESSAGE, "task": _INDEX_TASK, "attachment": _INDEX_ATTACHMENT}
+
+_UNINDEX = text(f"DELETE FROM {SEARCH_INDEX} WHERE rowid = :rowid")
+
+
+async def unindex(conn: aiosqlite.Connection, kind: str, ref_id: int) -> None:
+    await run(conn, _UNINDEX.bindparams(rowid=search_rowid(kind, ref_id)))
+
+
+async def reindex(conn: aiosqlite.Connection, kind: str, ref_id: int) -> None:
+    """Replace the index entry for one source row with its current contents."""
+    await unindex(conn, kind, ref_id)
+    await run(conn, _INDEX_SOURCES[kind].bindparams(ref_id=ref_id))
+
+
+async def index_message(conn: aiosqlite.Connection, message_id: int) -> None:
+    """Index a message and every attachment it carries."""
+    await reindex(conn, "message", message_id)
+    rows = await fetch_all(
+        conn, select(attachments.c.id).where(attachments.c.message_id == message_id)
+    )
+    for row in rows:
+        await reindex(conn, "attachment", int(row["id"]))
+
+
+def _search_where(
+    *,
+    kinds: Iterable[str] | None,
+    channel_id: int | None,
+    author: str | None,
+    since: str | None,
+) -> tuple[str, dict[str, Any]]:
+    clauses = [f"{SEARCH_INDEX} MATCH :match"]
+    params: dict[str, Any] = {}
+    wanted = sorted(kinds or ())
+    if wanted:
+        clauses.append(f"{SEARCH_INDEX}.kind IN :kinds")
+        params["kinds"] = wanted
+    if channel_id is not None:
+        clauses.append(f"{SEARCH_INDEX}.channel_id = :channel_id")
+        params["channel_id"] = channel_id
+    if author is not None:
+        clauses.append(f"{SEARCH_INDEX}.author = :author")
+        params["author"] = author
+    if since is not None:
+        clauses.append(f"{SEARCH_INDEX}.created_at >= :since")
+        params["since"] = since
+    return " AND ".join(clauses), params
+
+
+def _bind(sql: str, params: dict[str, Any]):
+    stmt = text(sql)
+    if "kinds" in params:
+        stmt = stmt.bindparams(bindparam("kinds", expanding=True))
+    return stmt.bindparams(**params)
+
+
+async def search_index(
+    conn: aiosqlite.Connection,
+    match: str,
+    *,
+    kinds: Iterable[str] | None,
+    channel_id: int | None,
+    author: str | None,
+    since: str | None,
+    limit: int,
+    offset: int,
+    weights: tuple[float, float],
+    snippet_markers: tuple[str, str, str],
+    snippet_tokens: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """One page of BM25-ranked hits plus the total match count.
+
+    ``bm25()`` is lower-is-better; rows come back best first with the raw
+    value in ``rank``. Ties go to the newer row.
+    """
+    where, params = _search_where(kinds=kinds, channel_id=channel_id, author=author, since=since)
+    params["match"] = match
+    title_weight, body_weight = weights
+    opening, closing, ellipsis = snippet_markers
+    page_sql = (
+        f"SELECT {SEARCH_INDEX}.kind AS kind, {SEARCH_INDEX}.ref_id AS ref_id, "
+        f"{SEARCH_INDEX}.channel_id AS channel_id, channels.name AS channel, "
+        f"{SEARCH_INDEX}.author AS author, {SEARCH_INDEX}.created_at AS created_at, "
+        f"snippet({SEARCH_INDEX}, -1, :open, :close, :ellipsis, :tokens) AS snippet, "
+        f"bm25({SEARCH_INDEX}, {float(title_weight)}, {float(body_weight)}) AS bm25_rank "
+        f"FROM {SEARCH_INDEX} LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id "
+        f"WHERE {where} ORDER BY bm25_rank ASC, {SEARCH_INDEX}.created_at DESC, {SEARCH_INDEX}.rowid DESC "
+        "LIMIT :limit OFFSET :offset"
+    )
+    page_params = {
+        **params,
+        "open": opening,
+        "close": closing,
+        "ellipsis": ellipsis,
+        "tokens": snippet_tokens,
+        "limit": limit,
+        "offset": offset,
+    }
+    rows = await fetch_all(conn, _bind(page_sql, page_params))
+    count_row = await fetch_one(
+        conn, _bind(f"SELECT count(*) AS n FROM {SEARCH_INDEX} WHERE {where}", params)
+    )
+    total = int(count_row["n"]) if count_row is not None else 0
+    return [dict(row) for row in rows], total
 
 
 async def list_agents(conn: aiosqlite.Connection) -> list[dict[str, Any]]:

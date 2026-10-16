@@ -53,6 +53,8 @@ def event_actor(event: dict[str, Any]) -> str | None:
         return payload.get("author")
     if kind == "feed_follow":
         return payload.get("follower")
+    if kind == "mail":
+        return payload.get("sender")
     return payload.get("actor")
 
 
@@ -68,13 +70,16 @@ def matches(hook: dict[str, Any], event: dict[str, Any]) -> bool:
 
     A message addressed to this hook always matches, whatever its filters say.
     A ``directed_only`` hook matches nothing else. Otherwise an empty filter
-    lets everything through.
+    lets everything through, except ``mail`` notices: a hook gets those only
+    when its ``kinds`` name ``mail``.
     """
     destination = event_destination(event)
     if hook.get("directed_only"):
         return destination == hook["name"]
     if destination is not None and destination == hook["name"]:
         return True
+    if event["kind"] == "mail" and "mail" not in hook["kinds"]:
+        return False
     if hook["kinds"] and event["kind"] not in hook["kinds"]:
         return False
     if hook["channels"] and event.get("channel") not in hook["channels"]:
@@ -162,6 +167,11 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
     if kind == "feed_follow":
         verb = "followed" if payload.get("following") else "unfollowed"
         return f"👀 `{payload.get('follower', '?')}` {verb} `{payload.get('followee', '?')}`"
+    if kind == "mail":
+        # The event never carries the body; neither does the notice.
+        subject = _clip(str(payload.get("subject") or ""), 120)
+        about = f": {subject}" if subject else ""
+        return f"📬 mail #{payload.get('id')} from `{payload.get('sender', '?')}` to `{payload.get('recipient', '?')}`{about}"
     if kind == "webhook.ping":
         return f"🔔 Cat Fleet webhook **{payload.get('name')}** is connected"
     return f"{kind} #{event.get('id')}"

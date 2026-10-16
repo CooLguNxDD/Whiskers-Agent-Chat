@@ -234,6 +234,31 @@ feed_hashtags = Table(
     Index("idx_feed_hashtags_tag", "tag", "post_id"),
 )
 
+# Schema v7. Durable per-handle inbox: direct mail from one handle to another.
+# ``read_at`` and ``acked_at`` stay null until the recipient reads or acks.
+# ``message_id`` links a mail to the chat message that produced it, if any.
+mailbox = Table(
+    "mailbox",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("recipient", Text, nullable=False),
+    Column("sender", Text, nullable=False),
+    Column("subject", Text, nullable=False, server_default=text("''")),
+    Column("body", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("read_at", Text),
+    Column("acked_at", Text),
+    Column("reply_to", Integer, ForeignKey("mailbox.id")),
+    Column("message_id", Integer, ForeignKey("messages.id")),
+    Index("idx_mailbox_recipient", "recipient", "id"),
+    Index(
+        "idx_mailbox_unread",
+        "recipient",
+        "id",
+        sqlite_where=text("read_at IS NULL"),
+    ),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (
@@ -249,6 +274,55 @@ ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (
     (webhooks, "directed_only"),
     (webhooks, "discord_channel_id"),
 )
+
+# Schema v6. One FTS5 table over message text, task title + description and
+# attachment filenames. SQLAlchemy cannot declare a virtual table, so the DDL
+# is raw. ``title`` holds the short field (task title, filename) and ``body``
+# the long one, so bm25 can weigh them apart. The other columns are filters.
+#
+# The rowid is derived from the source row: ``ref_id * SEARCH_ROWID_STRIDE +
+# kind code``. Replacing or deleting one entry is then a rowid lookup instead
+# of a scan over the UNINDEXED columns.
+SEARCH_INDEX = "search_index"
+SEARCH_KIND_CODES: dict[str, int] = {"message": 1, "task": 2, "attachment": 3, "knowledge": 4}
+SEARCH_ROWID_STRIDE = 8
+
+SEARCH_INDEX_DDL = (
+    f"CREATE VIRTUAL TABLE IF NOT EXISTS {SEARCH_INDEX} USING fts5("
+    "title, body, kind UNINDEXED, ref_id UNINDEXED, channel_id UNINDEXED, "
+    "author UNINDEXED, created_at UNINDEXED, "
+    "tokenize = 'unicode61 remove_diacritics 2')"
+)
+
+
+def search_rowid(kind: str, ref_id: int) -> int:
+    return int(ref_id) * SEARCH_ROWID_STRIDE + SEARCH_KIND_CODES[kind]
+
+
+def search_backfill_sql() -> list[str]:
+    """Index every message, task and attachment that has no entry yet. Safe to repeat."""
+    stride = SEARCH_ROWID_STRIDE
+    codes = SEARCH_KIND_CODES
+    columns = f"INSERT INTO {SEARCH_INDEX} (rowid, title, body, kind, ref_id, channel_id, author, created_at) "
+    missing = f"NOT IN (SELECT rowid FROM {SEARCH_INDEX})"
+    message_rowid = f"m.id * {stride} + {codes['message']}"
+    task_rowid = f"t.id * {stride} + {codes['task']}"
+    attachment_rowid = f"a.id * {stride} + {codes['attachment']}"
+    return [
+        columns
+        + f"SELECT {message_rowid}, '', m.text, 'message', m.id, m.channel_id, m.author, m.created_at "
+        f"FROM messages m WHERE {message_rowid} {missing}",
+        columns
+        + f"SELECT {task_rowid}, t.title, t.description, 'task', t.id, t.channel_id, "
+        "COALESCE(t.assignee, (SELECT e.actor FROM task_events e WHERE e.task_id = t.id "
+        "ORDER BY e.id DESC LIMIT 1), ''), t.created_at "
+        f"FROM tasks t WHERE {task_rowid} {missing}",
+        columns
+        + f"SELECT {attachment_rowid}, a.filename, a.content_type, 'attachment', a.id, "
+        "m.channel_id, m.author, a.created_at "
+        f"FROM attachments a JOIN messages m ON m.id = a.message_id WHERE {attachment_rowid} {missing}",
+    ]
+
 
 DIALECT = sqlite.dialect(paramstyle="qmark")
 

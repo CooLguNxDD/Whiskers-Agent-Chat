@@ -258,12 +258,73 @@ async def wait_for_mentions(request: Request) -> JSONResponse:
             channel=params.get("channel"),
             timeout=params.get("timeout"),
             limit=params.get("limit"),
+            mail_since_id=params.get("mail_since_id"),
         )
         return JSONResponse(result)
     except HubError as exc:
         return _json_error(exc)
     except asyncio.CancelledError:
         raise
+
+
+async def send_mail(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        text = body.get("body")
+        if text in (None, ""):
+            text = body.get("text")
+        result = await _hub(request).send_mail(
+            _author(body, "sender"),
+            body.get("recipient"),
+            text,
+            subject=body.get("subject"),
+            reply_to=body.get("reply_to"),
+            client_request_id=body.get("client_request_id"),
+        )
+        return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def list_mail(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        result = await _hub(request).list_mail(
+            request.path_params["agent"],
+            state=params.get("state"),
+            since_id=params.get("since_id"),
+            limit=params.get("limit"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def mark_mail_read(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).mark_mail_read(
+            request.path_params["agent"], ids=body.get("ids"), up_to_id=body.get("up_to_id")
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def ack_mail(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).ack_mail(request.path_params["agent"], ids=body.get("ids"))
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def mail_counts(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).mail_counts(request.path_params["agent"]))
+    except HubError as exc:
+        return _json_error(exc)
 
 
 async def list_tasks(request: Request) -> JSONResponse:
@@ -317,6 +378,26 @@ async def update_task_status(request: Request) -> JSONResponse:
             _author(body, "actor"),
             body.get("expected_version"),
             note=body.get("note"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def search(request: Request) -> JSONResponse:
+    """``GET /api/v1/search``: BM25 full-text search. ``kind`` may repeat or be a comma list."""
+    try:
+        params = request.query_params
+        kinds = params.getlist("kind")
+        result = await _hub(request).search(
+            params.get("q"),
+            kind=kinds if len(kinds) > 1 else params.get("kind"),
+            channel=params.get("channel"),
+            author=params.get("author"),
+            since=params.get("since"),
+            limit=params.get("limit"),
+            offset=params.get("offset"),
+            mode=params.get("mode"),
         )
         return JSONResponse(result)
     except HubError as exc:
@@ -664,10 +745,16 @@ def api_routes() -> list[Route]:
         Route("/api/v1/messages", list_messages, methods=["GET"]),
         Route("/api/v1/messages", post_message, methods=["POST"]),
         Route("/api/v1/wait", wait_for_mentions, methods=["GET"]),
+        Route("/api/v1/mailbox", send_mail, methods=["POST"]),
+        Route("/api/v1/mailbox/{agent}", list_mail, methods=["GET"]),
+        Route("/api/v1/mailbox/{agent}/read", mark_mail_read, methods=["POST"]),
+        Route("/api/v1/mailbox/{agent}/ack", ack_mail, methods=["POST"]),
+        Route("/api/v1/mailbox/{agent}/counts", mail_counts, methods=["GET"]),
         Route("/api/v1/tasks", list_tasks, methods=["GET"]),
         Route("/api/v1/tasks", create_task, methods=["POST"]),
         Route("/api/v1/tasks/{task_id:int}/claim", claim_task, methods=["POST"]),
         Route("/api/v1/tasks/{task_id:int}/status", update_task_status, methods=["POST"]),
+        Route("/api/v1/search", search, methods=["GET"]),
         Route("/api/v1/agents", list_agents, methods=["GET"]),
         Route("/api/v1/events", events, methods=["GET"]),
         Route("/api/v1/destinations", list_destinations, methods=["GET"]),
