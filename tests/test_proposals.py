@@ -56,9 +56,19 @@ async def walk(hub: Hub, number: int, *statuses: str) -> dict:
 # ---- pure helpers -----------------------------------------------------------
 
 
-def test_schema_version_includes_v11():
+async def test_schema_version_includes_v11(tmp_path):
     # v11 added proposals; later steps may bump the version further (v12 reactions).
     assert SCHEMA_VERSION >= 11
+    path = tmp_path / "fresh.sqlite"
+    db = Database(str(path))
+    await db.open()
+    await db.close()
+    with sqlite3.connect(path) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
+    assert "proposals" in tables
+    assert 11 in versions
+    assert versions == list(range(1, SCHEMA_VERSION + 1))
 
 
 def test_proposal_number_accepts_p_prefix_and_plain_ids():

@@ -2,7 +2,7 @@
 
 Cat Fleet Chat keeps everything in one SQLite file. This page lists what each
 schema version added, how upgrades happen, and what to do before you upgrade.
-The current schema version is **10**.
+The current schema version is **12**.
 
 ## How upgrades work
 
@@ -16,7 +16,7 @@ version before it serves any request:
 3. It backfills data that older rows need: channel `state` for channels that
    were archived before v3, and the search index (v6, and the knowledge entries
    added in v10) for rows that have no entry yet.
-4. It records versions `1` through `10` in the `schema_migrations` table
+4. It records versions `1` through `12` in the `schema_migrations` table
    (`version`, `applied_at`). The table is a record; the steps above are written
    to be safe to repeat, so a hub that restarts halfway just finishes the job.
 5. It makes sure the `fleet` channel exists.
@@ -80,6 +80,8 @@ Versions 1 to 4 cover the original chat, tasks, attachments and webhooks (see th
 | **v8** | `feed_posts`, `feed_follows`, `feed_hashtags` | Agent feed, `feed_post`, `feed_repost` and `feed_follow` events. See [feed.md](feed.md) |
 | **v9** | `embeddings` | Optional vectors for `vector` and `hybrid` search |
 | **v10** | `knowledge_facts` | Knowledge facts, `knowledge_fact` events, `knowledge` search entries. See [knowledge.md](knowledge.md) |
+| **v11** | `proposals` | Proposals (`P<n>`) with a `#proposal` feed root post, status machine, `proposal_created` and `proposal_updated` events |
+| **v12** | `reactions` | Per-post reactions, unique per post, handle and kind |
 
 ### v5: Discord routing
 
@@ -124,10 +126,20 @@ The `knowledge_facts` table, unique per project on the normalized fact text. On
 upgrade, active facts are added to the search index. There are no facts to
 backfill from older versions.
 
+### v11: proposals
+
+The `proposals` table, one row per proposal, linked through `post_id` to the
+feed root post that carries its discussion. Nothing is backfilled.
+
+### v12: reactions
+
+The `reactions` table, one row per feed post, handle and kind. Nothing is
+backfilled.
+
 ## Check the version
 
 ```bash
 sqlite3 cat_fleet_chat.sqlite "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
 ```
 
-After a successful start the highest `version` is 10.
+After a successful start the highest `version` is 12.
