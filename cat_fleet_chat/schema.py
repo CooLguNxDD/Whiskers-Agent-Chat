@@ -207,6 +207,12 @@ mailbox = Table(
         "id",
         sqlite_where=text("read_at IS NULL"),
     ),
+    Index(
+        "idx_mailbox_unacked",
+        "recipient",
+        "id",
+        sqlite_where=text("acked_at IS NULL"),
+    ),
 )
 
 # Schema v9. One float32 vector per indexed row and embedding model (see
