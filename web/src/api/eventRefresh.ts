@@ -1,6 +1,8 @@
 import type { SseEvent } from "./stream"
 
-export type RefreshKey = "messages" | "channels" | "tasks" | "agents"
+export type RefreshKey = "messages" | "channels" | "tasks" | "agents" | "mail" | "feed" | "knowledge"
+
+export const REFRESH_KEYS: readonly RefreshKey[] = ["messages", "channels", "tasks", "agents", "mail", "feed", "knowledge"]
 
 /** Bounded event bookkeeping: only query families, never message payloads. */
 export class EventRefresh {
@@ -13,7 +15,7 @@ export class EventRefresh {
   accept(event: SseEvent) {
     if (event.event === "reset") {
       this.cursor = 0
-      this.dirty = new Set(["messages", "channels", "tasks", "agents"])
+      this.dirty = new Set(REFRESH_KEYS)
       return
     }
     const id = Number(event.id)
@@ -33,6 +35,13 @@ export class EventRefresh {
     } else if (event.event === "task.updated") {
       this.dirty.add("tasks")
       this.dirty.add("agents")
+    } else if (event.event === "mail") {
+      // Unread counts and inbox lists. The payload never carries the body.
+      this.dirty.add("mail")
+    } else if (event.event === "feed_post" || event.event === "feed_repost" || event.event === "feed_follow") {
+      this.dirty.add("feed")
+    } else if (event.event === "knowledge_fact") {
+      this.dirty.add("knowledge")
     }
     this.cursor = id
   }

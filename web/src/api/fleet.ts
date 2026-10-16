@@ -1,6 +1,7 @@
 import { api } from "./client"
 import type {
   AgentActivity,
+  Attachment,
   Channel,
   ChannelState,
   FleetMessage,
@@ -73,6 +74,10 @@ export function postMessage(input: {
     method: "POST",
     body: JSON.stringify(input),
   })
+}
+
+export function getAttachment(attachmentId: number) {
+  return api<{ attachment: Attachment }>(`/api/v1/attachments/${attachmentId}`)
 }
 
 export function listTasks(channel: string) {

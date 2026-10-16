@@ -17,6 +17,10 @@ const queryClient = new QueryClient({
 
 const TasksPage = lazy(() => import("@/components/TaskBoard"))
 const WebhooksPage = lazy(() => import("@/components/Webhooks"))
+const SearchPage = lazy(() => import("@/components/SearchPage"))
+const InboxPage = lazy(() => import("@/components/InboxPage"))
+const FeedPage = lazy(() => import("@/components/FeedPage"))
+const KnowledgePage = lazy(() => import("@/components/KnowledgePage"))
 const root = document.getElementById("root")
 if (!root) throw new Error("root element missing")
 applyAppearance(prefs.theme(), prefs.accent())
@@ -31,6 +35,10 @@ render(
           <Route path="/" component={FleetPage} />
           <Route path="/tasks" component={TasksPage} />
           <Route path="/webhooks" component={WebhooksPage} />
+          <Route path="/search" component={SearchPage} />
+          <Route path="/inbox" component={InboxPage} />
+          <Route path="/feed" component={FeedPage} />
+          <Route path="/knowledge" component={KnowledgePage} />
         </Router>
       </FleetStreamProvider>
     </QueryClientProvider>
