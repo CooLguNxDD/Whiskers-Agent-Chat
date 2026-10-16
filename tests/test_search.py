@@ -227,6 +227,22 @@ def test_since_parsing_is_utc_text():
     assert search.search_since(None) is None
 
 
+@pytest.mark.parametrize("value", ["999999w", "999999d", "0001-01-01T00:00:00+05:00"])
+def test_since_out_of_range_is_a_validation_error(value):
+    with pytest.raises(HubError) as bad:
+        search.search_since(value)
+    assert bad.value.code == "validation_error"
+    assert bad.value.status == 400
+
+
+def test_score_stays_positive_and_distinct_for_tiny_ranks():
+    assert search.score(-4e-7) > 0
+    assert search.score(-3e-7) > 0
+    assert search.score(-4e-7) > search.score(-3e-7)
+    assert search.score(0.0) > 0
+    assert search.score(-2.5) == 2.5
+
+
 def test_build_match_quotes_every_term():
     assert search.build_match("zebra crossing") == '"zebra" "crossing"'
     assert search.build_match('zeb* "NEAR(x' ) == '"zeb"* "x"'

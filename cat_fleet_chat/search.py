@@ -10,6 +10,7 @@ prefix search on that word.
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -144,23 +145,31 @@ def search_since(value: Any, now: datetime | None = None) -> str | None:
     relative = _RELATIVE_RE.match(value)
     if relative:
         amount, unit = int(relative.group(1)), relative.group(2).lower()
-        start = (now or datetime.now(timezone.utc)) - timedelta(**{_UNITS[unit]: amount})
+        try:
+            start = (now or datetime.now(timezone.utc)) - timedelta(**{_UNITS[unit]: amount})
+        except OverflowError as exc:
+            raise _fail("since window reaches before year 1", "since") from exc
         return start.astimezone(timezone.utc).isoformat()
     text = value.strip()
     if text.endswith(("Z", "z")):
         text = text[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(text)
-    except ValueError as exc:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (ValueError, OverflowError) as exc:
         raise _fail("since must be an ISO timestamp or a window like 24h", "since") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def score(bm25_rank: float) -> float:
-    """``bm25()`` is negative and lower-is-better; expose a positive higher-is-better score."""
-    return round(max(0.0, -float(bm25_rank)), 6)
+    """``bm25()`` is negative and lower-is-better; expose a positive higher-is-better score.
+
+    Not rounded: FTS5 floors IDF at 1e-6, so a term found in most rows gives
+    ranks near -1e-6 that rounding would collapse to 0. A non-negative rank
+    maps to the smallest positive float so every hit keeps a positive score.
+    """
+    return max(-float(bm25_rank), sys.float_info.min)
 
 
 def shape_hit(row: dict[str, Any]) -> dict[str, Any]:
