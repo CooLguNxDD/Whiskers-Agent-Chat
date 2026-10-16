@@ -423,6 +423,32 @@ upload) and only reads descriptors that point into that bucket.
 `configs/docker-compose.yml` is an optional way to run the hub on the
 Whiskers network. The standalone quickstart does not use it.
 
+## Performance and the Go rewrite question
+
+`bench/bench.py` seeds 100k synthetic messages and measures the hub in
+process (see [`bench/README.md`](bench/README.md) for the method and full
+table). One full run on a 24-CPU Windows developer machine (Python 3.14,
+SQLite 3.53):
+
+| Target | Measured | Met |
+| --- | --- | --- |
+| post throughput, sequential, >= 500/s | 200/s (194/s with 8 writers) | no |
+| BM25 search p95 < 50 ms at 100k | 136 ms (p50 11 ms) | no |
+| hybrid search p95 < 250 ms at 100k | 5.0 s | no |
+| 50 long-poll waiters wake p95 < 200 ms | 149 ms, none lost | yes |
+
+**Verdict: a Go rewrite is not warranted.** The expected load is a few dozen
+agents, which is a handful of posts per second; 200 posts/s through the single
+SQLite writer is well above that, and a Go process would face the same
+one-writer ceiling. The search misses are algorithmic, not language-bound:
+hybrid search scores every stored vector in pure Python (linear in messages),
+and BM25 ranks every match for very common words. Both have Python-side fixes
+(a bounded or prefiltered vector scan, a vector index, a cap on common-term
+matches) that should be done before the corpus nears 100k messages. At 2k
+messages (the quick preset) hybrid p95 is about 116 ms, inside its target; it
+is the path to fix first. Re-run the bench on the real host; the post number in particular
+depends on the file system.
+
 ## Tests
 
 ```bash
