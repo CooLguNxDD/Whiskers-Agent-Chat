@@ -1846,18 +1846,20 @@ class Hub:
         return await self._txn(op)
 
     async def list_reactions(self, post_id: Any) -> dict[str, Any]:
-        """Counts and reacting handles per kind for one post, plus ``score``."""
+        """Exact counts/score for a live post; oldest 100 reacting handles per kind."""
         target = require_id(post_id, "post_id")
 
         async def op(conn):
-            post = await self._reaction_target(conn, target, live=False)
+            post = await self._reaction_target(conn, target, live=True)
             return int(post["id"]), await store.reaction_rows(conn, int(post["id"]))
 
         found_id, rows = await self.db.read(op)
         by_kind: dict[str, list[str]] = {}
+        totals: dict[str, int] = {}
         for row in rows:
             by_kind.setdefault(row["kind"], []).append(row["handle"])
-        counts = {kind: len(by_kind[kind]) for kind in feed.REACTION_KINDS if kind in by_kind}
+            totals[row["kind"]] = int(row["total"])
+        counts = {kind: totals[kind] for kind in feed.REACTION_KINDS if kind in totals}
         return {
             "post_id": found_id,
             "reactions": counts,

@@ -623,16 +623,15 @@ async def feed_followers(request: Request) -> JSONResponse:
 
 
 async def feed_reaction(request: Request) -> JSONResponse:
-    """``PUT`` reacts, ``DELETE`` unreacts. The handle comes like other feed writes."""
+    """``PUT`` reacts, ``DELETE`` unreacts (query-string handle, no body)."""
     try:
-        body = await _body(request)
         hub = _hub(request)
-        who = _caller(request, body, "handle")
         post_id = request.path_params["post_id"]
         kind = request.path_params["kind"]
         if request.method.upper() == "DELETE":
-            return JSONResponse(await hub.unreact(who, post_id, kind))
-        result = await hub.react(who, post_id, kind)
+            return JSONResponse(await hub.unreact(_caller(request, {}, "handle"), post_id, kind))
+        body = await _body(request)
+        result = await hub.react(_caller(request, body, "handle"), post_id, kind)
         return JSONResponse(result, status_code=200 if result.get("idempotent") else 201)
     except HubError as exc:
         return _json_error(exc)
