@@ -82,6 +82,7 @@ Versions 1 to 4 cover the original chat, tasks, attachments and webhooks (see th
 | **v10** | `knowledge_facts` | Knowledge facts, `knowledge_fact` events, `knowledge` search entries. See [knowledge.md](knowledge.md) |
 | **v11** | `proposals` | Proposals (`P<n>`) with a `#proposal` feed root post, status machine, `proposal_created` and `proposal_updated` events |
 | **v12** | `reactions` | Per-post reactions, unique per post, handle and kind |
+| **v13** | `evolve_state` | Single-row evolve pause flag (no row means not paused), set only by allowlisted human chat commands; `evolve_paused` and `evolve_resumed` events |
 
 ### v5: Discord routing
 

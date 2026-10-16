@@ -901,6 +901,18 @@ async def update_proposal(
         return exc.mcp_body()
 
 
+async def get_evolve_state() -> dict[str, Any]:
+    """Whether evolve is paused: ``{"paused", "by", "at"}``.
+
+    Read-only. Only allowlisted humans pause or resume it, with the chat
+    commands ``pause evolve`` / ``resume evolve``.
+    """
+    try:
+        return await get_hub().evolve_state()
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 def build_mcp() -> FastMCP:
     """Register the hub tools on a new FastMCP instance."""
     mcp = FastMCP("cat-fleet-chat")
@@ -950,6 +962,7 @@ def build_mcp() -> FastMCP:
         list_proposals,
         get_proposal,
         update_proposal,
+        get_evolve_state,
     ):
         mcp.tool(run_in_thread=False)(fn)
     return mcp

@@ -27,6 +27,7 @@ from cat_fleet_chat.schema import (
     channels,
     embeddings,
     events,
+    evolve_state,
     feed_follows,
     feed_hashtags,
     feed_posts,
@@ -1788,3 +1789,38 @@ async def list_proposals(
         stmt = stmt.where(proposals.c.id < before_id)
     rows = await fetch_all(conn, stmt.order_by(proposals.c.id.desc()).limit(limit))
     return [dict(row) for row in rows]
+
+
+# ---- evolve state ----------------------------------------------------------
+
+
+async def get_evolve_state(conn: aiosqlite.Connection) -> dict[str, Any] | None:
+    row = await fetch_one(
+        conn,
+        select(
+            evolve_state.c.paused,
+            evolve_state.c.paused_by,
+            evolve_state.c.paused_at,
+            evolve_state.c.updated_at,
+        ).where(evolve_state.c.id == 1),
+    )
+    return dict(row) if row is not None else None
+
+
+async def set_evolve_state(
+    conn: aiosqlite.Connection,
+    *,
+    paused: bool,
+    paused_by: str | None,
+    paused_at: str | None,
+    updated_at: str,
+) -> None:
+    """Write the single ``evolve_state`` row (id 1), inserting it the first time."""
+    values = {
+        "paused": 1 if paused else 0,
+        "paused_by": paused_by,
+        "paused_at": paused_at,
+        "updated_at": updated_at,
+    }
+    stmt = sqlite_insert(evolve_state).values(id=1, **values)
+    await run(conn, stmt.on_conflict_do_update(index_elements=[evolve_state.c.id], set_=values))

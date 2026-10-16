@@ -59,6 +59,9 @@ EVENT_KINDS = frozenset(
         # Proposals (schema v11). No channel: channel_id is null.
         "proposal_created",
         "proposal_updated",
+        # The evolve pause flag changed (schema v13). No channel: channel_id is null.
+        "evolve_paused",
+        "evolve_resumed",
     }
 )
 

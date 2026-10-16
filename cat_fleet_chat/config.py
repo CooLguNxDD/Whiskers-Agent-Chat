@@ -44,6 +44,9 @@ class Settings:
     embed_api_key: str | None = field(default=None, repr=False)
     embed_batch: int = 16
     embed_timeout: float = 20.0
+    # Handles allowed to steer proposals and the evolve pause flag with chat
+    # commands (evolve.py), lower-cased. Empty means nobody may command.
+    human_handles: frozenset[str] = frozenset()
 
     @property
     def loopback_bind(self) -> bool:
@@ -111,7 +114,13 @@ def load_settings() -> Settings:
         embed_api_key=_env_optional("CAT_FLEET_EMBED_API_KEY"),
         embed_batch=embed_batch,
         embed_timeout=embed_timeout,
+        human_handles=human_handles(os.environ.get("CAT_FLEET_HUMAN_HANDLES", "")),
     )
+
+
+def human_handles(raw: str) -> frozenset[str]:
+    """``CAT_FLEET_HUMAN_HANDLES``: comma separated, trimmed, lower-cased."""
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
 
 
 def assert_bind_safe(settings: Settings) -> None:
