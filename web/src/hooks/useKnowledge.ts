@@ -1,15 +1,12 @@
 import { createInfiniteQuery, createMutation, createQuery, useQueryClient } from "@tanstack/solid-query"
-import { addFact, listFacts, listTopics, searchFacts, setFactStatus, type FactFilters } from "@/api/knowledge"
+import { addFact, listFacts, listProjects, listTopics, searchFacts, setFactStatus, type FactFilters } from "@/api/knowledge"
 import type { FactStatus } from "@/api/types"
 
-/** Projects seen in the newest facts. The hub has no project list, so this samples one large page. */
+/** Every project with a fact, gathered from all fact pages. */
 export function useKnowledgeProjects() {
   return createQuery(() => ({
     queryKey: ["knowledge", "projects"],
-    queryFn: async () => {
-      const page = await listFacts({}, { limit: 200 })
-      return [...new Set(page.facts.map((fact) => fact.project))].sort()
-    },
+    queryFn: ({ signal }) => listProjects(signal),
   }))
 }
 

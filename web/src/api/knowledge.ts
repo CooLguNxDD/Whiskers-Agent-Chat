@@ -19,6 +19,22 @@ export function listFacts(
   return api<FactPage>(path, { signal })
 }
 
+/**
+ * Every project that has a fact, sorted. The hub has no project list, so this
+ * walks all fact pages (any status) at the largest page size until `has_more` is false.
+ */
+export async function listProjects(signal?: AbortSignal) {
+  const projects = new Set<string>()
+  let cursor: string | null = null
+  for (;;) {
+    const page: FactPage = await listFacts({}, { cursor, limit: 200 }, signal)
+    for (const fact of page.facts) projects.add(fact.project)
+    if (!page.has_more || !page.next_cursor) break
+    cursor = page.next_cursor
+  }
+  return [...projects].sort()
+}
+
 /** Active fact counts per topic, most facts first. */
 export function listTopics(project?: string) {
   return api<{ project: string | null; topics: TopicCount[] }>(

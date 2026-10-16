@@ -4,12 +4,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/solid-query"
 import { MemoryRouter, Route } from "@solidjs/router"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ApiError } from "@/api/client"
+import { getAttachment } from "@/api/fleet"
 import { search, searchStatus } from "@/api/search"
+import { ui } from "@/store/uiSlice"
 import type { EmbedStatus } from "@/api/types"
 import SearchPage from "./SearchPage"
 
 vi.mock("@/api/search", () => ({ search: vi.fn(), searchStatus: vi.fn() }))
-vi.mock("@/api/fleet", () => ({ listChannels: vi.fn(() => Promise.resolve({ channels: [] })) }))
+vi.mock("@/api/fleet", () => ({
+  listChannels: vi.fn(() => Promise.resolve({ channels: [] })),
+  getAttachment: vi.fn(() => Promise.resolve({ attachment: { id: 7, message_id: 9 } })),
+}))
 
 const on: EmbedStatus = { provider: "openai", model: "synthetic-embed", dim: 4, indexed: 1, pending: 0, last_error: null }
 const off: EmbedStatus = { provider: "off", model: null, dim: null, indexed: 0, pending: 0, last_error: null }
@@ -86,6 +91,15 @@ describe("search mode toggle", () => {
     expect(container.querySelector('[role="note"]')?.textContent).toContain("embedder timed out")
   })
 
+  it("disables vector and hybrid when the status reports an embedder error", async () => {
+    vi.mocked(searchStatus).mockResolvedValue({ ...on, last_error: "embed request timed out" })
+    mount()
+    await settle()
+    expect(radio("vector").disabled).toBe(true)
+    expect(radio("hybrid").disabled).toBe(true)
+    expect(container.querySelector('[role="note"]')?.textContent).toContain("embed request timed out")
+  })
+
   it("renders snippet markup as text", async () => {
     vi.mocked(searchStatus).mockResolvedValue(off)
     vi.mocked(search).mockResolvedValue({
@@ -100,5 +114,35 @@ describe("search mode toggle", () => {
     expect(container.querySelector("img")).toBeNull()
     expect(container.querySelector("mark")?.textContent).toBe("hit")
     expect(container.textContent).toContain("<img src=x onerror=alert(1)>")
+  })
+})
+
+describe("opening a result", () => {
+  const hit = (kind: "message" | "attachment", id: number) => ({ kind, id, channel: "ops", author: "ada", created_at: "2026-10-16T00:00:00Z", snippet: "[deploy]", score: 1 })
+
+  async function openFirst(kind: "message" | "attachment", id: number) {
+    vi.mocked(searchStatus).mockResolvedValue(off)
+    vi.mocked(search).mockResolvedValue({ results: [hit(kind, id)], total_estimate: 1, mode: "bm25", limit: 20, offset: 0, next_offset: null })
+    mount()
+    await settle()
+    typeQuery("deploy")
+    await submit()
+    await settle()
+    const button = [...container.querySelectorAll("button")].find((item) => item.textContent?.startsWith("Open"))!
+    button.click()
+    await settle()
+  }
+
+  it("focuses the message hit in its channel", async () => {
+    await openFirst("message", 42)
+    expect(ui.activeChannel()).toBe("ops")
+    expect(ui.focusMessageId()).toBe(42)
+  })
+
+  it("focuses the message that carries an attachment hit", async () => {
+    await openFirst("attachment", 7)
+    expect(vi.mocked(getAttachment)).toHaveBeenCalledWith(7)
+    expect(ui.activeChannel()).toBe("ops")
+    expect(ui.focusMessageId()).toBe(9)
   })
 })

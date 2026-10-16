@@ -3,7 +3,9 @@ import { ApiError, setTokenGetter } from "./client"
 import { search, searchStatus } from "./search"
 import { ackMail, listMail, mailCounts, markMailRead, sendMail } from "./mailbox"
 import { createPost, follow, getThread, getTimeline, listFollowing, repost, unfollow } from "./feed"
-import { addFact, exportFacts, listFacts, listTopics, searchFacts, setFactStatus } from "./knowledge"
+import { addFact, exportFacts, listFacts, listProjects, listTopics, searchFacts, setFactStatus } from "./knowledge"
+import { getAttachment } from "./fleet"
+import { fetchAround } from "@/hooks/useMessages"
 
 interface Call {
   url: URL
@@ -76,6 +78,32 @@ describe("search client", () => {
     await searchStatus()
     expect(last().url.pathname).toBe("/api/v1/search/status")
     expect(last().headers.get("Authorization")).toBe("Bearer synthetic-token")
+  })
+})
+
+describe("search hit sources", () => {
+  const msg = (id: number) => ({ id, channel: "ops", author: "ada", text: `m${id}`, reply_to: null, created_at: "now", mentions: [] })
+
+  it("loads the history around a message hit, the hit included", async () => {
+    next = () => {
+      const url = calls[calls.length - 1].url
+      return url.searchParams.has("before_id")
+        ? json({ messages: [msg(40), msg(41), msg(42)], has_more: true })
+        : json({ messages: [msg(43), msg(44)], has_more: false })
+    }
+    const around = await fetchAround("ops", 42)
+    const params = calls.map((call) => Object.fromEntries(call.url.searchParams))
+    expect(params).toContainEqual({ channel: "ops", before_id: "43", limit: "25" })
+    expect(params).toContainEqual({ channel: "ops", since_id: "42", limit: "25" })
+    expect(around.messages.map((item) => item.id)).toEqual([40, 41, 42, 43, 44])
+    expect(around).toMatchObject({ hasOlder: true, hasNewer: false })
+  })
+
+  it("resolves an attachment hit to its message", async () => {
+    next = () => json({ attachment: { id: 7, message_id: 42, filename: "log.txt" } })
+    const { attachment } = await getAttachment(7)
+    expect(last().url.pathname).toBe("/api/v1/attachments/7")
+    expect(attachment.message_id).toBe(42)
   })
 })
 
@@ -190,6 +218,21 @@ describe("knowledge client", () => {
     expect(last().url.pathname).toBe("/api/v1/search")
     expect(last().url.searchParams.get("kind")).toBe("knowledge")
     expect(last().url.searchParams.get("q")).toBe("embed queue")
+  })
+
+  it("collects projects from every fact page, not just the newest", async () => {
+    const fact = (id: number, project: string) => ({ id, project, topic: "general", fact: `f${id}`, status: "active", author: "ada" })
+    const pages = [
+      { facts: [fact(450, "whiskers"), fact(449, "whiskers")], next_cursor: "p2", has_more: true },
+      { facts: [fact(250, "tap")], next_cursor: "p3", has_more: true },
+      { facts: [fact(3, "archive-only")], next_cursor: null, has_more: false },
+    ]
+    let index = 0
+    next = () => json(pages[index++])
+    expect(await listProjects()).toEqual(["archive-only", "tap", "whiskers"])
+    expect(calls.map((call) => call.url.searchParams.get("cursor"))).toEqual([null, "p2", "p3"])
+    expect(calls.every((call) => call.url.searchParams.get("limit") === "200")).toBe(true)
+    expect(calls.every((call) => !call.url.searchParams.has("status"))).toBe(true)
   })
 
   it("exports JSONL as text", async () => {

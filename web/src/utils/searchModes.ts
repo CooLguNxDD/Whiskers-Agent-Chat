@@ -18,8 +18,8 @@ export function isEmbedderError(err: unknown): boolean {
 /**
  * Which search modes the toggle offers. BM25 is always on. Vector and hybrid
  * need an embedder: they are off while the status is unknown or failed, when
- * the hub reports `provider: "off"`, or after a search answered that the
- * embedder is unavailable.
+ * the hub reports `provider: "off"` or a `last_error`, or after a search
+ * answered that the embedder is unavailable.
  */
 export function searchModeOptions(input: {
   status: EmbedStatus | undefined
@@ -27,16 +27,15 @@ export function searchModeOptions(input: {
   searchError?: unknown
 }): ModeOption[] {
   let off: string | null = null
-  let warning: string | null = null
   if (input.statusError) off = "Embedder status unavailable; only BM25 search works."
   else if (!input.status) off = "Checking the embedder…"
   else if (input.status.provider === "off") off = "No embedder is configured on the hub. Vector and hybrid search are off."
   else if (isEmbedderError(input.searchError)) off = `Embedder error: ${(input.searchError as Error).message}`
-  else if (input.status.last_error) warning = `Last embedder error: ${input.status.last_error}`
+  else if (input.status.last_error) off = `Embedder error: ${input.status.last_error}. Vector and hybrid search are off.`
   return SEARCH_MODES.map((mode) =>
     mode === "bm25"
       ? { mode, enabled: true, hint: null }
-      : { mode, enabled: off === null, hint: off ?? warning },
+      : { mode, enabled: off === null, hint: off },
   )
 }
 

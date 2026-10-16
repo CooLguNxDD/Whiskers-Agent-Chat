@@ -46,13 +46,17 @@ describe("search mode toggle", () => {
     }
   })
 
-  it("keeps the modes on for unrelated errors and only warns on a stale queue error", () => {
+  it("keeps the modes on for unrelated search errors", () => {
     const unrelated = new ApiError(400, { code: "validation_error", message: "bad since" }, "x")
     expect(enabled(searchModeOptions({ status: embedOn, searchError: unrelated }))).toMatchObject({ vector: true })
-    const warned = searchModeOptions({ status: { ...embedOn, last_error: "timeout" } })
-    expect(enabled(warned)).toMatchObject({ vector: true, hybrid: true })
-    expect(warned[1].hint).toContain("timeout")
-    expect(effectiveMode("vector", warned)).toBe("vector")
+  })
+
+  it("disables them when the status reports an embedder error", () => {
+    const failing = searchModeOptions({ status: { ...embedOn, last_error: "timeout" } })
+    expect(enabled(failing)).toEqual({ bm25: true, vector: false, hybrid: false })
+    expect(failing[1].hint).toContain("timeout")
+    expect(failing[2].hint).toContain("timeout")
+    expect(effectiveMode("vector", failing)).toBe("bm25")
   })
 })
 

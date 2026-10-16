@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js"
 import { useNavigate } from "@solidjs/router"
+import { getAttachment } from "@/api/fleet"
 import { SEARCH_KINDS, type SearchHit, type SearchKind, type SearchMode, type SearchQuery } from "@/api/types"
 import { selectClass, Snippet } from "@/components/RichText"
 import { Badge } from "@/components/ui/badge"
@@ -131,8 +132,10 @@ export default function SearchPage() {
 function HitRow(props: { hit: SearchHit }) {
   const ui = useUIStore()
   const navigate = useNavigate()
-  const open = () => {
+  const [openError, setOpenError] = createSignal("")
+  const open = async () => {
     const hit = props.hit
+    setOpenError("")
     if (hit.kind === "knowledge") {
       const params = new URLSearchParams()
       if (hit.project) params.set("project", hit.project)
@@ -140,13 +143,25 @@ function HitRow(props: { hit: SearchHit }) {
       navigate(`/knowledge?${params}`)
       return
     }
-    if (hit.channel) ui.setActiveChannel(hit.channel)
+    if (!hit.channel) { setOpenError("This result has no channel to open."); return }
     if (hit.kind === "task") {
+      ui.setActiveChannel(hit.channel)
       ui.setExpandedTaskId(hit.id)
       navigate("/tasks")
-    } else {
-      navigate("/")
+      return
     }
+    // Messages open in the chat scrolled to the hit; an attachment opens the message carrying it.
+    let messageId = hit.id
+    if (hit.kind === "attachment") {
+      try {
+        messageId = (await getAttachment(hit.id)).attachment.message_id
+      } catch (err) {
+        setOpenError(getErrorMessage(err, "Could not find the attachment's message."))
+        return
+      }
+    }
+    ui.focusMessage(hit.channel, messageId)
+    navigate("/")
   }
   const where = () => {
     const hit = props.hit
@@ -163,9 +178,10 @@ function HitRow(props: { hit: SearchHit }) {
         <span class="ml-auto font-mono" title="score">{props.hit.score.toPrecision(3)}</span>
       </div>
       <p class="mt-1 text-sm text-cream"><Snippet text={props.hit.snippet} /></p>
-      <button type="button" class="mt-1 text-xs text-brass hover:underline" onClick={open}>
+      <button type="button" class="mt-1 text-xs text-brass hover:underline" onClick={() => void open()}>
         Open {props.hit.kind} #{props.hit.id}
       </button>
+      <Show when={openError()}><p class="mt-1 text-xs text-rust">{openError()}</p></Show>
     </li>
   )
 }
