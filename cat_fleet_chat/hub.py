@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
@@ -10,7 +11,7 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import mailbox, store, validate
+from cat_fleet_chat import embed, mailbox, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -108,6 +109,14 @@ class Hub:
         # Looks up which Discord channel a webhook URL posts to. The app wires
         # in the dispatcher; the hub itself makes no HTTP calls.
         self.discord_resolver: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None
+        # Optional embeddings. The app swaps in the configured provider and
+        # starts the queue; without them vector and hybrid search answer
+        # not_available and nothing else changes.
+        self.embedder: embed.Embedder = embed.NullEmbedder()
+        self.embed_queue: embed.EmbedQueue | None = None
+        # Index entries touched by the running write transaction. They go to
+        # the embed queue only after the commit, so it never reads stale text.
+        self._reindexed: list[tuple[str, int]] = []
 
     async def _write(self, fn):
         result = await self.db.write(fn)
@@ -123,13 +132,18 @@ class Hub:
         """
 
         async def op(conn):
+            self._reindexed = []
             await conn.execute("BEGIN IMMEDIATE")
             try:
                 result = await fn(conn)
             except BaseException:
+                self._reindexed = []
                 await conn.rollback()
                 raise
             await conn.commit()
+            touched, self._reindexed = self._reindexed, []
+            if touched and self.embed_queue is not None:
+                self.embed_queue.mark(touched)
             return result
 
         return await self._write(op)
@@ -148,6 +162,10 @@ class Hub:
             await store.index_message(conn, ref_id)
         else:
             await store.reindex(conn, kind, ref_id)
+        if self.embed_queue is not None:
+            # Attachments of a message are re-embedded when their own entry
+            # changes; the missing-vector scan picks up new ones.
+            self._reindexed.append((kind, ref_id))
 
     async def list_channels(
         self, include_archived: Any = False, state: Any = None
@@ -1068,13 +1086,15 @@ class Hub:
         offset: Any = None,
         mode: Any = None,
     ) -> dict[str, Any]:
-        """BM25 full-text search over messages, tasks and attachment filenames.
+        """Search over messages, tasks and attachment filenames.
 
-        Archived channels are searched too. A query with no searchable words
-        returns no results rather than an error. ``mode`` other than ``bm25``
-        is reserved and answers ``not_available``.
+        ``bm25`` (default) is full-text search. ``vector`` ranks by cosine
+        similarity to the embedded query, ``hybrid`` fuses both with
+        reciprocal rank fusion; both need an embedder and otherwise answer
+        ``not_available``. Archived channels are searched too. A query with
+        no searchable words returns no results rather than an error.
         """
-        clean_mode = search_rules.search_mode(mode)
+        clean_mode = search_rules.search_mode(mode, self._search_modes())
         text = search_rules.query_text(q)
         kinds = search_rules.search_kinds(kind)
         clean_channel = channel_name(channel) if channel not in (None, "") else None
@@ -1090,7 +1110,7 @@ class Hub:
             )
         match = search_rules.build_match(text)
 
-        async def op(conn):
+        async def op(conn, limit=clean_limit, offset=clean_offset):
             channel_id = None
             if clean_channel is not None:
                 found = await store.get_channel_by_name(conn, clean_channel)
@@ -1106,17 +1126,141 @@ class Hub:
                 channel_id=channel_id,
                 author=clean_author,
                 since=clean_since,
-                limit=clean_limit,
-                offset=clean_offset,
+                limit=limit,
+                offset=offset,
                 weights=search_rules.BM25_WEIGHTS,
                 snippet_markers=search_rules.SNIPPET_MARKERS,
                 snippet_tokens=search_rules.SNIPPET_TOKENS,
             )
 
-        rows, total = await self.db.read(op)
-        return search_rules.shape_results(
-            rows, total, limit=clean_limit, offset=clean_offset, mode=clean_mode
+        if clean_mode == "bm25":
+            rows, total = await self.db.read(op)
+            return search_rules.shape_results(
+                rows, total, limit=clean_limit, offset=clean_offset, mode=clean_mode
+            )
+
+        filters = {"kinds": kinds, "channel": clean_channel, "author": clean_author, "since": clean_since}
+        if clean_mode == "vector":
+            if not text.strip():
+                return search_rules.empty_results(limit=clean_limit, offset=clean_offset, mode="vector")
+            query_vec = await self._embed_query(text, degrade=False)
+            scored, total = await self._vector_rank(query_vec, clean_offset + clean_limit, filters)
+            page = scored[clean_offset : clean_offset + clean_limit]
+            hits = [search_rules.shape_vector_hit(row, value) for value, row in page]
+            return search_rules.shape_scored(
+                hits, total, limit=clean_limit, offset=clean_offset, mode="vector"
+            )
+
+        # hybrid
+        query_vec = await self._embed_query(text, degrade=True) if text.strip() else None
+        if query_vec is None and text.strip():
+            rows, total = await self.db.read(op)
+            result = search_rules.shape_results(
+                rows, total, limit=clean_limit, offset=clean_offset, mode="hybrid"
+            )
+            result["degraded"] = "bm25"
+            return result
+        pool = search_rules.fusion_pool(clean_limit, clean_offset)
+        bm25_rows, bm25_total = await self.db.read(lambda conn: op(conn, limit=pool, offset=0))
+        vector_scored: list[tuple[float, dict[str, Any]]] = []
+        vector_total = 0
+        if query_vec is not None:
+            vector_scored, vector_total = await self._vector_rank(query_vec, pool, filters)
+        by_key: dict[tuple[str, int], dict[str, Any]] = {}
+        for _, row in vector_scored:
+            by_key[(row["kind"], int(row["ref_id"]))] = row
+        for row in bm25_rows:
+            # BM25 rows win: their snippet carries the match highlight.
+            by_key[(row["kind"], int(row["ref_id"]))] = row
+        fused = search_rules.rrf_fuse(
+            [
+                [(row["kind"], int(row["ref_id"])) for row in bm25_rows],
+                [(row["kind"], int(row["ref_id"])) for _, row in vector_scored],
+            ]
         )
+        page = fused[clean_offset : clean_offset + clean_limit]
+        hits = [search_rules.shape_vector_hit(by_key[key], value) for key, value in page]
+        total = max(len(fused), bm25_total, vector_total)
+        return search_rules.shape_scored(
+            hits, total, limit=clean_limit, offset=clean_offset, mode="hybrid"
+        )
+
+    def _search_modes(self) -> frozenset[str]:
+        if self.embedder.enabled:
+            return frozenset(search_rules.SEARCH_MODES)
+        return search_rules.AVAILABLE_MODES
+
+    async def _embed_query(self, text: str, *, degrade: bool) -> list[float] | None:
+        """The unit query vector. On failure: ``None`` when ``degrade``, else ``embedder_unavailable``."""
+        timeout = min(self.embedder.timeout or search_rules.QUERY_EMBED_TIMEOUT, search_rules.QUERY_EMBED_TIMEOUT)
+        try:
+            vectors = await asyncio.wait_for(self.embedder.embed([text[: embed.EMBED_TEXT_MAX]]), timeout)
+            if len(vectors) != 1 or not vectors[0]:
+                raise embed.EmbedderError("embedder returned no vector for the query")
+            return embed.normalize(vectors[0])
+        except Exception as exc:  # noqa: BLE001 — any provider failure maps to one clear error
+            reason = embed.safe_error(exc)
+            logger.warning("query embedding failed (%s)", reason)
+            if degrade:
+                return None
+            raise HubError(
+                "embedder_unavailable",
+                f"the embedder could not embed the query ({reason}); try mode=bm25",
+                503,
+                {"provider": self.embedder.provider, "model": self.embedder.name, "reason": reason},
+            ) from None
+
+    async def _vector_rank(
+        self, query_vec: list[float], k: int, filters: dict[str, Any]
+    ) -> tuple[list[tuple[float, dict[str, Any]]], int]:
+        """The ``k`` entries most similar to ``query_vec`` that pass ``filters``, plus how many were scored."""
+        model = self.embedder.name
+        dim = len(query_vec)
+
+        async def op(conn):
+            channel_id = None
+            if filters["channel"] is not None:
+                found = await store.get_channel_by_name(conn, filters["channel"])
+                if found is None:
+                    raise HubError("not_found", f"channel {filters['channel']} not found", 404)
+                channel_id = found["id"]
+            count = 0
+            scored = []
+            async for row in store.vector_candidates(
+                conn,
+                model,
+                dim,
+                kinds=filters["kinds"],
+                channel_id=channel_id,
+                author=filters["author"],
+                since=filters["since"],
+            ):
+                count += 1
+                scored.append((embed.dot(query_vec, embed.unpack(row["vector"])), row))
+                if len(scored) >= 4 * k + 256:
+                    scored = search_rules.top_k(scored, k)
+            best = search_rules.top_k(scored, k)
+            return [(value, dict(row)) for value, row in best], count
+
+        return await self.db.read(op)
+
+    async def embed_status(self) -> dict[str, Any]:
+        """Embedder and queue state: ``{provider, model, dim, indexed, pending, last_error}``."""
+        embedder = self.embedder
+        queue = self.embed_queue
+        counts = {"indexed": 0, "pending": 0}
+        if embedder.enabled and self.db.fts5_available:
+            counts = await self.db.read(
+                lambda conn: store.embed_counts(conn, embedder.name, embedder.dim)
+            )
+        return {
+            "provider": embedder.provider,
+            "model": embedder.name or None,
+            "dim": embedder.dim,
+            "indexed": counts["indexed"],
+            "pending": counts["pending"],
+            "last_error": queue.last_error if queue is not None else None,
+        }
 
     async def get_attachment(self, attachment_id: Any) -> dict[str, Any]:
         clean_id = require_id(attachment_id, "attachment_id")

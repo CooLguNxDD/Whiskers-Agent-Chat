@@ -10,6 +10,7 @@ from starlette.routing import Mount
 
 from cat_fleet_chat.config import Settings
 from cat_fleet_chat.db import Database, ProcessLock
+from cat_fleet_chat.embed import Embedder, EmbedQueue, build_embedder
 from cat_fleet_chat.hub import Hub
 from cat_fleet_chat.mcp_app import build_mcp, set_dispatcher, set_hub
 from cat_fleet_chat.rest_app import Guard, api_routes, hook_routes
@@ -23,11 +24,13 @@ def create_app(
     *,
     webhook_transport: httpx.AsyncBaseTransport | None = None,
     webhook_interval: float = 2.0,
+    embedder: Embedder | None = None,
 ) -> Starlette:
     """Build the hub app. The process lock and database open during lifespan.
 
     ``webhook_transport`` and ``webhook_interval`` exist for tests: they swap the
-    outbound HTTP transport and the per-hook pacing.
+    outbound HTTP transport and the per-hook pacing. ``embedder`` replaces the
+    one the settings describe (tests pass a fake).
     """
     mcp = build_mcp()
     # path="/" because the parent mounts this app at /mcp. Stateless mode
@@ -54,10 +57,22 @@ def create_app(
             hub.discord_resolver = dispatcher.discord_info
         app.state.webhooks = dispatcher
         set_dispatcher(dispatcher)
+        # Embeddings are optional: provider "off" keeps a NullEmbedder and the
+        # queue never starts. The queue runs beside the hub and never blocks writes.
+        active_embedder = embedder if embedder is not None else build_embedder(settings)
+        queue = EmbedQueue(db, active_embedder, batch=settings.embed_batch)
+        hub.embedder = active_embedder
+        hub.embed_queue = queue
+        queue.start()
+        app.state.embed_queue = queue
         try:
             async with mcp_http.lifespan(app):
                 yield
         finally:
+            await queue.stop()
+            hub.embed_queue = None
+            if embedder is None:
+                await active_embedder.aclose()
             set_dispatcher(None)
             hub.discord_resolver = None
             if dispatcher is not None:
