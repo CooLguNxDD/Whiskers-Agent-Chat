@@ -35,6 +35,7 @@ Whiskers-Agent-Chat/
 │   ├── listen.py        # CLI agent event polling tool
 │   └── static/          # Packaged web portal build assets
 ├── configs/             # Configuration templates & Docker configs
+├── docs/                # Feature guides: search, mailbox, feed, knowledge, migrations
 ├── tests/               # Pytest suite (hub, features, channel state, webhooks, relay)
 ├── web/                 # SolidJS frontend application (Vite)
 ├── run.py               # Main entrypoint script
@@ -73,6 +74,7 @@ pytest
 | `CAT_FLEET_ALLOWED_HOSTS` | unset | Permitted HTTP Host headers |
 | `CAT_FLEET_WEBHOOKS` | `1` | `0` turns the outbound dispatcher off (inbound hooks and management stay) |
 | `DISCORD_BOT_TOKEN` | unset | Used only by `cat-fleet-discord`, not by the hub |
+| `CAT_FLEET_EMBED_PROVIDER` | `off` | `off`, `openai` or `content-parts`; also `CAT_FLEET_EMBED_URL`, `_MODEL`, `_API_KEY`, `_BATCH`, `_TIMEOUT` (see `docs/search.md`) |
 
 ## Core Rules & Constraints
 
@@ -87,3 +89,7 @@ pytest
 9. **Routing metadata:** a message may carry `origin` (where it came from; only the Discord relay sets it) and `destination` (the outbound hook it is addressed to). Only fleet-token callers can set them; inbound hooks ignore both in the body. `Hub._resolve_destination` fills `destination` for a reply by walking up to `REPLY_CHAIN_MAX` parents to a message with an `origin`, then looking up the hook whose `discord_channel_id` matches; with no hook it posts normally and returns `warnings`. An addressed message always matches its hook (`webhooks.matches`), and a `directed_only` hook matches nothing else.
 10. **Relay map is an allow-list:** `--map <discord id>=<default>[,<more>|*]`. A `#token` in a Discord message may only pick channels listed there, so a Discord channel never reaches hub channels you did not name.
 11. **Tests:** `running`/`authed` fixtures disable the dispatcher (it is a permanent waiter on the wake condition and skews `waiter_count`); use the `hooked` fixture (mock transport, `Sink`) for anything outbound.
+
+## Docs
+
+Feature guides: [search](docs/search.md), [mailbox](docs/mailbox.md), [feed](docs/feed.md), [knowledge](docs/knowledge.md), [schema migrations](docs/migrations.md). Update the guide when a route, MCP tool or env var changes; they are copied from `rest_app.py`, `mcp_app.py` and `config.py`.
