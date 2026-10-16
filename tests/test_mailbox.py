@@ -489,3 +489,124 @@ async def test_v5_database_upgrades_on_open(tmp_path):
     assert {"idx_mailbox_recipient", "idx_mailbox_unread"} <= indexes
     assert versions == list(range(1, SCHEMA_VERSION + 1))
     assert events == 1
+
+
+# --- review fixes (S09) ----------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/api/v1/mailbox", "/api/v1/mailbox/bob/read", "/api/v1/mailbox/bob/ack"])
+@pytest.mark.parametrize("payload", ["[1, 2]", '"text"', "7", "null"])
+async def test_rest_mail_rejects_non_object_bodies(running, path, payload):
+    client, _app = running
+    reply = await client.post(path, content=payload, headers={"content-type": "application/json"})
+    assert reply.status_code == 400, reply.text
+    assert reply.json()["error"]["code"] == "validation_error"
+
+
+def test_mail_ids_dedupe_keeps_first_seen_order():
+    from cat_fleet_chat import mailbox
+
+    assert mailbox.ids([5, 3, 5, 9, 3, 1]) == [5, 3, 9, 1]
+    assert mailbox.ids("2, 2,1") == [2, 1]
+
+
+async def test_mail_counts_split_unread_read_and_acked(running):
+    _client, app = running
+    hub = app.state.hub
+    ids = [(await hub.send_mail("alice", "bob", f"m{i}"))["mail"]["id"] for i in range(4)]
+    await hub.send_mail("alice", "carol", "other")
+    await hub.mark_mail_read("bob", ids=[ids[0], ids[1]])
+    await hub.ack_mail("bob", ids=[ids[1]])
+    counts = await hub.mail_counts("bob")
+    assert (counts["unread"], counts["unacked"], counts["total"]) == (2, 3, 4)
+
+
+async def test_mail_counts_use_indexes(running):
+    _client, app = running
+    hub = app.state.hub
+
+    async def plan(conn):
+        rows = []
+        for sql in (
+            "SELECT count(*) FROM mailbox WHERE recipient = 'bob'",
+            "SELECT count(*) FROM mailbox WHERE recipient = 'bob' AND read_at IS NULL",
+            "SELECT count(*) FROM mailbox WHERE recipient = 'bob' AND acked_at IS NULL",
+        ):
+            cursor = await conn.execute("EXPLAIN QUERY PLAN " + sql)
+            rows.append(" ".join(row[3] for row in await cursor.fetchall()))
+        return rows
+
+    total, unread, unacked = await hub.db.read(plan)
+    assert "idx_mailbox_recipient" in total, total
+    assert "idx_mailbox_unread" in unread, unread
+    assert "idx_mailbox_unacked" in unacked, unacked
+
+
+async def test_get_mail_owners_skips_bodies(running):
+    _client, app = running
+    hub = app.state.hub
+    sent = (await hub.send_mail("alice", "bob", "secret body"))["mail"]
+
+    from cat_fleet_chat import store
+
+    owners = await hub.db.read(lambda conn: store.get_mail_owners(conn, [sent["id"], 999]))
+    assert owners == {sent["id"]: "bob"}
+
+
+async def test_send_mail_links_chat_message(running):
+    _client, app = running
+    hub = app.state.hub
+    posted = await hub.post_message("fleet", "alice", "hello")
+    message_id = posted["message"]["id"]
+    sent = await hub.send_mail("alice", "bob", "see chat", message_id=message_id)
+    assert sent["mail"]["message_id"] == message_id
+    plain = await hub.send_mail("alice", "bob", "no link")
+    assert plain["mail"]["message_id"] is None
+    with pytest.raises(HubError) as raised:
+        await hub.send_mail("alice", "bob", "dangling", message_id=424242)
+    assert raised.value.status == 400
+
+
+async def test_rest_send_mail_accepts_message_id(running):
+    client, app = running
+    posted = await app.state.hub.post_message("fleet", "alice", "hello")
+    message_id = posted["message"]["id"]
+    sent = await client.post(
+        "/api/v1/mailbox",
+        json={"sender": "alice", "recipient": "bob", "body": "x", "message_id": message_id},
+    )
+    assert sent.status_code == 201, sent.text
+    assert sent.json()["mail"]["message_id"] == message_id
+
+
+async def test_wait_timeout_returns_last_cursors_and_unread(running):
+    _client, app = running
+    hub = app.state.hub
+    await hub.send_mail("alice", "bob", "waiting")
+    result = await hub.wait_for_mentions("bob", 0, timeout=0.05, mail_since_id=None)
+    assert result["timed_out"] is True
+    assert result["messages"] == [] and result["mail"] == []
+    assert result["cursor"] == 0
+    assert result["mail_unread"] == 1
+    assert result["mail_cursor"] >= 1
+
+
+async def test_retry_matches_fingerprint_stored_before_message_id(running):
+    from cat_fleet_chat.validate import fingerprint
+
+    _client, app = running
+    hub = app.state.hub
+    legacy = fingerprint(
+        "mail",
+        {"sender": "alice", "recipient": "bob", "subject": "", "body": "old", "reply_to": None},
+    )
+    first = await hub.send_mail("alice", "bob", "old", client_request_id="legacy-1")
+
+    async def swap(conn):
+        await conn.execute(
+            "UPDATE idempotency SET fingerprint = ? WHERE client_request_id = ?", (legacy, "legacy-1")
+        )
+
+    await hub._txn(swap)
+    again = await hub.send_mail("alice", "bob", "old", client_request_id="legacy-1")
+    assert again["mail"]["id"] == first["mail"]["id"]

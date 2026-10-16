@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import aiosqlite
-from sqlalchemy import bindparam, case, delete, func, insert, literal, select, text, union_all, update
+from sqlalchemy import bindparam, delete, func, insert, literal, select, text, union_all, update
 
 from cat_fleet_chat.mailbox import mail_row
 from cat_fleet_chat.schema import (
@@ -498,6 +498,17 @@ async def get_mail_many(conn: aiosqlite.Connection, mail_ids: Iterable[int]) -> 
     return [mail_row(row) for row in rows]
 
 
+async def get_mail_owners(conn: aiosqlite.Connection, mail_ids: Iterable[int]) -> dict[int, str]:
+    """``{mail id: recipient}`` for the ids that exist. Never loads a body."""
+    wanted = sorted(set(mail_ids))
+    if not wanted:
+        return {}
+    rows = await fetch_all(
+        conn, select(mailbox.c.id, mailbox.c.recipient).where(mailbox.c.id.in_(wanted))
+    )
+    return {int(row["id"]): row["recipient"] for row in rows}
+
+
 async def list_mail(
     conn: aiosqlite.Connection,
     recipient: str,
@@ -529,20 +540,27 @@ async def max_mail_id(conn: aiosqlite.Connection, recipient: str) -> int:
     return int(row["n"])
 
 
+async def _count_mail(conn: aiosqlite.Connection, *where: Any) -> int:
+    row = await fetch_one(conn, select(func.count().label("n")).where(*where))
+    return int(row["n"])
+
+
+async def count_unread_mail(conn: aiosqlite.Connection, recipient: str) -> int:
+    return await _count_mail(conn, mailbox.c.recipient == recipient, mailbox.c.read_at.is_(None))
+
+
 async def mail_counts(conn: aiosqlite.Connection, recipient: str) -> dict[str, int]:
-    row = await fetch_one(
-        conn,
-        select(
-            func.count().label("total"),
-            func.coalesce(
-                func.sum(case((mailbox.c.read_at.is_(None), 1), else_=0)), 0
-            ).label("unread"),
-            func.coalesce(
-                func.sum(case((mailbox.c.acked_at.is_(None), 1), else_=0)), 0
-            ).label("unacked"),
-        ).where(mailbox.c.recipient == recipient),
-    )
-    return {"unread": int(row["unread"]), "unacked": int(row["unacked"]), "total": int(row["total"])}
+    """Three index-only counts: all mail, the unread partial index, the unacked one.
+
+    One aggregate over the recipient's rows would read every row (and its
+    body page) on each call; each count below walks only its own index.
+    """
+    mine = mailbox.c.recipient == recipient
+    return {
+        "unread": await _count_mail(conn, mine, mailbox.c.read_at.is_(None)),
+        "unacked": await _count_mail(conn, mine, mailbox.c.acked_at.is_(None)),
+        "total": await _count_mail(conn, mine),
+    }
 
 
 async def mark_mail_read(
