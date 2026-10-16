@@ -504,6 +504,124 @@ async def test_webhook(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+# ---- feed --------------------------------------------------------------
+
+
+def _caller(request: Request, body: dict[str, Any], field: str) -> Any:
+    """The acting handle: ``field`` or ``agent_name`` in the body, else the same in the query."""
+    found = _author(body, field)
+    if found not in (None, ""):
+        return found
+    params = request.query_params
+    return params.get(field) or params.get("agent_name")
+
+
+async def feed_create_post(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).feed_post(
+            _author(body),
+            body.get("body"),
+            parent_id=body.get("parent_id"),
+            quote_of=body.get("quote_of"),
+            client_request_id=body.get("client_request_id"),
+        )
+        return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_get_post(request: Request) -> JSONResponse:
+    try:
+        hub = _hub(request)
+        post_id = request.path_params["post_id"]
+        if request.query_params.get("thread") in ("1", "true", "yes"):
+            return JSONResponse(
+                await hub.feed_timeline(
+                    scope="thread", post_id=post_id, cursor=request.query_params.get("cursor")
+                )
+            )
+        return JSONResponse(await hub.feed_get_post(post_id))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_delete_post(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).feed_delete(
+            _caller(request, body, "actor"), request.path_params["post_id"]
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_repost(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).feed_repost(
+            _caller(request, body, "author"), request.path_params["post_id"]
+        )
+        return JSONResponse(result, status_code=200 if result.get("idempotent") else 201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_timeline(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        result = await _hub(request).feed_timeline(
+            scope=params.get("scope") or "global",
+            handle=params.get("handle"),
+            tag=params.get("tag"),
+            author=params.get("author"),
+            post_id=params.get("post_id"),
+            cursor=params.get("cursor"),
+            limit=params.get("limit"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_follow(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        hub = _hub(request)
+        follower = _caller(request, body, "follower")
+        followee = request.path_params["followee"]
+        if request.method.upper() == "DELETE":
+            return JSONResponse(await hub.feed_unfollow(follower, followee))
+        return JSONResponse(await hub.feed_follow(follower, followee))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_following(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).feed_following(request.path_params["handle"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_followers(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).feed_followers(request.path_params["handle"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_trending(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        return JSONResponse(
+            await _hub(request).feed_trending_tags(params.get("limit"), params.get("since"))
+        )
+    except HubError as exc:
+        return _json_error(exc)
+
+
 HOOK_BODY_MAX = 64 * 1024
 
 
@@ -657,6 +775,15 @@ def api_routes() -> list[Route]:
         Route("/api/v1/webhooks/{hook_id:int}", delete_webhook, methods=["DELETE"]),
         Route("/api/v1/webhooks/{hook_id:int}/test", test_webhook, methods=["POST"]),
         Route("/api/v1/webhooks/{hook_id:int}/rotate-secret", rotate_webhook_secret, methods=["POST"]),
+        Route("/api/v1/feed/posts", feed_create_post, methods=["POST"]),
+        Route("/api/v1/feed/posts/{post_id:int}", feed_get_post, methods=["GET"]),
+        Route("/api/v1/feed/posts/{post_id:int}", feed_delete_post, methods=["DELETE"]),
+        Route("/api/v1/feed/posts/{post_id:int}/repost", feed_repost, methods=["POST"]),
+        Route("/api/v1/feed/timeline", feed_timeline, methods=["GET"]),
+        Route("/api/v1/feed/follows/{followee}", feed_follow, methods=["PUT", "DELETE"]),
+        Route("/api/v1/feed/follows/{handle}", feed_following, methods=["GET"]),
+        Route("/api/v1/feed/followers/{handle}", feed_followers, methods=["GET"]),
+        Route("/api/v1/feed/tags/trending", feed_trending, methods=["GET"]),
     ]
 
 

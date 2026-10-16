@@ -6,12 +6,12 @@ import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import embed, mailbox, store, validate
+from cat_fleet_chat import embed, feed, mailbox, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -48,6 +48,8 @@ from cat_fleet_chat.validate import (
     webhook_patterns,
     webhook_url,
 )
+from cat_fleet_chat.validate import client_request_id as client_request_id_fn
+from cat_fleet_chat.validate import handle as validate_handle
 from cat_fleet_chat.waiters import WaitHub
 
 logger = logging.getLogger("cat_fleet_chat.hub")
@@ -109,6 +111,8 @@ class Hub:
         # Looks up which Discord channel a webhook URL posts to. The app wires
         # in the dispatcher; the hub itself makes no HTTP calls.
         self.discord_resolver: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None
+        # Awaited after a new feed post commits, with the post result. See feed_post.
+        self.feed_post_hooks: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
         # Optional embeddings. The app swaps in the configured provider and
         # starts the queue; without them vector and hybrid search answer
         # not_available and nothing else changes.
@@ -1302,6 +1306,434 @@ class Hub:
         if found is None:
             raise HubError("not_found", f"attachment {clean_id} not found", 404)
         return {"attachment": found}
+
+    # ---- feed -----------------------------------------------------------
+
+    async def _shape_feed(self, conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """API shapes for feed rows, with counts, hashtags and the one-level inline original."""
+        if not rows:
+            return []
+        targets = {
+            target
+            for row in rows
+            if (target := row.get("repost_of") or row.get("quote_of")) is not None
+        }
+        originals = await store.feed_rows(conn, targets)
+        ids = [row["id"] for row in rows] + list(originals)
+        counts = await store.feed_counts(conn, ids)
+        tags = await store.feed_tags_for(conn, ids)
+        inline: dict[int, dict[str, Any]] = {}
+        for target in targets:
+            found = originals.get(target)
+            if found is None or found["deleted_at"] is not None:
+                inline[target] = feed.tombstone_original(target)
+            else:
+                inline[target] = feed.shape_post(
+                    found, counts=counts.get(target), hashtags=tags.get(target)
+                )
+        return [
+            feed.shape_post(
+                row,
+                counts=counts.get(row["id"]),
+                hashtags=tags.get(row["id"]),
+                original=inline.get(row.get("repost_of") or row.get("quote_of")),
+            )
+            for row in rows
+        ]
+
+    async def _feed_post_shape(self, conn, post_id: int) -> dict[str, Any]:
+        row = await store.get_feed_row(conn, post_id)
+        assert row is not None
+        return (await self._shape_feed(conn, [row]))[0]
+
+    @staticmethod
+    async def _live_original(conn, post_id: int, field: str) -> dict[str, Any]:
+        """The post a repost or quote points at. A repost resolves to what it reposted."""
+        found = await store.get_feed_row(conn, post_id)
+        if found is not None and found["repost_of"] is not None:
+            found = await store.get_feed_row(conn, found["repost_of"])
+        if found is None:
+            raise HubError("not_found", f"post {post_id} not found", 404, {"field": field})
+        if found["deleted_at"] is not None:
+            raise HubError("post_deleted", f"post {found['id']} was deleted", 409, {"field": field})
+        return found
+
+    async def feed_post(
+        self,
+        author: Any,
+        body: Any,
+        parent_id: Any = None,
+        quote_of: Any = None,
+        client_request_id: Any = None,
+    ) -> dict[str, Any]:
+        """Post to the feed. ``parent_id`` makes it a reply, ``quote_of`` a quote.
+
+        A reply inherits ``root_id`` from its parent and sits one level deeper,
+        at most ``feed.DEPTH_MAX``. The parent must exist and not be deleted.
+        ``client_request_id`` makes a retry return the first result.
+
+        After the commit, every callable in ``self.feed_post_hooks`` is awaited
+        with the result, for new posts only (not idempotent replays). This is
+        the extension point for later features (knowledge facts); a failing
+        hook is logged and never undoes or fails the post.
+        """
+        clean_author = handle(author, "author")
+        clean_body = feed.normalize_body(body)
+        parent = optional_id(parent_id, "parent_id") or None
+        quoted = optional_id(quote_of, "quote_of") or None
+        key = client_request_id_fn(client_request_id)
+        payload = {"author": clean_author, "body": clean_body, "parent_id": parent, "quote_of": quoted}
+        digest = fingerprint("feed_post", payload) if key else None
+        tags = feed.extract_hashtags(clean_body)
+
+        async def op(conn):
+            if key and digest is not None:
+                prior = await store.get_idempotency(conn, key)
+                if prior is not None:
+                    if prior["fingerprint"] != digest or prior["kind"] != "feed_post":
+                        raise HubError(
+                            "idempotency_conflict",
+                            "client_request_id was already used with a different payload",
+                            409,
+                            {"client_request_id": key},
+                        )
+                    return prior["result"], False
+            root_id: int | None = None
+            depth = 0
+            if parent is not None:
+                found = await store.get_feed_row(conn, parent)
+                if found is None:
+                    raise HubError("not_found", f"post {parent} not found", 404, {"field": "parent_id"})
+                if found["deleted_at"] is not None:
+                    raise HubError(
+                        "post_deleted", f"post {parent} was deleted", 409, {"field": "parent_id"}
+                    )
+                depth = int(found["depth"]) + 1
+                if depth > feed.DEPTH_MAX:
+                    raise HubError(
+                        "thread_too_deep",
+                        f"replies nest at most {feed.DEPTH_MAX} levels deep",
+                        409,
+                        {"field": "parent_id", "max_depth": feed.DEPTH_MAX},
+                    )
+                root_id = int(found["root_id"])
+            quote_target = None
+            if quoted is not None:
+                quote_target = (await self._live_original(conn, quoted, "quote_of"))["id"]
+            created_at = utc_now()
+            post_id = await store.insert_feed_post(
+                conn,
+                author=clean_author,
+                body=clean_body,
+                parent_id=parent,
+                root_id=root_id,
+                repost_of=None,
+                quote_of=quote_target,
+                depth=depth,
+                created_at=created_at,
+                tags=tags,
+            )
+            post = await self._feed_post_shape(conn, post_id)
+            await store.insert_event(
+                conn,
+                "feed_post",
+                None,
+                post_id,
+                {
+                    "id": post_id,
+                    "kind": post["kind"],
+                    "author": clean_author,
+                    "parent_id": parent,
+                    "root_id": post["root_id"],
+                    "quote_of": quote_target,
+                    "depth": depth,
+                    "hashtags": tags,
+                    "body": feed.event_snippet(clean_body),
+                },
+                created_at,
+            )
+            result = {"post": post}
+            if key and digest is not None:
+                await store.insert_idempotency(conn, key, "feed_post", digest, result, created_at)
+            return result, True
+
+        result, created = await self._txn(op)
+        if created:
+            for hook in list(self.feed_post_hooks):
+                try:
+                    await hook(result)
+                except Exception:
+                    logger.exception("feed post hook failed")
+        return result
+
+    async def feed_repost(self, author: Any, post_id: Any) -> dict[str, Any]:
+        """Repost a post. Repeating it returns the same repost; a repost of a repost reposts the original."""
+        clean_author = handle(author, "author")
+        target = require_id(post_id, "post_id")
+
+        async def op(conn):
+            original = await self._live_original(conn, target, "post_id")
+            existing = await store.find_repost(conn, clean_author, original["id"])
+            if existing is not None and existing["deleted_at"] is None:
+                return {"post": await self._feed_post_shape(conn, existing["id"]), "idempotent": True}
+            created_at = utc_now()
+            if existing is not None:
+                # Reposting again after deleting the repost brings the same row back.
+                repost_id = existing["id"]
+                await store.set_feed_deleted(conn, repost_id, None)
+            else:
+                repost_id = await store.insert_feed_post(
+                    conn,
+                    author=clean_author,
+                    body="",
+                    parent_id=None,
+                    root_id=None,
+                    repost_of=original["id"],
+                    quote_of=None,
+                    depth=0,
+                    created_at=created_at,
+                )
+            await store.insert_event(
+                conn,
+                "feed_repost",
+                None,
+                repost_id,
+                {
+                    "id": repost_id,
+                    "author": clean_author,
+                    "repost_of": original["id"],
+                    "original_author": original["author"],
+                    "body": feed.event_snippet(original["body"]),
+                },
+                created_at,
+            )
+            return {"post": await self._feed_post_shape(conn, repost_id), "idempotent": False}
+
+        return await self._txn(op)
+
+    async def feed_delete(self, actor: Any, post_id: Any) -> dict[str, Any]:
+        """Soft delete. Only the author may delete; replies stay and the post becomes a tombstone."""
+        clean_actor = handle(actor, "actor")
+        target = require_id(post_id, "post_id")
+
+        async def op(conn):
+            found = await store.get_feed_row(conn, target)
+            if found is None:
+                raise HubError("not_found", f"post {target} not found", 404)
+            if found["author"] != clean_actor:
+                raise HubError("forbidden", "only the author can delete a post", 403, {"post_id": target})
+            if found["deleted_at"] is not None:
+                return {"post": await self._feed_post_shape(conn, target), "idempotent": True}
+            await store.set_feed_deleted(conn, target, utc_now())
+            return {"post": await self._feed_post_shape(conn, target), "idempotent": False}
+
+        return await self._txn(op)
+
+    async def feed_get_post(self, post_id: Any) -> dict[str, Any]:
+        """One post. A deleted post comes back as a tombstone."""
+        target = require_id(post_id, "post_id")
+
+        async def op(conn):
+            found = await store.get_feed_row(conn, target)
+            if found is None:
+                raise HubError("not_found", f"post {target} not found", 404)
+            return {"post": (await self._shape_feed(conn, [found]))[0]}
+
+        return await self.db.read(op)
+
+    async def _set_follow(self, follower: Any, followee: Any, following: bool) -> dict[str, Any]:
+        clean_follower = handle(follower, "follower")
+        clean_followee = handle(followee, "followee")
+        if clean_follower == clean_followee:
+            raise HubError("validation_error", "a handle cannot follow itself", 400, {"field": "followee"})
+
+        async def op(conn):
+            created_at = utc_now()
+            if following:
+                changed = await store.insert_follow(conn, clean_follower, clean_followee, created_at)
+            else:
+                changed = await store.delete_follow(conn, clean_follower, clean_followee)
+            if changed:
+                await store.insert_event(
+                    conn,
+                    "feed_follow",
+                    None,
+                    0,
+                    {"follower": clean_follower, "followee": clean_followee, "following": following},
+                    created_at,
+                )
+            return {
+                "follower": clean_follower,
+                "followee": clean_followee,
+                "following": following,
+                "idempotent": not changed,
+            }
+
+        return await self._txn(op)
+
+    async def feed_follow(self, follower: Any, followee: Any) -> dict[str, Any]:
+        """``follower`` follows ``followee``. Repeating it is a no-op."""
+        return await self._set_follow(follower, followee, True)
+
+    async def feed_unfollow(self, follower: Any, followee: Any) -> dict[str, Any]:
+        """Stop following. Unfollowing someone you do not follow is a no-op."""
+        return await self._set_follow(follower, followee, False)
+
+    async def feed_following(self, handle_value: Any) -> dict[str, Any]:
+        clean = handle(handle_value, "handle")
+
+        async def op(conn):
+            return await store.list_follows(conn, follower=clean)
+
+        rows = await self.db.read(op)
+        return {"handle": clean, "following": [row["followee"] for row in rows]}
+
+    async def feed_followers(self, handle_value: Any) -> dict[str, Any]:
+        clean = handle(handle_value, "handle")
+
+        async def op(conn):
+            return await store.list_follows(conn, followee=clean)
+
+        rows = await self.db.read(op)
+        return {"handle": clean, "followers": [row["follower"] for row in rows]}
+
+    async def feed_timeline(
+        self,
+        *,
+        scope: Any = "global",
+        handle: Any = None,
+        tag: Any = None,
+        author: Any = None,
+        post_id: Any = None,
+        cursor: Any = None,
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        """Newest-first live posts with opaque ``cursor`` paging, or one thread.
+
+        ``global`` is everything, ``following`` the authors ``handle`` follows,
+        ``hashtag`` posts tagged ``tag``, ``author`` one author's posts. Deleted
+        posts are left out. ``thread`` returns the nested tree around
+        ``post_id`` (any post in it), with deleted posts as tombstones; see
+        ``_feed_thread`` for its window and paging.
+        """
+        clean_scope = scope or "global"
+        if clean_scope not in feed.TIMELINE_SCOPES:
+            raise HubError(
+                "validation_error",
+                f"scope must be one of {', '.join(feed.TIMELINE_SCOPES)}",
+                400,
+                {"field": "scope", "allowed": list(feed.TIMELINE_SCOPES)},
+            )
+        if clean_scope == "thread":
+            return await self._feed_thread(require_id(post_id, "post_id"), cursor)
+        before = feed.decode_cursor(cursor)
+        clean_limit = page_limit(limit)
+        filters: dict[str, Any] = {}
+        if clean_scope == "following":
+            if handle in (None, ""):
+                raise HubError("validation_error", "following needs handle", 400, {"field": "handle"})
+            filters["follower"] = validate_handle(handle, "handle")
+        elif clean_scope == "hashtag":
+            filters["tag"] = feed.clean_tag(tag)
+        elif clean_scope == "author":
+            who = author if author not in (None, "") else handle
+            filters["author"] = validate_handle(who, "author")
+
+        async def op(conn):
+            rows = await store.feed_timeline_rows(
+                conn, before_id=before, limit=clean_limit + 1, **filters
+            )
+            has_more = len(rows) > clean_limit
+            rows = rows[:clean_limit]
+            return await self._shape_feed(conn, rows), has_more
+
+        posts, has_more = await self.db.read(op)
+        return {
+            "scope": clean_scope,
+            "posts": posts,
+            "next_cursor": feed.encode_cursor(posts[-1]["id"]) if has_more and posts else None,
+            "has_more": has_more,
+        }
+
+    async def _feed_thread(self, post_id: int, cursor: Any = None) -> dict[str, Any]:
+        """A window of ``feed.THREAD_NEST_MAX`` levels of the thread around ``post_id``.
+
+        The window starts at the root, or a few levels above a deep post; the
+        posts above it come back flat in ``ancestors``. Nodes on the window's
+        last level with replies carry ``more_replies`` (read the thread at that
+        node to go deeper). A wide window pages by ``next_cursor``; the
+        requested post and its chain are always on the first page.
+        """
+        after = feed.decode_cursor(cursor)
+
+        async def op(conn):
+            chain = await store.feed_ancestor_rows(conn, post_id)
+            if not chain:
+                raise HubError("not_found", f"post {post_id} not found", 404)
+            focus_depth = int(chain[-1]["depth"])
+            top_depth = feed.thread_window_top(focus_depth)
+            top = chain[top_depth]
+            max_depth = top_depth + feed.THREAD_NEST_MAX - 1
+            in_window = chain[top_depth:]
+            rows = await store.feed_subtree_rows(
+                conn,
+                int(top["id"]),
+                max_depth=max_depth,
+                after_id=after,
+                limit=feed.THREAD_ROWS_MAX + 1,
+                exclude=[row["id"] for row in in_window] if after is not None else (),
+            )
+            has_more = len(rows) > feed.THREAD_ROWS_MAX
+            rows = rows[: feed.THREAD_ROWS_MAX]
+            last_id = rows[-1]["id"] if rows else None
+            if after is None:
+                listed = {row["id"] for row in rows}
+                rows += [row for row in in_window if row["id"] not in listed]
+            edge = [row["id"] for row in rows if row["depth"] >= max_depth]
+            deeper = await store.feed_ids_with_replies(conn, edge)
+            posts = await self._shape_feed(conn, rows)
+            for post in posts:
+                post["more_replies"] = post["id"] in deeper
+            ancestors = await self._shape_feed(conn, chain[:top_depth])
+            return int(chain[0]["id"]), int(top["id"]), ancestors, posts, has_more, last_id
+
+        root_id, top_id, ancestors, posts, has_more, last_id = await self.db.read(op)
+        return {
+            "scope": "thread",
+            "root_id": root_id,
+            "focus_id": post_id,
+            "top_id": top_id,
+            "ancestors": ancestors,
+            "count": len(posts),
+            "posts": feed.build_thread(posts, focus_id=post_id),
+            "next_cursor": feed.encode_cursor(last_id) if has_more and last_id else None,
+            "has_more": has_more,
+            "truncated": has_more,
+        }
+
+    async def feed_trending_tags(self, limit: Any = None, since: Any = None) -> dict[str, Any]:
+        """Most used tags on live posts since ``since`` (ISO time, default the last 24 hours)."""
+        if limit in (None, ""):
+            clean_limit = feed.TRENDING_DEFAULT
+        else:
+            clean_limit = min(page_limit(limit), feed.TRENDING_MAX)
+        if since in (None, ""):
+            start = datetime.now(timezone.utc) - timedelta(hours=feed.TRENDING_WINDOW_HOURS)
+        else:
+            try:
+                start = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise HubError(
+                    "validation_error", "since must be an ISO 8601 time", 400, {"field": "since"}
+                ) from exc
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+        clean_since = start.astimezone(timezone.utc).isoformat()
+
+        async def op(conn):
+            return await store.trending_tags(conn, since=clean_since, limit=clean_limit)
+
+        return {"since": clean_since, "tags": await self.db.read(op)}
 
     # ---- webhooks -------------------------------------------------------
 
