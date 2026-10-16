@@ -11,7 +11,7 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import embed, feed, mailbox, store, validate
+from cat_fleet_chat import embed, feed, knowledge, mailbox, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -1120,7 +1120,7 @@ class Hub:
         offset: Any = None,
         mode: Any = None,
     ) -> dict[str, Any]:
-        """Search over messages, tasks and attachment filenames.
+        """Search over messages, tasks, attachment filenames and active knowledge facts.
 
         ``bm25`` (default) is full-text search. ``vector`` ranks by cosine
         similarity to the embedded query, ``hybrid`` fuses both with
@@ -1736,6 +1736,199 @@ class Hub:
         return {"since": clean_since, "tags": await self.db.read(op)}
 
     # ---- webhooks -------------------------------------------------------
+
+    # ---- knowledge facts --------------------------------------------------
+
+    async def _knowledge_insert(self, conn, clean: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Insert one validated fact, or return the existing one with the same dedupe key.
+
+        Runs inside the caller's write transaction. A new fact is indexed for
+        search and announced with a ``knowledge_fact`` event.
+        """
+        norm = knowledge.normalize_fact(clean["fact"])
+        existing = await store.find_knowledge(conn, clean["project"], norm)
+        if existing is not None:
+            return knowledge.shape_fact(existing), False
+        now = utc_now()
+        fact_id = await store.insert_knowledge(
+            conn,
+            {
+                "project": clean["project"],
+                "topic": clean["topic"],
+                "fact": clean["fact"],
+                "norm": norm,
+                "source_run": clean.get("source_run"),
+                "source_step": clean.get("source_step"),
+                "author": clean["author"],
+                "status": "active",
+                "created_at": clean.get("created_at") or now,
+                "updated_at": now,
+            },
+        )
+        await self._index(conn, "knowledge", fact_id)
+        row = await store.get_knowledge(conn, fact_id)
+        assert row is not None
+        fact = knowledge.shape_fact(row)
+        await store.insert_event(
+            conn, "knowledge_fact", None, fact_id, knowledge.event_payload(fact), now
+        )
+        return fact, True
+
+    async def knowledge_add(
+        self,
+        project: Any,
+        fact: Any,
+        topic: Any = None,
+        author: Any = None,
+        source_run: Any = None,
+        source_step: Any = None,
+    ) -> dict[str, Any]:
+        """Record a fact. The same fact again in ``project`` (any case, spacing or
+        trailing punctuation) returns the existing row with ``created: false``.
+        """
+        clean = {
+            "project": knowledge.project_slug(project),
+            "topic": knowledge.topic_slug(topic),
+            "fact": knowledge.fact_text(fact),
+            "author": handle(author, "author"),
+            "source_run": knowledge.source_id(source_run, "source_run"),
+            "source_step": knowledge.source_id(source_step, "source_step"),
+        }
+
+        async def op(conn):
+            return await self._knowledge_insert(conn, clean)
+
+        found, created = await self._txn(op)
+        return {"fact": found, "created": created}
+
+    async def knowledge_list(
+        self,
+        project: Any = None,
+        topic: Any = None,
+        status: Any = None,
+        author: Any = None,
+        cursor: Any = None,
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        """Facts newest first with opaque ``cursor`` paging. Filters are exact matches."""
+        filters = {
+            "project": knowledge.optional_project(project),
+            "topic": knowledge.optional_topic(topic),
+            "status": knowledge.optional_status(status),
+            "author": optional_handle(author, "author"),
+        }
+        before = feed.decode_cursor(cursor)
+        clean_limit = page_limit(limit)
+
+        async def op(conn):
+            return await store.list_knowledge(conn, before_id=before, limit=clean_limit + 1, **filters)
+
+        rows = await self.db.read(op)
+        has_more = len(rows) > clean_limit
+        facts = [knowledge.shape_fact(row) for row in rows[:clean_limit]]
+        return {
+            "facts": facts,
+            "next_cursor": feed.encode_cursor(facts[-1]["id"]) if has_more and facts else None,
+            "has_more": has_more,
+        }
+
+    async def knowledge_set_status(self, actor: Any, fact_id: Any, status: Any) -> dict[str, Any]:
+        """Mark a fact ``active``, ``superseded`` or ``rejected``. Only active facts are searchable."""
+        clean_actor = handle(actor, "actor")
+        clean_id = require_id(fact_id, "fact_id")
+        target = knowledge.status_value(status)
+
+        async def op(conn):
+            found = await store.get_knowledge(conn, clean_id)
+            if found is None:
+                raise HubError("not_found", f"fact {clean_id} not found", 404)
+            previous = found["status"]
+            if previous == target:
+                return {"fact": knowledge.shape_fact(found), "previous_status": previous, "idempotent": True}
+            await store.set_knowledge_status(conn, clean_id, target, utc_now())
+            await self._index(conn, "knowledge", clean_id)
+            fresh = await store.get_knowledge(conn, clean_id)
+            assert fresh is not None
+            logger.info("fact %s: %s -> %s by %s", clean_id, previous, target, clean_actor)
+            return {"fact": knowledge.shape_fact(fresh), "previous_status": previous, "idempotent": False}
+
+        return await self._txn(op)
+
+    async def knowledge_topics(self, project: Any = None) -> dict[str, Any]:
+        """Active fact counts per topic, most facts first."""
+        clean_project = knowledge.optional_project(project)
+
+        async def op(conn):
+            return await store.knowledge_topics(conn, project=clean_project, status="active")
+
+        return {"project": clean_project, "topics": await self.db.read(op)}
+
+    async def knowledge_import_jsonl(self, lines: Any, author: Any) -> dict[str, Any]:
+        """Import JSONL lines in the ``_knowledge-inbox.jsonl`` shape, in one transaction.
+
+        A line's own ``author`` wins over ``author``. Blank lines are skipped;
+        a bad line is reported in ``invalid`` (1-based ``line``) and the rest
+        still import. Duplicates, of stored facts or of earlier lines, count
+        in ``duplicates``. At most ``knowledge.IMPORT_MAX`` lines per call.
+        """
+        importer = handle(author, "author")
+        items = knowledge.import_lines(lines)
+        parsed: list[dict[str, Any]] = []
+        invalid: list[dict[str, Any]] = []
+        for number, line in enumerate(items, start=1):
+            if isinstance(line, str) and not line.strip():
+                continue
+            try:
+                clean = knowledge.parse_line(line)
+            except HubError as exc:
+                invalid.append({"line": number, "error": exc.message})
+                continue
+            clean["author"] = clean["author"] or importer
+            parsed.append(clean)
+
+        async def op(conn):
+            added = duplicates = 0
+            for clean in parsed:
+                _, created = await self._knowledge_insert(conn, clean)
+                if created:
+                    added += 1
+                else:
+                    duplicates += 1
+            return added, duplicates
+
+        added, duplicates = await self._txn(op) if parsed else (0, 0)
+        return {"added": added, "duplicates": duplicates, "invalid": invalid}
+
+    async def knowledge_export_jsonl(self, project: Any = None, status: Any = "active") -> dict[str, Any]:
+        """Facts as JSONL in the inbox shape, oldest first. ``status`` ``all`` exports every status."""
+        clean_project = knowledge.optional_project(project)
+        clean_status = None if status == "all" else knowledge.status_value(status or "active")
+
+        async def op(conn):
+            return await store.export_knowledge(conn, project=clean_project, status=clean_status)
+
+        rows = await self.db.read(op)
+        lines = [knowledge.serialize_fact(knowledge.shape_fact(row)) for row in rows]
+        return {"jsonl": "".join(line + "\n" for line in lines), "count": len(lines)}
+
+    async def knowledge_from_feed_post(self, result: dict[str, Any]) -> None:
+        """``feed_post_hooks`` callback: a ``LEARNED:`` post becomes a fact by its author.
+
+        The app registers it at startup. ``feed_post`` logs and swallows hook
+        failures, so a bad fact never fails the post.
+        """
+        post = result.get("post") or {}
+        found = knowledge.learned_from_post(post)
+        if found is None:
+            return
+        await self.knowledge_add(
+            found["project"],
+            found["fact"],
+            topic=found["topic"],
+            author=post.get("author"),
+            source_run=found["source_run"],
+            source_step=found["source_step"],
+        )
 
     @staticmethod
     def _hook_ident(value: Any) -> int | str:

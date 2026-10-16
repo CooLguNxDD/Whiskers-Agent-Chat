@@ -51,6 +51,8 @@ EVENT_KINDS = frozenset(
         "feed_follow",
         # A direct mail was sent. The payload never carries the body.
         "mail",
+        # A new knowledge fact (schema v10). No channel: channel_id is null.
+        "knowledge_fact",
     }
 )
 

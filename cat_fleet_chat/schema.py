@@ -284,6 +284,28 @@ embeddings = Table(
     PrimaryKeyConstraint("kind", "ref_id", "model"),
 )
 
+# Schema v10. Knowledge facts agents learned. ``norm`` is
+# ``knowledge.normalize_fact(fact)``: the same fact in another case, spacing or
+# trailing punctuation dedupes per project. Only ``active`` facts are searchable.
+knowledge_facts = Table(
+    "knowledge_facts",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("project", Text, nullable=False),
+    Column("topic", Text, nullable=False, server_default=text("'general'")),
+    Column("fact", Text, nullable=False),
+    Column("norm", Text, nullable=False),
+    Column("source_run", Text),
+    Column("source_step", Text),
+    Column("author", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'active'")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Index("uq_knowledge_facts_norm", "project", "norm", unique=True),
+    Index("idx_knowledge_facts_topic", "project", "topic", "id"),
+    Index("idx_knowledge_facts_status", "status", "id"),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (
@@ -320,12 +342,16 @@ SEARCH_INDEX_DDL = (
 )
 
 
+# A fact's short field: its project and topic, so either word finds it.
+KNOWLEDGE_TITLE_SQL = "k.project || ' ' || k.topic"
+
+
 def search_rowid(kind: str, ref_id: int) -> int:
     return int(ref_id) * SEARCH_ROWID_STRIDE + SEARCH_KIND_CODES[kind]
 
 
 def search_backfill_sql() -> list[str]:
-    """Index every message, task and attachment that has no entry yet. Safe to repeat."""
+    """Index every message, task, attachment and active fact that has no entry yet. Safe to repeat."""
     stride = SEARCH_ROWID_STRIDE
     codes = SEARCH_KIND_CODES
     columns = f"INSERT INTO {SEARCH_INDEX} (rowid, title, body, kind, ref_id, channel_id, author, created_at) "
@@ -333,6 +359,7 @@ def search_backfill_sql() -> list[str]:
     message_rowid = f"m.id * {stride} + {codes['message']}"
     task_rowid = f"t.id * {stride} + {codes['task']}"
     attachment_rowid = f"a.id * {stride} + {codes['attachment']}"
+    knowledge_rowid = f"k.id * {stride} + {codes['knowledge']}"
     return [
         columns
         + f"SELECT {message_rowid}, '', m.text, 'message', m.id, m.channel_id, m.author, m.created_at "
@@ -346,6 +373,9 @@ def search_backfill_sql() -> list[str]:
         + f"SELECT {attachment_rowid}, a.filename, a.content_type, 'attachment', a.id, "
         "m.channel_id, m.author, a.created_at "
         f"FROM attachments a JOIN messages m ON m.id = a.message_id WHERE {attachment_rowid} {missing}",
+        columns
+        + f"SELECT {knowledge_rowid}, {KNOWLEDGE_TITLE_SQL}, k.fact, 'knowledge', k.id, NULL, k.author, "
+        f"k.created_at FROM knowledge_facts k WHERE k.status = 'active' AND {knowledge_rowid} {missing}",
     ]
 
 

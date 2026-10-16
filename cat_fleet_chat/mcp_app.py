@@ -398,7 +398,7 @@ async def fleet_search(
     offset: int | None = None,
     mode: str | None = None,
 ) -> dict[str, Any]:
-    """Search messages, task titles and descriptions, and attachment filenames.
+    """Search messages, task titles and descriptions, attachment filenames, and knowledge facts.
 
     ``mode``: ``bm25`` (default, full-text: words are plain terms, all must
     appear, a trailing ``*`` makes a word a prefix), ``vector`` (semantic:
@@ -407,7 +407,7 @@ async def fleet_search(
     (``CAT_FLEET_EMBED_PROVIDER``) and otherwise return ``not_available``; if
     the embedder fails, ``vector`` returns ``embedder_unavailable`` and
     ``hybrid`` returns BM25 hits with ``degraded: "bm25"``. Filters: ``kind``
-    (``message``, ``task``, ``attachment``; one or a list), ``channel`` name,
+    (``message``, ``task``, ``attachment``, ``knowledge``; one or a list), ``channel`` name,
     ``author`` handle, ``since`` (ISO time or a window like ``24h`` / ``7d``).
     ``limit`` defaults to 20 (max 100); page with ``offset`` / ``next_offset``.
     Archived channels are included. Each hit has ``kind``, ``id``, ``channel``,
@@ -640,6 +640,87 @@ async def fleet_feed_unfollow(follower: str, followee: str) -> dict[str, Any]:
         return exc.mcp_body()
 
 
+async def fleet_knowledge_add(
+    project: str,
+    fact: str,
+    author: str,
+    topic: str | None = None,
+    source_run: str | None = None,
+    source_step: str | None = None,
+) -> dict[str, Any]:
+    """Record a knowledge fact (up to 2000 characters) for ``project``.
+
+    ``topic`` is a short slug (default ``general``). The same fact again in
+    the project, in any case, spacing or trailing punctuation, returns the
+    stored one with ``created: false``. Tip: a feed post starting with
+    ``LEARNED:`` (optionally ``LEARNED: [topic] ...`` and a ``#project`` tag)
+    records a fact too.
+    """
+    try:
+        return await get_hub().knowledge_add(
+            project, fact, topic=topic, author=author, source_run=source_run, source_step=source_step
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_knowledge_list(
+    project: str | None = None,
+    topic: str | None = None,
+    status: str | None = None,
+    author: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """List knowledge facts newest first. Send ``next_cursor`` back as ``cursor`` for the next page.
+
+    Filters: ``project``, ``topic``, ``status`` (``active``, ``superseded``,
+    ``rejected``), ``author``.
+    """
+    try:
+        return await get_hub().knowledge_list(
+            project=project, topic=topic, status=status, author=author, cursor=cursor, limit=limit
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_knowledge_search(
+    query: str,
+    author: str | None = None,
+    since: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """Search active knowledge facts (``fleet_search`` limited to ``kind=knowledge``).
+
+    Each hit carries ``project`` and ``topic`` besides the usual search fields.
+    """
+    return await fleet_search(
+        query, kind="knowledge", author=author, since=since, limit=limit, offset=offset, mode=mode
+    )
+
+
+async def fleet_knowledge_set_status(actor: str, fact_id: int, status: str) -> dict[str, Any]:
+    """Mark a fact ``active``, ``superseded`` or ``rejected``. Only active facts are searchable."""
+    try:
+        return await get_hub().knowledge_set_status(actor, fact_id, status)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_knowledge_export(project: str | None = None, status: str = "active") -> dict[str, Any]:
+    """Facts as JSONL (``jsonl``, one object per line: project, topic, fact, run, step, author, ts).
+
+    ``status`` ``all`` exports every status. ``count`` is the number of lines.
+    """
+    try:
+        return await get_hub().knowledge_export_jsonl(project=project, status=status)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 def build_mcp() -> FastMCP:
     """Register the hub tools on a new FastMCP instance."""
     mcp = FastMCP("cat-fleet-chat")
@@ -677,6 +758,11 @@ def build_mcp() -> FastMCP:
         fleet_mail_list,
         fleet_mail_read,
         fleet_mail_ack,
+        fleet_knowledge_add,
+        fleet_knowledge_list,
+        fleet_knowledge_search,
+        fleet_knowledge_set_status,
+        fleet_knowledge_export,
     ):
         mcp.tool(run_in_thread=False)(fn)
     return mcp

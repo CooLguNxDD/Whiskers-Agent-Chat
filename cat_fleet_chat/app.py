@@ -44,6 +44,8 @@ def create_app(
         db = Database(settings.db_path)
         await db.open()
         hub = Hub(db, WaitHub())
+        # Feed posts starting with "LEARNED:" become knowledge facts.
+        hub.feed_post_hooks.append(hub.knowledge_from_feed_post)
         app.state.hub = hub
         app.state.settings = settings
         app.state.process_lock = lock

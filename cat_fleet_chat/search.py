@@ -18,9 +18,8 @@ from typing import Any
 
 from cat_fleet_chat.errors import HubError
 
-# Kinds the index holds today. S05 adds "knowledge" (its rowid code is reserved
-# in schema.SEARCH_KIND_CODES).
-SEARCH_KINDS = ("message", "task", "attachment")
+# Kinds the index holds. "knowledge" entries are active knowledge facts (S05).
+SEARCH_KINDS = ("message", "task", "attachment", "knowledge")
 SEARCH_MODES = ("bm25", "vector", "hybrid")
 AVAILABLE_MODES = frozenset({"bm25"})
 
@@ -176,8 +175,16 @@ def score(bm25_rank: float) -> float:
     return max(-float(bm25_rank), sys.float_info.min)
 
 
+def _with_knowledge(hit: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    """A fact hit also names its ``project`` and ``topic``. Other kinds keep their shape."""
+    if hit["kind"] == "knowledge":
+        hit["project"] = row.get("project")
+        hit["topic"] = row.get("topic")
+    return hit
+
+
 def shape_hit(row: dict[str, Any]) -> dict[str, Any]:
-    return {
+    hit = {
         "kind": row["kind"],
         "id": int(row["ref_id"]),
         "channel": row["channel"],
@@ -186,6 +193,7 @@ def shape_hit(row: dict[str, Any]) -> dict[str, Any]:
         "snippet": row["snippet"],
         "score": score(row["bm25_rank"]),
     }
+    return _with_knowledge(hit, row)
 
 
 def shape_results(
@@ -267,7 +275,7 @@ def plain_snippet(row: dict[str, Any]) -> str:
 
 
 def shape_vector_hit(row: dict[str, Any], value: float) -> dict[str, Any]:
-    return {
+    hit = {
         "kind": row["kind"],
         "id": int(row["ref_id"]),
         "channel": row["channel"],
@@ -276,6 +284,7 @@ def shape_vector_hit(row: dict[str, Any], value: float) -> dict[str, Any]:
         "snippet": row.get("snippet") if row.get("snippet") is not None else plain_snippet(row),
         "score": float(value),
     }
+    return _with_knowledge(hit, row)
 
 
 def shape_scored(
