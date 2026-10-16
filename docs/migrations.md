@@ -37,21 +37,26 @@ Consequences:
 
 ## Back up before you upgrade
 
-Because migrations cannot be undone, copy the database first. Stop the hub, then
-copy the SQLite file:
+Because migrations cannot be undone, back up the database first. The database
+runs in WAL mode, so a running hub keeps recent writes in
+`cat_fleet_chat.sqlite-wal`. Copying the files one after another while the hub
+runs does not give a consistent snapshot, so use one of these two ways only.
+
+Stop the hub (a clean shutdown folds the WAL into the main file), then copy the
+SQLite file:
 
 ```bash
 cp cat_fleet_chat.sqlite cat_fleet_chat.sqlite.bak-before-upgrade
 ```
 
-The database runs in WAL mode, so a running hub keeps recent writes in
-`cat_fleet_chat.sqlite-wal`. Stop the hub first (a clean shutdown folds the WAL
-into the main file) or copy the `-wal` and `-shm` files next to the main file. If
-you must back up while the hub runs, use SQLite's own backup instead of `cp`:
+Or, if the hub must keep running, use SQLite's own backup, which takes a
+consistent snapshot:
 
 ```bash
 sqlite3 cat_fleet_chat.sqlite ".backup 'cat_fleet_chat.sqlite.bak'"
 ```
+
+Do not copy the `-wal` and `-shm` files by hand as a backup.
 
 `cat_fleet_chat.sqlite.lock` is only the single-process lockfile; you do not need
 to copy it. To roll back: stop the hub, put the old release in place, and copy
