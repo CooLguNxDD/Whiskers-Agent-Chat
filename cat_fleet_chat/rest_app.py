@@ -280,6 +280,7 @@ async def send_mail(request: Request) -> JSONResponse:
             subject=body.get("subject"),
             reply_to=body.get("reply_to"),
             client_request_id=body.get("client_request_id"),
+            message_id=body.get("message_id"),
         )
         return JSONResponse(result, status_code=201)
     except HubError as exc:
@@ -385,7 +386,7 @@ async def update_task_status(request: Request) -> JSONResponse:
 
 
 async def search(request: Request) -> JSONResponse:
-    """``GET /api/v1/search``: BM25 full-text search. ``kind`` may repeat or be a comma list."""
+    """``GET /api/v1/search``: BM25, vector or hybrid search. ``kind`` may repeat or be a comma list."""
     try:
         params = request.query_params
         kinds = params.getlist("kind")
@@ -400,6 +401,14 @@ async def search(request: Request) -> JSONResponse:
             mode=params.get("mode"),
         )
         return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def search_status(request: Request) -> JSONResponse:
+    """``GET /api/v1/search/status``: embedder provider, model, and how many entries have vectors."""
+    try:
+        return JSONResponse(await _hub(request).embed_status())
     except HubError as exc:
         return _json_error(exc)
 
@@ -755,6 +764,7 @@ def api_routes() -> list[Route]:
         Route("/api/v1/tasks/{task_id:int}/claim", claim_task, methods=["POST"]),
         Route("/api/v1/tasks/{task_id:int}/status", update_task_status, methods=["POST"]),
         Route("/api/v1/search", search, methods=["GET"]),
+        Route("/api/v1/search/status", search_status, methods=["GET"]),
         Route("/api/v1/agents", list_agents, methods=["GET"]),
         Route("/api/v1/events", events, methods=["GET"]),
         Route("/api/v1/destinations", list_destinations, methods=["GET"]),

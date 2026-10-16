@@ -13,7 +13,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import aiosqlite
-from sqlalchemy import bindparam, case, delete, func, insert, literal, select, text, union_all, update
+from sqlalchemy import bindparam, delete, func, insert, literal, select, text, union_all, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from cat_fleet_chat.mailbox import mail_row
 from cat_fleet_chat.schema import (
@@ -22,6 +23,7 @@ from cat_fleet_chat.schema import (
     SEARCH_ROWID_STRIDE,
     attachments,
     channels,
+    embeddings,
     events,
     feed_follows,
     feed_hashtags,
@@ -501,6 +503,17 @@ async def get_mail_many(conn: aiosqlite.Connection, mail_ids: Iterable[int]) -> 
     return [mail_row(row) for row in rows]
 
 
+async def get_mail_owners(conn: aiosqlite.Connection, mail_ids: Iterable[int]) -> dict[int, str]:
+    """``{mail id: recipient}`` for the ids that exist. Never loads a body."""
+    wanted = sorted(set(mail_ids))
+    if not wanted:
+        return {}
+    rows = await fetch_all(
+        conn, select(mailbox.c.id, mailbox.c.recipient).where(mailbox.c.id.in_(wanted))
+    )
+    return {int(row["id"]): row["recipient"] for row in rows}
+
+
 async def list_mail(
     conn: aiosqlite.Connection,
     recipient: str,
@@ -532,20 +545,27 @@ async def max_mail_id(conn: aiosqlite.Connection, recipient: str) -> int:
     return int(row["n"])
 
 
+async def _count_mail(conn: aiosqlite.Connection, *where: Any) -> int:
+    row = await fetch_one(conn, select(func.count().label("n")).where(*where))
+    return int(row["n"])
+
+
+async def count_unread_mail(conn: aiosqlite.Connection, recipient: str) -> int:
+    return await _count_mail(conn, mailbox.c.recipient == recipient, mailbox.c.read_at.is_(None))
+
+
 async def mail_counts(conn: aiosqlite.Connection, recipient: str) -> dict[str, int]:
-    row = await fetch_one(
-        conn,
-        select(
-            func.count().label("total"),
-            func.coalesce(
-                func.sum(case((mailbox.c.read_at.is_(None), 1), else_=0)), 0
-            ).label("unread"),
-            func.coalesce(
-                func.sum(case((mailbox.c.acked_at.is_(None), 1), else_=0)), 0
-            ).label("unacked"),
-        ).where(mailbox.c.recipient == recipient),
-    )
-    return {"unread": int(row["unread"]), "unacked": int(row["unacked"]), "total": int(row["total"])}
+    """Three index-only counts: all mail, the unread partial index, the unacked one.
+
+    One aggregate over the recipient's rows would read every row (and its
+    body page) on each call; each count below walks only its own index.
+    """
+    mine = mailbox.c.recipient == recipient
+    return {
+        "unread": await _count_mail(conn, mine, mailbox.c.read_at.is_(None)),
+        "unacked": await _count_mail(conn, mine, mailbox.c.acked_at.is_(None)),
+        "total": await _count_mail(conn, mine),
+    }
 
 
 async def mark_mail_read(
@@ -926,8 +946,9 @@ def _search_where(
     channel_id: int | None,
     author: str | None,
     since: str | None,
+    match: bool = True,
 ) -> tuple[str, dict[str, Any]]:
-    clauses = [f"{SEARCH_INDEX} MATCH :match"]
+    clauses = [f"{SEARCH_INDEX} MATCH :match"] if match else ["1 = 1"]
     params: dict[str, Any] = {}
     wanted = sorted(kinds or ())
     if wanted:
@@ -1000,6 +1021,143 @@ async def search_index(
     )
     total = int(count_row["n"]) if count_row is not None else 0
     return [dict(row) for row in rows], total
+
+
+# ---- embeddings (schema v9) ----------------------------------------------
+#
+# Every join drives from search_index and looks embeddings up by its primary
+# key. ``CROSS JOIN`` pins that order: SQLite never reorders it, so the
+# virtual table is scanned once instead of once per embedding.
+
+_EMBED_JOIN = (
+    f"embeddings.kind = {SEARCH_INDEX}.kind AND embeddings.ref_id = {SEARCH_INDEX}.ref_id "
+    "AND embeddings.model = :model"
+)
+
+
+def _dim_clause(dim: int | None, params: dict[str, Any]) -> str:
+    if dim is None:
+        return ""
+    params["dim"] = dim
+    return " AND embeddings.dim = :dim"
+
+
+async def embed_missing(
+    conn: aiosqlite.Connection, model: str, dim: int | None, limit: int
+) -> list[dict[str, Any]]:
+    """Index entries with no vector for ``model`` (of width ``dim``, when known), oldest first."""
+    params: dict[str, Any] = {"model": model, "limit": limit}
+    on = _EMBED_JOIN + _dim_clause(dim, params)
+    sql = (
+        f"SELECT {SEARCH_INDEX}.kind AS kind, {SEARCH_INDEX}.ref_id AS ref_id, "
+        f"{SEARCH_INDEX}.title AS title, {SEARCH_INDEX}.body AS body "
+        f"FROM {SEARCH_INDEX} LEFT JOIN embeddings ON {on} "
+        f"WHERE embeddings.ref_id IS NULL ORDER BY {SEARCH_INDEX}.rowid ASC LIMIT :limit"
+    )
+    return [dict(row) for row in await fetch_all(conn, _bind(sql, params))]
+
+
+async def index_entries(
+    conn: aiosqlite.Connection, keys: Iterable[tuple[str, int]], model: str
+) -> list[dict[str, Any]]:
+    """Current index text for ``keys`` plus the stored hash for ``model`` (``None`` when absent).
+
+    Keys whose row is gone from the index (deleted source) are left out.
+    """
+    rowids = sorted({search_rowid(kind, ref_id) for kind, ref_id in keys if kind in SEARCH_KIND_CODES})
+    if not rowids:
+        return []
+    sql = (
+        f"SELECT {SEARCH_INDEX}.kind AS kind, {SEARCH_INDEX}.ref_id AS ref_id, "
+        f"{SEARCH_INDEX}.title AS title, {SEARCH_INDEX}.body AS body, "
+        "embeddings.text_hash AS text_hash, embeddings.dim AS dim "
+        f"FROM {SEARCH_INDEX} LEFT JOIN embeddings ON {_EMBED_JOIN} "
+        f"WHERE {SEARCH_INDEX}.rowid IN :rowids"
+    )
+    stmt = text(sql).bindparams(bindparam("rowids", expanding=True)).bindparams(
+        rowids=rowids, model=model
+    )
+    return [dict(row) for row in await fetch_all(conn, stmt)]
+
+
+async def embedded_page(
+    conn: aiosqlite.Connection, model: str, after_rowid: int, limit: int
+) -> list[dict[str, Any]]:
+    """Embedded index entries for ``model`` after ``after_rowid``: their text and stored hash."""
+    sql = (
+        f"SELECT {SEARCH_INDEX}.rowid AS rowid, {SEARCH_INDEX}.kind AS kind, "
+        f"{SEARCH_INDEX}.ref_id AS ref_id, {SEARCH_INDEX}.title AS title, "
+        f"{SEARCH_INDEX}.body AS body, embeddings.text_hash AS text_hash "
+        f"FROM {SEARCH_INDEX} CROSS JOIN embeddings ON {_EMBED_JOIN} "
+        f"WHERE {SEARCH_INDEX}.rowid > :after ORDER BY {SEARCH_INDEX}.rowid ASC LIMIT :limit"
+    )
+    stmt = text(sql).bindparams(model=model, after=after_rowid, limit=limit)
+    return [dict(row) for row in await fetch_all(conn, stmt)]
+
+
+async def upsert_embeddings(conn: aiosqlite.Connection, rows: list[dict[str, Any]]) -> None:
+    """Insert or replace vectors keyed by ``(kind, ref_id, model)``."""
+    if not rows:
+        return
+    stmt = sqlite_insert(embeddings).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[embeddings.c.kind, embeddings.c.ref_id, embeddings.c.model],
+        set_={
+            "dim": stmt.excluded.dim,
+            "vector": stmt.excluded.vector,
+            "text_hash": stmt.excluded.text_hash,
+            "created_at": stmt.excluded.created_at,
+        },
+    )
+    await run(conn, stmt)
+
+
+async def embed_counts(conn: aiosqlite.Connection, model: str, dim: int | None) -> dict[str, int]:
+    """How many index entries have a usable vector for ``model`` and how many wait for one."""
+    params: dict[str, Any] = {"model": model}
+    on = _EMBED_JOIN + _dim_clause(dim, params)
+    sql = (
+        "SELECT count(embeddings.ref_id) AS indexed, "
+        "sum(CASE WHEN embeddings.ref_id IS NULL THEN 1 ELSE 0 END) AS pending "
+        f"FROM {SEARCH_INDEX} LEFT JOIN embeddings ON {on}"
+    )
+    row = await fetch_one(conn, _bind(sql, params))
+    if row is None:
+        return {"indexed": 0, "pending": 0}
+    return {"indexed": int(row["indexed"] or 0), "pending": int(row["pending"] or 0)}
+
+
+async def vector_candidates(
+    conn: aiosqlite.Connection,
+    model: str,
+    dim: int,
+    *,
+    kinds: Iterable[str] | None,
+    channel_id: int | None,
+    author: str | None,
+    since: str | None,
+):
+    """Yield every embedded entry of ``model`` / ``dim`` that passes the BM25 filters.
+
+    Rows stream from the cursor so the caller can keep a bounded top-k heap.
+    """
+    where, params = _search_where(
+        kinds=kinds, channel_id=channel_id, author=author, since=since, match=False
+    )
+    params["model"] = model
+    params["dim"] = dim
+    sql = (
+        f"SELECT {SEARCH_INDEX}.kind AS kind, {SEARCH_INDEX}.ref_id AS ref_id, "
+        f"{SEARCH_INDEX}.channel_id AS channel_id, channels.name AS channel, "
+        f"{SEARCH_INDEX}.author AS author, {SEARCH_INDEX}.created_at AS created_at, "
+        f"{SEARCH_INDEX}.title AS title, {SEARCH_INDEX}.body AS body, "
+        "embeddings.vector AS vector "
+        f"FROM {SEARCH_INDEX} CROSS JOIN embeddings ON {_EMBED_JOIN} AND embeddings.dim = :dim "
+        f"LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id WHERE {where}"
+    )
+    cursor = await run(conn, _bind(sql, params))
+    async for row in cursor:
+        yield row
 
 
 async def list_agents(conn: aiosqlite.Connection) -> list[dict[str, Any]]:
