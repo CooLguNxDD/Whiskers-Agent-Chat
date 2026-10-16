@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastmcp import FastMCP
 
 from cat_fleet_chat.errors import HubError
 from cat_fleet_chat.hub import Hub
+
+logger = logging.getLogger("cat_fleet_chat.mcp_app")
 
 _hub: Hub | None = None
 _dispatcher: Any = None  # WebhookDispatcher | None; only test_webhook needs it
@@ -430,7 +433,18 @@ async def fleet_search(
         body = exc.mcp_body()
         if exc.code in ("not_available", "embedder_unavailable"):
             # Tell the agent what the embedder is doing so it can pick a mode.
-            body["embed_status"] = await hub.embed_status()
+            try:
+                body["embed_status"] = await hub.embed_status()
+            except Exception:  # noqa: BLE001 — the status is a hint; never mask the search error
+                logger.warning("embed status lookup failed", exc_info=True)
+                body["embed_status"] = {
+                    "provider": None,
+                    "model": None,
+                    "dim": None,
+                    "indexed": None,
+                    "pending": None,
+                    "last_error": "status unavailable",
+                }
         return body
 
 

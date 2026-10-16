@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import logging
 import math
 import sys
@@ -43,7 +44,33 @@ IDLE_WAIT = 30.0
 
 
 class EmbedderError(Exception):
-    """The embedder could not produce vectors. The message is safe to show and log."""
+    """The embedder could not produce vectors. The message is safe to show and log.
+
+    ``kind`` says whether retrying can help: ``transient`` (timeouts, 5xx, 429:
+    back off and retry), ``item`` (the input itself is refused, such as an
+    oversized or malformed one: park that entry) or ``provider`` (credentials
+    or endpoint are wrong: retry only at the slowest backoff).
+    """
+
+    def __init__(self, message: str = "", *, kind: str = "transient") -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+# HTTP statuses that mean the request itself is bad (retrying the same text is futile),
+# and those that mean the credentials or endpoint are bad (every request will fail).
+_ITEM_STATUSES = frozenset({400, 413, 414, 422})
+_PROVIDER_STATUSES = frozenset({401, 402, 403, 404, 405})
+
+
+def _error_kind(exc: BaseException) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in _ITEM_STATUSES:
+            return "item"
+        if status in _PROVIDER_STATUSES:
+            return "provider"
+    return "transient"
 
 
 class Embedder(Protocol):
@@ -205,7 +232,9 @@ class _HTTPEmbedder:
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise EmbedderError(f"{self.provider} embedder failed: {safe_error(exc)}") from None
+            raise EmbedderError(
+                f"{self.provider} embedder failed: {safe_error(exc)}", kind=_error_kind(exc)
+            ) from None
         try:
             vectors = [[float(x) for x in vec] for vec in self._vectors(payload)]
         except (KeyError, TypeError, ValueError, AttributeError):
@@ -327,6 +356,9 @@ class EmbedQueue:
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._rescanned = False
+        # Entries the provider refused as bad input: key -> text hash. Skipped
+        # until the text changes. In memory only, so a restart tries them once more.
+        self._parked: dict[tuple[str, int], str] = {}
 
     @property
     def active(self) -> bool:
@@ -394,45 +426,52 @@ class EmbedQueue:
         model = self.embedder.name
         dim = self.embedder.dim
         todo: dict[tuple[str, int], dict[str, Any]] = {}
+        seen: dict[tuple[str, int], int] = {}
 
-        seen = dict(self._dirty)
-        if seen:
+        # Read dirty keys one batch at a time. Every key in a slice either joins
+        # ``todo`` or is settled, so the loop makes progress and ends.
+        while self._dirty and not todo:
+            seen = dict(itertools.islice(self._dirty.items(), self.batch))
             keys = list(seen)
             rows = await self.db.read(lambda conn: store.index_entries(conn, keys, model))
             present = set()
             for row in rows:
                 key = (row["kind"], int(row["ref_id"]))
                 present.add(key)
-                if len(todo) >= self.batch:
-                    continue
                 body = entry_text(row)
                 digest = text_hash(body)
                 stale_dim = dim is not None and row["dim"] is not None and int(row["dim"]) != dim
-                if row["text_hash"] != digest or stale_dim:
+                if self._parked.get(key) == digest:
+                    self._settle(key, seen[key])
+                elif row["text_hash"] != digest or stale_dim:
                     todo[key] = {"text": body, "hash": digest}
                 else:
                     self._settle(key, seen[key])
             # Deleted sources have no index row left: nothing to embed.
             for key in set(keys) - present:
+                self._parked.pop(key, None)
                 self._settle(key, seen[key])
 
         if len(todo) < self.batch:
+            # Parked entries come back first (oldest), so ask for enough to skip them.
             missing = await self.db.read(
-                lambda conn: store.embed_missing(conn, model, dim, self.batch)
+                lambda conn: store.embed_missing(conn, model, dim, self.batch + len(self._parked))
             )
             for row in missing:
                 key = (row["kind"], int(row["ref_id"]))
                 if key in todo or len(todo) >= self.batch:
                     continue
                 body = entry_text(row)
-                todo[key] = {"text": body, "hash": text_hash(body)}
+                digest = text_hash(body)
+                if self._parked.get(key) == digest:
+                    continue
+                todo[key] = {"text": body, "hash": digest}
 
         if not todo:
             return 0
-        keys = list(todo)
-        vectors = await self.embedder.embed([todo[key]["text"] for key in keys])
-        if len(vectors) != len(keys):
-            raise EmbedderError(f"embedder returned {len(vectors)} vectors for {len(keys)} inputs")
+        keys, vectors = await self._embed_todo(todo, seen)
+        if not keys:
+            return 0
         now = datetime.now(timezone.utc).isoformat()
         rows = [
             {
@@ -458,8 +497,55 @@ class EmbedQueue:
 
         await self.db.write(write)
         for key in keys:
+            self._parked.pop(key, None)
             self._settle(key, seen.get(key))
         return len(rows)
+
+    async def _embed_todo(
+        self, todo: dict[tuple[str, int], dict[str, Any]], seen: dict[tuple[str, int], int]
+    ) -> tuple[list[tuple[str, int]], list[list[float]]]:
+        """Vectors for ``todo``. An entry the provider refuses outright is parked, not retried.
+
+        When a whole batch is refused as bad input, entries are embedded one by
+        one so only the offending ones are parked. Other failures propagate.
+        """
+        keys = list(todo)
+        try:
+            vectors = await self.embedder.embed([todo[key]["text"] for key in keys])
+        except EmbedderError as exc:
+            if exc.kind != "item":
+                raise
+            if len(keys) == 1:
+                self._park(keys[0], todo, seen, exc)
+                return [], []
+            good_keys: list[tuple[str, int]] = []
+            good_vectors: list[list[float]] = []
+            for key in keys:
+                try:
+                    (vec,) = await self.embedder.embed([todo[key]["text"]])
+                except EmbedderError as single:
+                    if single.kind != "item":
+                        raise
+                    self._park(key, todo, seen, single)
+                else:
+                    good_keys.append(key)
+                    good_vectors.append(vec)
+            return good_keys, good_vectors
+        if len(vectors) != len(keys):
+            raise EmbedderError(f"embedder returned {len(vectors)} vectors for {len(keys)} inputs")
+        return keys, vectors
+
+    def _park(
+        self,
+        key: tuple[str, int],
+        todo: dict[tuple[str, int], dict[str, Any]],
+        seen: dict[tuple[str, int], int],
+        exc: EmbedderError,
+    ) -> None:
+        """Stop retrying ``key`` until its text changes."""
+        logger.warning("embedder refused %s %s (%s); skipping until its text changes", *key, safe_error(exc))
+        self._parked[key] = todo[key]["hash"]
+        self._settle(key, seen.get(key))
 
     async def drain(self, max_batches: int = 1_000) -> int:
         """Run batches until there is nothing left. For tests and tools; raises on failure."""
@@ -480,7 +566,11 @@ class EmbedQueue:
             except Exception as exc:  # noqa: BLE001 — the queue must outlive any provider error
                 self.failures += 1
                 self.last_error = safe_error(exc)
-                delay = backoff_delay(self.failures, self.backoff_base, self.backoff_max)
+                if getattr(exc, "kind", "") == "provider":
+                    # Bad credentials or endpoint: every call would fail, so wait the longest.
+                    delay = self.backoff_max
+                else:
+                    delay = backoff_delay(self.failures, self.backoff_base, self.backoff_max)
                 logger.warning(
                     "embed batch failed (%s); retry %d in %.1fs", self.last_error, self.failures, delay
                 )

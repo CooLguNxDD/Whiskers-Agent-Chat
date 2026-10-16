@@ -30,6 +30,9 @@ TERM_MAX = 64
 LIMIT_DEFAULT = 20
 LIMIT_MAX = 100
 OFFSET_MAX = 10_000
+# Most embedded entries one vector search scores (newest first). Keeps latency
+# bounded on large indexes; older entries beyond it are only reachable via bm25.
+VECTOR_SCAN_MAX = 20_000
 
 # bm25 column weights: (title, body). A word in a task title or a filename
 # outranks the same word somewhere in a long message.

@@ -315,6 +315,120 @@ async def test_queue_reports_safe_last_error(hub):
         await queue.stop()
 
 
+async def test_item_error_skips_only_the_bad_entry_and_never_loops(hub):
+    fake = FakeEmbedder()
+    queue = wire(hub, fake, batch=4)
+    for text in ("kitten one", "poison pill", "feline two", "sedan three"):
+        await hub.post_message("fleet", "ada", text)
+    embed_call = fake.embed
+
+    async def picky(texts):
+        if any("poison" in text for text in texts):
+            fake.calls.append(list(texts))
+            raise embed.EmbedderError("fake embedder failed: HTTP 400", kind="item")
+        return await embed_call(texts)
+
+    fake.embed = picky
+    assert await queue.drain() == 3
+    assert [row[2] for row in await stored(hub)] == ["fake-model"] * 3
+    calls_before = len(fake.calls)
+    # The poisoned entry is parked, not retried on every pass.
+    assert await queue.drain() == 0
+    assert len(fake.calls) == calls_before
+
+
+async def test_item_error_is_retried_after_the_text_changes(hub):
+    from cat_fleet_chat import store
+
+    fake = FakeEmbedder()
+    queue = wire(hub, fake)
+    created = await hub.create_task("fleet", "poison pill", actor="ada")
+    task_id = created["task"]["id"]
+    embed_call = fake.embed
+
+    async def picky(texts):
+        if any("poison" in text for text in texts):
+            raise embed.EmbedderError("fake embedder failed: HTTP 413", kind="item")
+        return await embed_call(texts)
+
+    fake.embed = picky
+    assert await queue.drain() == 0
+
+    async def edit(conn):
+        await conn.execute("BEGIN IMMEDIATE")
+        await conn.execute("UPDATE tasks SET title = 'a fine kitten' WHERE id = ?", (task_id,))
+        await store.reindex(conn, "task", task_id)
+        await conn.commit()
+
+    await hub.db.write(edit)
+    queue.mark([("task", task_id)])
+    assert await queue.drain() == 1
+
+
+async def test_provider_error_pauses_the_queue_at_the_backoff_cap(hub):
+    fake = FakeEmbedder()
+    delays: list[float] = []
+    seen = asyncio.Event()
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+        seen.set()
+        await asyncio.sleep(3600)
+
+    queue = wire(hub, fake, sleep=fake_sleep, backoff_base=1.0, backoff_max=50.0)
+    await hub.post_message("fleet", "ada", "kitten")
+    fake.fail = embed.EmbedderError("fake embedder failed: HTTP 401", kind="provider")
+    queue.start()
+    try:
+        await asyncio.wait_for(seen.wait(), 2)
+        assert delays == [50.0]
+        assert (await hub.embed_status())["pending"] == 1
+    finally:
+        await queue.stop()
+
+
+async def test_http_status_classifies_errors():
+    def make(status):
+        transport = httpx.MockTransport(lambda request: httpx.Response(status, json={}))
+        return embed.OpenAIEmbedder("http://embed.test", "m", transport=transport)
+
+    async def kind_for(status):
+        with pytest.raises(embed.EmbedderError) as caught:
+            await make(status).embed(["x"])
+        return caught.value.kind
+
+    assert await kind_for(400) == "item"
+    assert await kind_for(413) == "item"
+    assert await kind_for(422) == "item"
+    assert await kind_for(401) == "provider"
+    assert await kind_for(403) == "provider"
+    assert await kind_for(404) == "provider"
+    assert await kind_for(429) == "transient"
+    assert await kind_for(500) == "transient"
+
+
+async def test_queue_reads_only_one_batch_of_dirty_keys(hub, monkeypatch):
+    queue = wire(hub, batch=4)
+    for i in range(20):
+        await hub.post_message("fleet", "ada", f"kitten number {i}")
+    await queue.drain()
+    sizes: list[int] = []
+    real = embed.store.index_entries
+
+    async def spy(conn, keys, model):
+        keys = list(keys)
+        sizes.append(len(keys))
+        return await real(conn, keys, model)
+
+    monkeypatch.setattr(embed.store, "index_entries", spy)
+    # All 20 unchanged entries are dirty again; none needs a new vector.
+    queue.mark([("message", i) for i in range(1, 21)])
+    assert len(queue._dirty) == 20
+    assert await queue.run_once() == 0
+    assert not queue._dirty
+    assert sizes and max(sizes) <= 4
+
+
 async def test_mail_is_never_embedded(hub):
     queue = wire(hub)
     await hub.send_mail("ada", "bob", "private kitten mail", subject="psst")
@@ -381,6 +495,18 @@ async def test_vector_filters(hub):
     assert paged["total_estimate"] == 4 and paged["next_offset"] == 2
     rest = await hub.search("cat", mode="vector", limit=2, offset=2)
     assert len(set(keys(paged)) | set(keys(rest))) == 4
+
+
+async def test_vector_scan_is_capped(hub, monkeypatch):
+    queue = wire(hub)
+    for i in range(6):
+        await hub.post_message("fleet", "ada", f"kitten {i}")
+    await queue.drain()
+    monkeypatch.setattr(search, "VECTOR_SCAN_MAX", 3)
+    result = await hub.search("kitten", mode="vector", limit=20)
+    # Only the newest three entries are scored.
+    assert len(result["results"]) == 3
+    assert {hit["snippet"] for hit in result["results"]} == {"kitten 3", "kitten 4", "kitten 5"}
 
 
 async def test_hybrid_finds_what_bm25_misses(hub):
@@ -698,3 +824,43 @@ def test_load_settings_reads_embed_env(monkeypatch):
         load_settings()
     monkeypatch.delenv("CAT_FLEET_EMBED_PROVIDER")
     assert load_settings().embed_provider == "off"
+
+
+async def test_mcp_search_survives_a_failing_status_lookup(running, monkeypatch):
+    _, app = running
+
+    async def broken():
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(app.state.hub, "embed_status", broken)
+    refused = await mcp_app.fleet_search("anything", mode="vector")
+    assert refused["error"] == "not_available"
+    assert refused["embed_status"]["last_error"] == "status unavailable"
+
+
+async def test_teardown_releases_everything_when_a_step_fails(tmp_path, monkeypatch):
+    from cat_fleet_chat.app import create_app
+    from cat_fleet_chat.db import ProcessLock
+
+    settings = _settings(tmp_path)
+    closed: list[bool] = []
+    real_close = Database.close
+
+    async def tracking_close(self):
+        closed.append(True)
+        await real_close(self)
+
+    async def broken_stop(self):
+        raise RuntimeError("queue stop failed")
+
+    monkeypatch.setattr(embed.EmbedQueue, "stop", broken_stop)
+    monkeypatch.setattr(Database, "close", tracking_close)
+    app = create_app(settings)
+    with pytest.raises(RuntimeError, match="queue stop failed"):
+        async with app.router.lifespan_context(app):
+            pass
+    assert closed == [True]
+    # The process lock was released, so a new hub can take it.
+    lock = ProcessLock(settings.db_path)
+    lock.acquire()
+    lock.release()
