@@ -171,8 +171,12 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
         return f"👀 `{payload.get('follower', '?')}` {verb} `{payload.get('followee', '?')}`"
     if kind in {"reaction_added", "reaction_removed"}:
         verb = "reacted" if kind == "reaction_added" else "removed"
+        icon = {
+            "+1": "👍", "-1": "👎", "heart": "❤️", "laugh": "😄",
+            "eyes": "👀", "tada": "🎉", "rocket": "🚀", "thinking": "🤔",
+        }.get(payload.get("kind"), "💬")
         return (
-            f"👍 `{payload.get('handle', '?')}` {verb} {payload.get('kind', '?')} on "
+            f"{icon} `{payload.get('handle', '?')}` {verb} {payload.get('kind', '?')} on "
             f"`{payload.get('post_author', '?')}`'s post {payload.get('post_id')}"
         )
     if kind == "mail":

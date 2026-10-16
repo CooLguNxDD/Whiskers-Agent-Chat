@@ -703,7 +703,11 @@ async def fleet_feed_unreact(handle: str, post_id: int, kind: str) -> dict[str, 
 
 
 async def fleet_feed_list_reactions(post_id: int) -> dict[str, Any]:
-    """Reactions on a feed post: counts and handles per kind, plus ``score``."""
+    """Live post reactions: exact counts/score, oldest 100 handles per kind.
+
+    A shorter handle list than its count indicates truncation. Deleted posts
+    (including reposts or their originals) are not found.
+    """
     try:
         return await get_hub().list_reactions(post_id)
     except HubError as exc:

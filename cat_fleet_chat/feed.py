@@ -50,6 +50,8 @@ _CURSOR_PREFIX = "v1:"
 VOTE_KINDS = ("+1", "-1")
 EMOJI_KINDS = ("heart", "laugh", "eyes", "tada", "rocket", "thinking")
 REACTION_KINDS = VOTE_KINDS + EMOJI_KINDS
+# list_reactions returns a bounded oldest-first sample, not every reacting handle.
+REACTION_HANDLES_MAX = 100
 
 
 def extract_hashtags(text: str) -> list[str]:
@@ -157,8 +159,8 @@ def shape_post(
     counts per kind; ``score`` is ``+1`` minus ``-1``.
     """
     counts = counts or {}
-    reactions = {kind: int(n) for kind, n in (reactions or {}).items() if n}
     deleted = row.get("deleted_at") is not None
+    reactions = {} if deleted else {kind: int(n) for kind, n in (reactions or {}).items() if n}
     target = row.get("repost_of") or row.get("quote_of")
     return {
         "id": row["id"],

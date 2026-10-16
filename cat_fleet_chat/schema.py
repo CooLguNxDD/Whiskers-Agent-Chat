@@ -318,6 +318,7 @@ reactions = Table(
     Column("kind", Text, nullable=False),
     Column("created_at", Text, nullable=False),
     UniqueConstraint("post_id", "handle", "kind", name="uq_reactions_post_handle_kind"),
+    Index("idx_reactions_handle", "handle"),
 )
 
 # Columns that a database created at an older version is missing. SQLite has

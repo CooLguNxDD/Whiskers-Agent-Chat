@@ -282,7 +282,7 @@ async def test_rest_react_unreact_list(running):
     timeline = (await client.get("/api/v1/feed/timeline")).json()["posts"]
     assert timeline[0]["reactions"] == shaped["reactions"]
 
-    removed = await client.request("DELETE", f"/api/v1/feed/posts/{post}/reactions/heart", json={"handle": "cy"})
+    removed = await client.delete(f"/api/v1/feed/posts/{post}/reactions/heart", params={"handle": "cy"})
     assert removed.status_code == 200 and removed.json()["mine"] == ["-1"]
 
     bad = await client.put(f"/api/v1/feed/posts/{post}/reactions/thumbsup", json={"handle": "bob"})

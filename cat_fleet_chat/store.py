@@ -16,6 +16,7 @@ import aiosqlite
 from sqlalchemy import bindparam, delete, func, insert, literal, select, text, union_all, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from cat_fleet_chat.feed import REACTION_HANDLES_MAX
 from cat_fleet_chat.mailbox import mail_row
 from cat_fleet_chat.schema import (
     KNOWLEDGE_TITLE_SQL,
@@ -1415,12 +1416,25 @@ async def reaction_counts(
 
 
 async def reaction_rows(conn: aiosqlite.Connection, post_id: int) -> list[dict[str, Any]]:
-    """Every reaction on one post, oldest first."""
+    """Oldest reactions, capped per kind in SQL, with each kind's exact ``total``.
+
+    Window counts and samples share one snapshot, so concurrent writes cannot
+    make the reported total disagree with its handles.
+    """
+    ranked = (
+        select(
+            reactions.c.id, reactions.c.kind, reactions.c.handle, reactions.c.created_at,
+            func.count().over(partition_by=reactions.c.kind).label("total"),
+            func.row_number().over(partition_by=reactions.c.kind, order_by=reactions.c.id).label("n"),
+        )
+        .where(reactions.c.post_id == post_id)
+        .subquery()
+    )
     rows = await fetch_all(
         conn,
-        select(reactions.c.kind, reactions.c.handle, reactions.c.created_at)
-        .where(reactions.c.post_id == post_id)
-        .order_by(reactions.c.id),
+        select(ranked.c.kind, ranked.c.handle, ranked.c.created_at, ranked.c.total)
+        .where(ranked.c.n <= REACTION_HANDLES_MAX)
+        .order_by(ranked.c.id),
     )
     return [dict(row) for row in rows]
 
