@@ -1247,7 +1247,10 @@ class Hub:
     async def _vector_rank(
         self, query_vec: list[float], k: int, filters: dict[str, Any]
     ) -> tuple[list[tuple[float, dict[str, Any]]], int]:
-        """The ``k`` entries most similar to ``query_vec`` that pass ``filters``, plus how many were scored."""
+        """The ``k`` entries most similar to ``query_vec`` that pass ``filters``, plus how many were scored.
+
+        At most :data:`search.VECTOR_SCAN_MAX` of the newest entries are scored.
+        """
         model = self.embedder.name
         dim = len(query_vec)
 
@@ -1268,6 +1271,7 @@ class Hub:
                 channel_id=channel_id,
                 author=filters["author"],
                 since=filters["since"],
+                scan_limit=search_rules.VECTOR_SCAN_MAX,
             ):
                 count += 1
                 scored.append((embed.dot(query_vec, embed.unpack(row["vector"])), row))
