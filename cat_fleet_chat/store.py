@@ -892,18 +892,60 @@ async def feed_timeline_rows(
     return [dict(row) for row in rows]
 
 
-async def feed_thread_rows(
-    conn: aiosqlite.Connection, root_id: int, limit: int
-) -> list[dict[str, Any]]:
-    """Every post in a thread, deleted ones included, oldest first, at most ``limit``."""
+async def feed_ancestor_rows(conn: aiosqlite.Connection, post_id: int) -> list[dict[str, Any]]:
+    """The post and every ancestor up to its root, root first (index ``i`` has depth ``i``)."""
+    chain = select(feed_posts.c.id, feed_posts.c.parent_id).where(feed_posts.c.id == post_id)
+    chain = chain.cte("chain", recursive=True)
+    chain = chain.union_all(
+        select(feed_posts.c.id, feed_posts.c.parent_id).where(feed_posts.c.id == chain.c.parent_id)
+    )
     rows = await fetch_all(
         conn,
         select(*FEED_COLUMNS)
-        .where(feed_posts.c.root_id == root_id)
-        .order_by(feed_posts.c.id.asc())
-        .limit(limit),
+        .where(feed_posts.c.id.in_(select(chain.c.id)))
+        .order_by(feed_posts.c.depth.asc()),
     )
     return [dict(row) for row in rows]
+
+
+async def feed_subtree_rows(
+    conn: aiosqlite.Connection,
+    top_id: int,
+    *,
+    max_depth: int,
+    after_id: int | None,
+    limit: int,
+    exclude: Iterable[int] = (),
+) -> list[dict[str, Any]]:
+    """``top_id`` and its replies down to ``max_depth``, deleted ones included.
+
+    Oldest first, ids above ``after_id``, at most ``limit``, without ``exclude``.
+    """
+    sub = select(feed_posts.c.id).where(feed_posts.c.id == top_id).cte("sub", recursive=True)
+    sub = sub.union_all(
+        select(feed_posts.c.id).where(
+            feed_posts.c.parent_id == sub.c.id, feed_posts.c.depth <= max_depth
+        )
+    )
+    stmt = select(*FEED_COLUMNS).where(feed_posts.c.id.in_(select(sub.c.id)))
+    if after_id is not None:
+        stmt = stmt.where(feed_posts.c.id > after_id)
+    skip = sorted(set(exclude))
+    if skip:
+        stmt = stmt.where(feed_posts.c.id.not_in(skip))
+    rows = await fetch_all(conn, stmt.order_by(feed_posts.c.id.asc()).limit(limit))
+    return [dict(row) for row in rows]
+
+
+async def feed_ids_with_replies(conn: aiosqlite.Connection, post_ids: Iterable[int]) -> set[int]:
+    """Which of ``post_ids`` have at least one reply, deleted replies included."""
+    ids = sorted(set(post_ids))
+    if not ids:
+        return set()
+    rows = await fetch_all(
+        conn, select(feed_posts.c.parent_id).where(feed_posts.c.parent_id.in_(ids)).distinct()
+    )
+    return {int(row["parent_id"]) for row in rows}
 
 
 async def insert_follow(

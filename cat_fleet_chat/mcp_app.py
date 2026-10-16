@@ -483,15 +483,18 @@ async def fleet_feed_timeline(
         return exc.mcp_body()
 
 
-async def fleet_feed_thread(post_id: int) -> dict[str, Any]:
-    """The whole thread around ``post_id`` as a reply tree (``replies`` per post).
+async def fleet_feed_thread(post_id: int, cursor: str | None = None) -> dict[str, Any]:
+    """The thread around ``post_id`` as a reply tree (``replies`` per post).
 
     Any post in the thread works; that post is marked ``focus``. Deleted posts
-    show as tombstones so their replies keep their place. Very deep replies are
-    shown at nesting level 16 with their true ``parent_id`` and ``depth``.
+    show as tombstones so their replies keep their place. One read covers 16
+    levels: from the root, or from a few levels above a deep post (the posts
+    above come back flat in ``ancestors``). A post with ``more_replies`` has
+    deeper replies: call this tool with its id. Pass ``next_cursor`` back as
+    ``cursor`` for the rest of a very wide thread.
     """
     try:
-        return await get_hub().feed_timeline(scope="thread", post_id=post_id)
+        return await get_hub().feed_timeline(scope="thread", post_id=post_id, cursor=cursor)
     except HubError as exc:
         return exc.mcp_body()
 

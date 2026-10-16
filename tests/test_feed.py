@@ -46,6 +46,31 @@ async def until(predicate, timeout: float = 3.0) -> bool:
     return False
 
 
+async def read_whole_thread(fetch, start_id: int) -> dict[int, dict]:
+    """Every post reachable from ``start_id`` by following ``more_replies``.
+
+    Checks that each nested node sits under its true parent and that a read
+    never nests deeper than the window.
+    """
+    seen: dict[int, dict] = {}
+    queue = [start_id]
+    while queue:
+        page = await fetch(queue.pop())
+        json.dumps(page)
+        stack = [(node, None, 1) for node in page["posts"]]
+        while stack:
+            node, parent, level = stack.pop()
+            assert level <= feed.THREAD_NEST_MAX
+            if parent is not None:
+                assert node["parent_id"] == parent
+            seen.setdefault(node["id"], node)
+            if node["more_replies"]:
+                assert node["replies"] == []
+                queue.append(node["id"])
+            stack.extend((child, node["id"], level + 1) for child in node["replies"])
+    return seen
+
+
 # ---- pure helpers --------------------------------------------------------
 
 
@@ -54,12 +79,16 @@ def test_hashtags_case_dedupe_and_punctuation():
     assert feed.extract_hashtags(text) == ["fleet", "ops", "café", "snake_case", "a"]
 
 
-def test_hashtags_skip_code_urls_numbers_and_long_words():
+def test_hashtags_allow_digits_and_underscores_only():
+    assert feed.extract_hashtags("#42 #2026, #_ #__init #٣ #42") == ["42", "2026", "_", "__init", "٣"]
+
+
+def test_hashtags_skip_code_urls_and_long_words():
     text = (
         "fixes #42 see https://example.test/page#anchor and example.test/#frag "
         "`#inline` ```\n#fenced\n``` &#39; #" + "x" * 51 + " #" + "y" * 50 + " #ok"
     )
-    assert feed.extract_hashtags(text) == ["y" * 50, "ok"]
+    assert feed.extract_hashtags(text) == ["42", "y" * 50, "ok"]
 
 
 def test_body_normalising_and_limits():
@@ -104,17 +133,28 @@ def test_build_thread_is_iterative_at_any_depth():
     old_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(200)
     try:
-        roots = feed.build_thread(posts, max_nesting=None)
+        roots = feed.build_thread(posts)
         walked = list(feed.iter_tree(roots))
     finally:
         sys.setrecursionlimit(old_limit)
     assert len(roots) == 1 and len(walked) == depth
     assert [node["id"] for node in walked] == list(range(1, depth + 1))
-    # Unbounded nesting: every node holds exactly the next one.
+    # True nesting: every node holds exactly the next one.
     assert all(len(node["replies"]) == (0 if node["id"] == depth else 1) for node in walked)
 
 
-def test_build_thread_sibling_order_tombstones_and_nesting_cap():
+def test_thread_window_top_always_moves_deeper_from_an_edge():
+    assert feed.thread_window_top(0) == 0
+    assert feed.thread_window_top(feed.THREAD_NEST_MAX - feed.THREAD_CONTEXT - 1) == 0
+    top = 0
+    for _ in range(100):
+        edge = top + feed.THREAD_NEST_MAX - 1
+        deeper = feed.thread_window_top(edge)
+        assert top < deeper and edge - deeper == feed.THREAD_CONTEXT
+        top = deeper
+
+
+def test_build_thread_sibling_order_tombstones_and_orphans():
     rows = [
         _row(1, None, 0),
         _row(2, 1, 1, deleted_at="gone"),
@@ -130,17 +170,11 @@ def test_build_thread_sibling_order_tombstones_and_nesting_cap():
     assert tomb["deleted"] is True and tomb["body"] == "" and tomb["replies"][0]["id"] == 4
     assert tomb["replies"][0]["focus"] is True
 
-    chain = [feed.shape_post(_row(i + 1, i if i else None, i)) for i in range(10)]
-    (top,) = feed.build_thread(chain, max_nesting=3)
-    levels = []
-    stack = [(top, 0)]
-    while stack:
-        node, level = stack.pop()
-        levels.append(level)
-        stack.extend((child, level + 1) for child in node["replies"])
-    assert max(levels) == 3 and len(levels) == 10
-    deep = [node for node in feed.iter_tree([top]) if node["id"] == 10][0]
-    assert deep["parent_id"] == 9 and deep["depth"] == 9
+    # A post whose parent is not in the list (window top, earlier page) is top level.
+    window = [feed.shape_post(_row(i + 1, i, i)) for i in range(5, 10)]
+    (top,) = feed.build_thread(window)
+    assert top["id"] == 6 and top["parent_id"] == 5
+    assert [node["id"] for node in feed.iter_tree([top])] == [6, 7, 8, 9, 10]
 
 
 # ---- posts, replies, threads ----------------------------------------------
@@ -170,17 +204,53 @@ async def test_reply_chain_tracks_root_and_depth(hub):
         parent = reply["id"]
         ids.append(parent)
 
+    # A deep post: the window starts a few levels above it, ancestors come flat.
     thread = await hub.feed_timeline(scope="thread", post_id=ids[30])
+    top = 30 - feed.THREAD_CONTEXT
     assert thread["root_id"] == root and thread["focus_id"] == ids[30]
-    assert thread["count"] == 56 and thread["has_more"] is False
+    assert thread["top_id"] == ids[top] and thread["has_more"] is False
+    assert [p["id"] for p in thread["ancestors"]] == ids[:top]
+    assert all("replies" not in p for p in thread["ancestors"])
     walked = list(feed.iter_tree(thread["posts"]))
-    assert sorted(node["id"] for node in walked) == ids
+    assert [node["id"] for node in walked] == ids[top : top + feed.THREAD_NEST_MAX]
     assert [node for node in walked if node.get("focus")][0]["id"] == ids[30]
-    by_id = {node["id"]: node for node in walked}
-    assert by_id[root]["reply_count"] == 1
-    assert by_id[ids[55]]["depth"] == 55 and by_id[ids[55]]["parent_id"] == ids[54]
-    # Serializable at full depth (the nesting is capped for display).
+    assert [node["id"] for node in walked if node["more_replies"]] == [ids[top + feed.THREAD_NEST_MAX - 1]]
     json.dumps(thread)
+
+    # Following more_replies from the root reaches every post under its true parent.
+    async def fetch(post_id):
+        return await hub.feed_timeline(scope="thread", post_id=post_id)
+
+    seen = await read_whole_thread(fetch, root)
+    assert sorted(seen) == ids
+    assert seen[ids[55]]["depth"] == 55 and seen[ids[55]]["parent_id"] == ids[54]
+    assert seen[root]["reply_count"] == 1
+
+
+async def test_wide_thread_pages_by_cursor_and_keeps_the_focus(hub, monkeypatch):
+    monkeypatch.setattr(feed, "THREAD_ROWS_MAX", 4)
+    root = pid(await hub.feed_post("ada", "wide"))
+    replies = [pid(await hub.feed_post("bob", f"r{i}", parent_id=root)) for i in range(9)]
+    late = pid(await hub.feed_post("cy", "late", parent_id=replies[-1]))
+    seen: list[int] = []
+    cursor = None
+    pages = []
+    while True:
+        page = await hub.feed_timeline(scope="thread", post_id=late, cursor=cursor)
+        pages.append(page)
+        seen.extend(node["id"] for node in feed.iter_tree(page["posts"]))
+        if not page["has_more"]:
+            assert page["next_cursor"] is None
+            break
+        cursor = page["next_cursor"]
+    first = list(feed.iter_tree(pages[0]["posts"]))
+    # The requested post and its parent chain are on the first page.
+    assert [n["id"] for n in first if n.get("focus")] == [late]
+    assert {root, replies[-1], late} <= {n["id"] for n in first}
+    assert len(pages) == 3
+    assert sorted(seen) == sorted([root, *replies, late]) and len(seen) == len(set(seen))
+    # A reply whose parent is on an earlier page comes back top level, parent_id intact.
+    assert all(node["parent_id"] == root for node in pages[1]["posts"])
 
 
 async def test_reply_rules_parent_must_exist_live_and_depth_is_capped(hub, monkeypatch):
@@ -517,6 +587,25 @@ async def test_rest_feed_round_trip(running):
     assert unfollowed.json()["following"] is False
 
 
+async def test_rest_deep_thread_serializes_and_continues(running):
+    client, _ = running
+    parent = (await client.post("/api/v1/feed/posts", json={"author": "ada", "body": "deep"})).json()["post"]["id"]
+    ids = [parent]
+    for i in range(40):
+        reply = await client.post("/api/v1/feed/posts", json={"author": "bob", "body": f"r{i}", "parent_id": parent})
+        parent = reply.json()["post"]["id"]
+        ids.append(parent)
+
+    async def fetch(post_id):
+        response = await client.get(f"/api/v1/feed/posts/{post_id}", params={"thread": 1})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    assert sorted(await read_whole_thread(fetch, ids[0])) == ids
+    bad = await client.get(f"/api/v1/feed/posts/{ids[0]}", params={"thread": 1, "cursor": "nope"})
+    assert bad.status_code == 400
+
+
 async def test_mcp_feed_tools_are_registered_and_serialize_deep_threads(hub):
     mcp_app.set_hub(hub)
     try:
@@ -533,13 +622,21 @@ async def test_mcp_feed_tools_are_registered_and_serialize_deep_threads(hub):
             } <= names
             root = (await client.call_tool("fleet_feed_post", {"author": "ada", "body": "root #mcp"})).data
             parent = root["post"]["id"]
+            ids = [parent]
             for i in range(60):
                 reply = await client.call_tool(
                     "fleet_feed_reply", {"author": "bob", "parent_id": parent, "body": f"r{i}"}
                 )
                 parent = reply.data["post"]["id"]
+                ids.append(parent)
             thread = (await client.call_tool("fleet_feed_thread", {"post_id": parent})).structured_content
-            assert thread["count"] == 61
+            assert len(thread["ancestors"]) == 60 - feed.THREAD_CONTEXT
+            assert thread["count"] == feed.THREAD_CONTEXT + 1
+
+            async def fetch(post_id):
+                return (await client.call_tool("fleet_feed_thread", {"post_id": post_id})).structured_content
+
+            assert sorted(await read_whole_thread(fetch, ids[0])) == ids
             await client.call_tool("fleet_feed_follow", {"follower": "cy", "followee": "ada"})
             await client.call_tool("fleet_feed_repost", {"author": "cy", "post_id": root["post"]["id"]})
             page = (

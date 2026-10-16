@@ -18,12 +18,16 @@ BODY_MAX = 4_000
 TAG_MAX = 50
 # How deep a reply may sit below its root. A reply past this is refused.
 DEPTH_MAX = 1_000
-# Display nesting of a thread tree. Replies deeper than this attach to their
-# ancestor at the cap (``parent_id``/``depth`` stay true). JSON serializers
-# have depth limits (pydantic, which FastMCP uses, gives up near 50 levels),
-# so an unbounded tree cannot leave the hub.
+# Levels of a thread tree in one read. JSON serializers have depth limits
+# (pydantic, which FastMCP uses, gives up near 50 levels), so a thread read is
+# a window of this many levels. Nodes on its last level that have replies say
+# ``more_replies``; reading the thread at such a node continues below it.
+# Every node stays under its true parent: nothing is re-parented.
 THREAD_NEST_MAX = 16
-# A thread read returns at most this many posts and says ``truncated``.
+# When the requested post sits deeper than the window, the window starts this
+# many levels above it; the posts above the window come back flat as ``ancestors``.
+THREAD_CONTEXT = 4
+# Posts per thread page; ``next_cursor`` reads the rest of the window.
 THREAD_ROWS_MAX = 5_000
 TIMELINE_SCOPES = ("global", "following", "hashtag", "author", "thread")
 TRENDING_DEFAULT = 10
@@ -44,8 +48,8 @@ _CURSOR_PREFIX = "v1:"
 def extract_hashtags(text: str) -> list[str]:
     """Lowercased tags without ``#``, deduplicated in first-seen order.
 
-    Code fences, inline code and URLs are skipped. Tags made only of digits
-    (``#42``) are issue references, not hashtags.
+    Code fences, inline code and URLs are skipped. Any run of 1..50 letters,
+    digits or underscores counts, so ``#42`` and ``#_`` are tags too.
     """
     if not text:
         return []
@@ -56,7 +60,7 @@ def extract_hashtags(text: str) -> list[str]:
     found: list[str] = []
     for match in HASHTAG_RE.finditer(cleaned):
         tag = match.group(1).lower()
-        if tag.isdigit() or tag.strip("_") == "" or tag in seen:
+        if tag in seen:
             continue
         seen.add(tag)
         found.append(tag)
@@ -155,23 +159,31 @@ def tombstone_original(post_id: int) -> dict[str, Any]:
     return {"id": post_id, "deleted": True}
 
 
+def thread_window_top(focus_depth: int) -> int:
+    """Depth at which a thread read around a post at ``focus_depth`` starts.
+
+    The root while the post and a few levels below it fit in the first window,
+    else ``THREAD_CONTEXT`` levels above the post. So a read at a node on a
+    window's last level always starts a deeper window.
+    """
+    if focus_depth < THREAD_NEST_MAX - THREAD_CONTEXT:
+        return 0
+    return focus_depth - THREAD_CONTEXT
+
+
 def build_thread(
-    posts: list[dict[str, Any]],
-    *,
-    focus_id: int | None = None,
-    max_nesting: int | None = THREAD_NEST_MAX,
+    posts: list[dict[str, Any]], *, focus_id: int | None = None
 ) -> list[dict[str, Any]]:
     """Nest shaped posts into reply trees. Iterative: no recursion at any depth.
 
-    Siblings keep chronological (id) order. A post whose parent is missing from
-    ``posts`` becomes a top-level node, so a truncated thread still renders.
-    With ``max_nesting`` a node never sits more than that many levels below its
-    top-level node; deeper replies join their ancestor's replies at the cap.
-    Each node gets ``replies`` and, for the requested post, ``focus: true``.
+    Every post sits under its true parent and siblings keep chronological (id)
+    order. A post whose parent is missing from ``posts`` (the window top, or a
+    parent on an earlier page) becomes a top-level node. Each node gets
+    ``replies`` and, for the requested post, ``focus: true``. The caller bounds
+    the depth of what it passes in.
     """
     ordered = sorted(posts, key=lambda post: post["id"])
     nodes: dict[int, dict[str, Any]] = {}
-    level: dict[int, int] = {}
     roots: list[dict[str, Any]] = []
     for post in ordered:
         node = {**post, "replies": []}
@@ -180,21 +192,9 @@ def build_thread(
         nodes[post["id"]] = node
         parent = nodes.get(post.get("parent_id")) if post.get("parent_id") is not None else None
         if parent is None:
-            level[post["id"]] = 0
             roots.append(node)
-            continue
-        holder = parent
-        if max_nesting is not None:
-            # Climb to the ancestor sitting one level above the cap. Top-level
-            # nodes are at level 0, so the climb always ends.
-            cap = max(1, max_nesting)
-            while level[holder["id"]] >= cap:
-                holder = nodes[holder["_holder"]]
-        node["_holder"] = holder["id"]
-        level[post["id"]] = level[holder["id"]] + 1
-        holder["replies"].append(node)
-    for node in nodes.values():
-        node.pop("_holder", None)
+        else:
+            parent["replies"].append(node)
     return roots
 
 

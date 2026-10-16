@@ -446,7 +446,11 @@ async def feed_get_post(request: Request) -> JSONResponse:
         hub = _hub(request)
         post_id = request.path_params["post_id"]
         if request.query_params.get("thread") in ("1", "true", "yes"):
-            return JSONResponse(await hub.feed_timeline(scope="thread", post_id=post_id))
+            return JSONResponse(
+                await hub.feed_timeline(
+                    scope="thread", post_id=post_id, cursor=request.query_params.get("cursor")
+                )
+            )
         return JSONResponse(await hub.feed_get_post(post_id))
     except HubError as exc:
         return _json_error(exc)

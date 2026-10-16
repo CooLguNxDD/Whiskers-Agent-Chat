@@ -1161,7 +1161,8 @@ class Hub:
         ``global`` is everything, ``following`` the authors ``handle`` follows,
         ``hashtag`` posts tagged ``tag``, ``author`` one author's posts. Deleted
         posts are left out. ``thread`` returns the nested tree around
-        ``post_id`` (any post in it), with deleted posts as tombstones.
+        ``post_id`` (any post in it), with deleted posts as tombstones; see
+        ``_feed_thread`` for its window and paging.
         """
         clean_scope = scope or "global"
         if clean_scope not in feed.TIMELINE_SCOPES:
@@ -1172,7 +1173,7 @@ class Hub:
                 {"field": "scope", "allowed": list(feed.TIMELINE_SCOPES)},
             )
         if clean_scope == "thread":
-            return await self._feed_thread(require_id(post_id, "post_id"))
+            return await self._feed_thread(require_id(post_id, "post_id"), cursor)
         before = feed.decode_cursor(cursor)
         clean_limit = page_limit(limit)
         filters: dict[str, Any] = {}
@@ -1202,27 +1203,60 @@ class Hub:
             "has_more": has_more,
         }
 
-    async def _feed_thread(self, post_id: int) -> dict[str, Any]:
-        async def op(conn):
-            found = await store.get_feed_row(conn, post_id)
-            if found is None:
-                raise HubError("not_found", f"post {post_id} not found", 404)
-            root_id = int(found["root_id"])
-            rows = await store.feed_thread_rows(conn, root_id, feed.THREAD_ROWS_MAX + 1)
-            truncated = len(rows) > feed.THREAD_ROWS_MAX
-            rows = rows[: feed.THREAD_ROWS_MAX]
-            return root_id, await self._shape_feed(conn, rows), truncated
+    async def _feed_thread(self, post_id: int, cursor: Any = None) -> dict[str, Any]:
+        """A window of ``feed.THREAD_NEST_MAX`` levels of the thread around ``post_id``.
 
-        root_id, posts, truncated = await self.db.read(op)
+        The window starts at the root, or a few levels above a deep post; the
+        posts above it come back flat in ``ancestors``. Nodes on the window's
+        last level with replies carry ``more_replies`` (read the thread at that
+        node to go deeper). A wide window pages by ``next_cursor``; the
+        requested post and its chain are always on the first page.
+        """
+        after = feed.decode_cursor(cursor)
+
+        async def op(conn):
+            chain = await store.feed_ancestor_rows(conn, post_id)
+            if not chain:
+                raise HubError("not_found", f"post {post_id} not found", 404)
+            focus_depth = int(chain[-1]["depth"])
+            top_depth = feed.thread_window_top(focus_depth)
+            top = chain[top_depth]
+            max_depth = top_depth + feed.THREAD_NEST_MAX - 1
+            in_window = chain[top_depth:]
+            rows = await store.feed_subtree_rows(
+                conn,
+                int(top["id"]),
+                max_depth=max_depth,
+                after_id=after,
+                limit=feed.THREAD_ROWS_MAX + 1,
+                exclude=[row["id"] for row in in_window] if after is not None else (),
+            )
+            has_more = len(rows) > feed.THREAD_ROWS_MAX
+            rows = rows[: feed.THREAD_ROWS_MAX]
+            last_id = rows[-1]["id"] if rows else None
+            if after is None:
+                listed = {row["id"] for row in rows}
+                rows += [row for row in in_window if row["id"] not in listed]
+            edge = [row["id"] for row in rows if row["depth"] >= max_depth]
+            deeper = await store.feed_ids_with_replies(conn, edge)
+            posts = await self._shape_feed(conn, rows)
+            for post in posts:
+                post["more_replies"] = post["id"] in deeper
+            ancestors = await self._shape_feed(conn, chain[:top_depth])
+            return int(chain[0]["id"]), int(top["id"]), ancestors, posts, has_more, last_id
+
+        root_id, top_id, ancestors, posts, has_more, last_id = await self.db.read(op)
         return {
             "scope": "thread",
             "root_id": root_id,
             "focus_id": post_id,
+            "top_id": top_id,
+            "ancestors": ancestors,
             "count": len(posts),
             "posts": feed.build_thread(posts, focus_id=post_id),
-            "next_cursor": None,
-            "has_more": truncated,
-            "truncated": truncated,
+            "next_cursor": feed.encode_cursor(last_id) if has_more and last_id else None,
+            "has_more": has_more,
+            "truncated": has_more,
         }
 
     async def feed_trending_tags(self, limit: Any = None, since: Any = None) -> dict[str, Any]:
