@@ -284,6 +284,20 @@ async def test_jsonl_import_reports_good_duplicate_and_invalid_lines(hub):
     assert text == {"added": 0, "duplicates": 0, "invalid": [{"line": 1, "error": text["invalid"][0]["error"]}]}
 
 
+async def test_jsonl_import_reports_lines_json_rejects_without_decode_error(hub):
+    # A huge integer raises a plain ValueError and deep nesting a RecursionError,
+    # neither a JSONDecodeError; both stay one invalid line, never abort the import.
+    lines = [
+        '{"project": "demo", "fact": "x", "n": ' + "9" * 5_000 + "}",
+        "[" * 10_000,
+        json.dumps({"project": "demo", "fact": "Still imported"}),
+    ]
+    result = await hub.knowledge_import_jsonl(lines, "importer")
+    assert result["added"] == 1 and result["duplicates"] == 0
+    assert [item["line"] for item in result["invalid"]] == [1, 2]
+    assert all(item["error"].startswith("line is not JSON") for item in result["invalid"])
+
+
 async def test_jsonl_import_cap(hub):
     line = json.dumps({"project": "demo", "fact": "same fact"})
     with pytest.raises(HubError) as info:

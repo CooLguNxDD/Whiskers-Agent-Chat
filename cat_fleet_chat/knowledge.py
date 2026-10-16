@@ -243,8 +243,12 @@ def parse_line(line: Any) -> dict[str, Any]:
         raise _fail(f"line exceeds {LINE_MAX} characters", "line")
     try:
         item = json.loads(line)
-    except ValueError as exc:
+    except json.JSONDecodeError as exc:
         raise _fail(f"line is not JSON ({exc.msg})", "line") from None
+    except ValueError:  # e.g. an integer past the int digit limit
+        raise _fail("line is not JSON (number too large)", "line") from None
+    except RecursionError:
+        raise _fail("line is not JSON (nested too deeply)", "line") from None
     if not isinstance(item, dict):
         raise _fail("line must be a JSON object", "line")
     author = item.get("author")
