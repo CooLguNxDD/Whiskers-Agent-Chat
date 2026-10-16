@@ -384,6 +384,26 @@ async def update_task_status(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+async def search(request: Request) -> JSONResponse:
+    """``GET /api/v1/search``: BM25 full-text search. ``kind`` may repeat or be a comma list."""
+    try:
+        params = request.query_params
+        kinds = params.getlist("kind")
+        result = await _hub(request).search(
+            params.get("q"),
+            kind=kinds if len(kinds) > 1 else params.get("kind"),
+            channel=params.get("channel"),
+            author=params.get("author"),
+            since=params.get("since"),
+            limit=params.get("limit"),
+            offset=params.get("offset"),
+            mode=params.get("mode"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
 async def list_agents(request: Request) -> JSONResponse:
     try:
         return JSONResponse(await _hub(request).list_agents())
@@ -616,6 +636,7 @@ def api_routes() -> list[Route]:
         Route("/api/v1/tasks", create_task, methods=["POST"]),
         Route("/api/v1/tasks/{task_id:int}/claim", claim_task, methods=["POST"]),
         Route("/api/v1/tasks/{task_id:int}/status", update_task_status, methods=["POST"]),
+        Route("/api/v1/search", search, methods=["GET"]),
         Route("/api/v1/agents", list_agents, methods=["GET"]),
         Route("/api/v1/events", events, methods=["GET"]),
         Route("/api/v1/destinations", list_destinations, methods=["GET"]),
