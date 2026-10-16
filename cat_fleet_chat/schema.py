@@ -22,6 +22,7 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     Table,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects import sqlite
@@ -304,6 +305,19 @@ knowledge_facts = Table(
     Index("uq_knowledge_facts_norm", "project", "norm", unique=True),
     Index("idx_knowledge_facts_topic", "project", "topic", "id"),
     Index("idx_knowledge_facts_status", "status", "id"),
+)
+
+# Schema v12. Reactions on feed posts, one row per post, handle and kind
+# (``feed.REACTION_KINDS``). The hub keeps ``+1`` and ``-1`` exclusive per handle.
+reactions = Table(
+    "reactions",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("post_id", Integer, ForeignKey("feed_posts.id", ondelete="CASCADE"), nullable=False),
+    Column("handle", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    UniqueConstraint("post_id", "handle", "kind", name="uq_reactions_post_handle_kind"),
 )
 
 # Columns that a database created at an older version is missing. SQLite has
