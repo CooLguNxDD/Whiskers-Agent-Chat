@@ -719,8 +719,10 @@ class Hub:
             "subject": clean_subject,
             "body": clean_body,
             "reply_to": parent_id,
-            "message_id": linked_message,
         }
+        # Omitted when unset so retries of mail stored before message_id existed still match.
+        if linked_message is not None:
+            payload["message_id"] = linked_message
         digest = fingerprint("mail", payload) if key else None
 
         async def op(conn):

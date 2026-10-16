@@ -589,3 +589,24 @@ async def test_wait_timeout_returns_last_cursors_and_unread(running):
     assert result["cursor"] == 0
     assert result["mail_unread"] == 1
     assert result["mail_cursor"] >= 1
+
+
+async def test_retry_matches_fingerprint_stored_before_message_id(running):
+    from cat_fleet_chat.validate import fingerprint
+
+    _client, app = running
+    hub = app.state.hub
+    legacy = fingerprint(
+        "mail",
+        {"sender": "alice", "recipient": "bob", "subject": "", "body": "old", "reply_to": None},
+    )
+    first = await hub.send_mail("alice", "bob", "old", client_request_id="legacy-1")
+
+    async def swap(conn):
+        await conn.execute(
+            "UPDATE idempotency SET fingerprint = ? WHERE client_request_id = ?", (legacy, "legacy-1")
+        )
+
+    await hub._txn(swap)
+    again = await hub.send_mail("alice", "bob", "old", client_request_id="legacy-1")
+    assert again["mail"]["id"] == first["mail"]["id"]
