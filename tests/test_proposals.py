@@ -73,7 +73,8 @@ def test_proposal_number_accepts_p_prefix_and_plain_ids():
 
 def test_field_validators():
     assert proposals.weight_value(1) == 1 and proposals.weight_value("10") == 10
-    for bad in (0, 11, "x", True, 2.5, None):
+    assert proposals.weight_value(" 7 ") == 7
+    for bad in (0, 11, "x", True, 2.5, None, "--1", "-", "-3", "+5", "1_0", "٣", "²", ""):
         with pytest.raises(HubError):
             proposals.weight_value(bad)
     assert proposals.title_text("  two\n words ") == "two words"
@@ -125,6 +126,7 @@ async def test_create_validation(hub):
         {"summary": ""},
         {"weight": 0},
         {"weight": 11},
+        {"weight": "--1"},
         {"evidence": [""]},
         {"author": "bad handle"},
     ]
@@ -383,6 +385,9 @@ async def test_rest_round_trip(running):
     assert no_reason.status_code == 400
     no_actor = await client.patch("/api/v1/proposals/P1", json={"weight": 5})
     assert no_actor.status_code == 400 and no_actor.json()["error"]["details"]["field"] == "actor"
+    for weight in ("--1", "²"):
+        bad_weight = await client.patch("/api/v1/proposals/P1", json={"actor": "carol", "weight": weight})
+        assert bad_weight.status_code == 400 and bad_weight.json()["error"]["details"]["field"] == "weight"
 
 
 def test_proposal_event_kinds_are_filterable():

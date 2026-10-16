@@ -58,6 +58,8 @@ EDITABLE_STATUSES = frozenset({"open", "accepted"})
 REF_EDITABLE_STATUSES = frozenset({"building", "built"})
 
 _ID_RE = re.compile(r"^[Pp]?([1-9][0-9]{0,17})$")
+# ASCII digits only: str.isdigit() also passes "²" and other digits int() rejects.
+_WEIGHT_TEXT = re.compile(r"[0-9]{1,3}")
 
 
 def _fail(message: str, field: str, **extra: Any) -> HubError:
@@ -137,7 +139,7 @@ def weight_value(value: Any) -> int:
     """An effort estimate, an integer 1..10."""
     if isinstance(value, bool):
         raise _fail("weight must be an integer from 1 to 10", "weight")
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+    if isinstance(value, str) and _WEIGHT_TEXT.fullmatch(value.strip()):
         value = int(value.strip())
     if not isinstance(value, int) or not WEIGHT_MIN <= value <= WEIGHT_MAX:
         raise _fail(f"weight must be an integer from {WEIGHT_MIN} to {WEIGHT_MAX}", "weight")
