@@ -42,7 +42,17 @@ _TRAILING_PUNCT = ".,;:!?…。"
 # "#run-<id>" / "#step-<id>" tags in a LEARNED post. Plain hashtags stop at "-",
 # so these are read with their own pattern.
 _SOURCE_TAG_RE = re.compile(r"(?<![\w#&/])#(run|step)-([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})", re.IGNORECASE)
-_TRAILING_TAGS_RE = re.compile(r"(?:\s+#[\w.:-]+)+\s*$")
+_TRAILING_TAG_RE = re.compile(r"#[\w.:-]+\Z")
+
+
+def _strip_trailing_tags(text: str) -> str:
+    """Drop whitespace-preceded ``#tag`` tokens from the end of ``text`` without backtracking."""
+    stripped = text.rstrip()
+    while True:
+        parts = stripped.rsplit(None, 1)
+        if len(parts) != 2 or not _TRAILING_TAG_RE.match(parts[1]):
+            return stripped
+        stripped = parts[0]
 
 
 def _fail(message: str, field: str) -> HubError:
@@ -168,7 +178,7 @@ def learned_from_post(post: dict[str, Any]) -> dict[str, Any] | None:
     for kind, value in _SOURCE_TAG_RE.findall(body):
         sources.setdefault(kind.lower(), value)
     text = _SOURCE_TAG_RE.sub(" ", text)
-    text = _TRAILING_TAGS_RE.sub("", text).strip()
+    text = _strip_trailing_tags(text).strip()
     if not text:
         return None
     project = DEFAULT_PROJECT

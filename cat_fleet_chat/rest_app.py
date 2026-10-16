@@ -695,16 +695,32 @@ async def knowledge_import(request: Request) -> JSONResponse:
     """
     try:
         content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        raw = await _read_capped(request, KNOWLEDGE_IMPORT_BODY_MAX)
         if content_type in ("application/x-ndjson", "application/jsonl", "application/jsonlines"):
-            raw = await _read_capped(request, KNOWLEDGE_IMPORT_BODY_MAX)
             try:
                 lines: Any = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise HubError("validation_error", "body must be UTF-8", 400) from exc
             body: dict[str, Any] = {}
         else:
-            body = await _body(request)
+            if not raw and not content_type.startswith("application/json"):
+                body = {}
+            else:
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except Exception as exc:
+                    raise HubError("validation_error", "request body must be JSON", 400) from exc
+                if not isinstance(parsed, dict):
+                    raise HubError("validation_error", "request body must be a JSON object", 400)
+                body = parsed
             lines = body.get("lines")
+            if lines is not None and (isinstance(lines, bool) or not isinstance(lines, (str, list))):
+                raise HubError(
+                    "validation_error",
+                    "lines must be JSONL text or a list of lines",
+                    400,
+                    {"field": "lines"},
+                )
         result = await _hub(request).knowledge_import_jsonl(lines, _caller(request, body, "author"))
         return JSONResponse(result)
     except HubError as exc:
@@ -712,13 +728,13 @@ async def knowledge_import(request: Request) -> JSONResponse:
 
 
 async def knowledge_export(request: Request) -> Response:
-    """``GET /api/v1/knowledge/export``: facts as ``application/x-ndjson``."""
+    """``GET /api/v1/knowledge/export``: facts streamed in chunks as ``application/x-ndjson``."""
     try:
         params = request.query_params
-        result = await _hub(request).knowledge_export_jsonl(
+        chunks = await _hub(request).knowledge_export_chunks(
             project=params.get("project"), status=params.get("status") or "active"
         )
-        return Response(result["jsonl"], media_type="application/x-ndjson")
+        return StreamingResponse(chunks, media_type="application/x-ndjson")
     except HubError as exc:
         return _json_error(exc)
 

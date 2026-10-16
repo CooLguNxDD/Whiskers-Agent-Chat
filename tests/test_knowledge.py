@@ -557,3 +557,144 @@ async def test_v9_database_upgrades_to_v10(tmp_path):
         assert (await hub.search("backfill", kind="knowledge"))["results"] == []
     finally:
         await db.close()
+
+
+# ---- S12-jules-fixes-4 regressions ------------------------------------------
+
+
+def test_trailing_tags_stripping_does_not_backtrack_on_crafted_input():
+    import time
+
+    crafted = "LEARNED: valid fact body" + (" #t" * 500) + " trailing_word"
+    start = time.perf_counter()
+    parsed = knowledge.learned_from_post({"body": crafted, "hashtags": ["t"]})
+    elapsed = time.perf_counter() - start
+    assert elapsed < 0.2
+    assert parsed is not None
+    assert parsed["fact"].startswith("valid fact body")
+    assert parsed["fact"].endswith("trailing_word")
+
+    stripped = knowledge.learned_from_post(
+        {"body": "LEARNED: clean fact" + (" #tag" * 3_000), "hashtags": ["tag"]}
+    )
+    assert stripped is not None and stripped["fact"] == "clean fact"
+
+
+async def test_knowledge_import_batches_database_operations(hub):
+    await hub.knowledge_add("demo", "Existing fact 0", author="ada")
+    lines = [
+        json.dumps({"project": "demo", "topic": "ci", "fact": f"Batch fact {i}"})
+        for i in range(150)
+    ] + [
+        json.dumps({"project": "demo", "topic": "ci", "fact": "Batch fact 0"}),
+        json.dumps({"project": "demo", "topic": "ci", "fact": "Existing fact 0"}),
+    ]
+
+    statements: list[str] = []
+    await hub.db._write.set_trace_callback(statements.append)
+    try:
+        result = await hub.knowledge_import_jsonl(lines, "importer")
+    finally:
+        await hub.db._write.set_trace_callback(None)
+
+    assert result == {"added": 150, "duplicates": 2, "invalid": []}
+    top_level = [s for s in statements if not s.startswith("--")]
+    # Unbatched import would run ~5 top-level SQL statements per item (>750 statements).
+    assert len(top_level) < 15, f"expected batched SQL, got {len(top_level)} statements"
+    assert len((await hub.search("Batch fact 149", kind="knowledge"))["results"]) == 1
+    events = [e for e in await all_events(hub) if e["kind"] == "knowledge_fact"]
+    assert len(events) == 151
+
+
+async def test_search_fetches_knowledge_metadata_in_batch_without_join(hub):
+    from cat_fleet_chat import store
+
+    assert not hasattr(store, "_KNOWLEDGE_JOIN")
+    await hub.post_message("fleet", "ada", "shared token alpha")
+    added = await hub.knowledge_add("demo", "shared token alpha in fact", topic="ops", author="bob")
+
+    queries: list[str] = []
+    for conn in hub.db._reads:
+        await conn.set_trace_callback(queries.append)
+    try:
+        msg_only = await hub.search("alpha", kind="message")
+        assert [h["kind"] for h in msg_only["results"]] == ["message"]
+        assert not any("knowledge_facts" in q for q in queries)
+
+        queries.clear()
+        both = await hub.search("alpha")
+        by_kind = {h["kind"]: h for h in both["results"]}
+        assert by_kind["knowledge"]["id"] == added["fact"]["id"]
+        assert by_kind["knowledge"]["project"] == "demo"
+        assert by_kind["knowledge"]["topic"] == "ops"
+        kf_queries = [q for q in queries if "knowledge_facts" in q]
+        assert len(kf_queries) == 1
+        assert "LEFT JOIN knowledge_facts" not in kf_queries[0]
+    finally:
+        for conn in hub.db._reads:
+            await conn.set_trace_callback(None)
+
+
+async def test_knowledge_from_feed_post_catches_and_reports_hub_error(hub, caplog):
+    result = {
+        "post": {
+            "id": 42,
+            "author": "not a valid handle!",
+            "body": "LEARNED: [ci] rejected because author is invalid #demo",
+            "hashtags": ["demo"],
+        }
+    }
+    with caplog.at_level("WARNING", logger="cat_fleet_chat.hub"):
+        await hub.knowledge_from_feed_post(result)
+    assert "knowledge_error" in result
+    assert "author" in result["knowledge_error"]
+    assert any("rejected LEARNED fact" in rec.message for rec in caplog.records)
+    assert (await hub.knowledge_list())["facts"] == []
+
+
+async def test_rest_knowledge_import_json_body_cap_and_lines_validation(running, monkeypatch):
+    from cat_fleet_chat import rest_app
+
+    client, _ = running
+    for bad_lines in (123, {"not": "a list"}, True):
+        resp = await client.post(
+            "/api/v1/knowledge/import",
+            json={"author": "importer", "lines": bad_lines},
+        )
+        assert resp.status_code == 400, bad_lines
+        body = resp.json()["error"]
+        assert body["code"] == "validation_error"
+        assert body["details"]["field"] == "lines"
+
+    monkeypatch.setattr(rest_app, "KNOWLEDGE_IMPORT_BODY_MAX", 128)
+    oversized = json.dumps({"author": "importer", "lines": ["x" * 200]}).encode("utf-8")
+    too_big = await client.post(
+        "/api/v1/knowledge/import",
+        content=oversized,
+        headers={"Content-Type": "application/json"},
+    )
+    assert too_big.status_code == 413
+    assert too_big.json()["error"]["code"] == "payload_too_large"
+
+
+async def test_rest_knowledge_export_streams_chunks(running, monkeypatch):
+    from cat_fleet_chat import store
+
+    client, _ = running
+    monkeypatch.setattr(store, "EXPORT_BATCH", 2)
+    for i in range(5):
+        res = await client.post(
+            "/api/v1/knowledge/facts",
+            json={"project": "demo", "topic": "ci", "fact": f"Streamed fact {i}", "author": "ada"},
+        )
+        assert res.status_code == 201
+
+    exported = await client.get("/api/v1/knowledge/export", params={"project": "demo"})
+    assert exported.status_code == 200
+    lines = [json.loads(line) for line in exported.text.splitlines()]
+    assert [item["fact"] for item in lines] == [f"Streamed fact {i}" for i in range(5)]
+
+    bad = await client.get("/api/v1/knowledge/export", params={"status": "bogus"})
+    assert bad.status_code == 400
+    assert bad.json()["error"]["code"] == "validation_error"
+

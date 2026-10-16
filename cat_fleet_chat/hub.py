@@ -171,6 +171,14 @@ class Hub:
             # changes; the missing-vector scan picks up new ones.
             self._reindexed.append((kind, ref_id))
 
+    async def _index_knowledge_batch(self, conn, fact_ids: list[int]) -> None:
+        """Refresh search index entries for multiple knowledge facts in one write transaction."""
+        if not fact_ids or not self.db.fts5_available:
+            return
+        await store.index_knowledge_batch(conn, fact_ids)
+        if self.embed_queue is not None:
+            self._reindexed.extend(("knowledge", fid) for fid in fact_ids)
+
     async def list_channels(
         self, include_archived: Any = False, state: Any = None
     ) -> dict[str, Any]:
@@ -1278,7 +1286,9 @@ class Hub:
                 if len(scored) >= 4 * k + 256:
                     scored = search_rules.top_k(scored, k)
             best = search_rules.top_k(scored, k)
-            return [(value, dict(row)) for value, row in best], count
+            out = [(value, dict(row)) for value, row in best]
+            await store.attach_knowledge_meta(conn, [row for _, row in out])
+            return out, count
 
         return await self.db.read(op)
 
@@ -1894,17 +1904,52 @@ class Hub:
             clean["author"] = clean["author"] or importer
             parsed.append(clean)
 
-        async def op(conn):
-            added = duplicates = 0
-            for clean in parsed:
-                _, created = await self._knowledge_insert(conn, clean)
-                if created:
-                    added += 1
-                else:
-                    duplicates += 1
-            return added, duplicates
+        now = utc_now()
+        seen_keys: set[tuple[str, str]] = set()
+        candidates: list[dict[str, Any]] = []
+        for clean in parsed:
+            norm = knowledge.normalize_fact(clean["fact"])
+            key = (clean["project"], norm)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            candidates.append(
+                {
+                    "project": clean["project"],
+                    "topic": clean["topic"],
+                    "fact": clean["fact"],
+                    "norm": norm,
+                    "source_run": clean.get("source_run"),
+                    "source_step": clean.get("source_step"),
+                    "author": clean["author"],
+                    "status": "active",
+                    "created_at": clean.get("created_at") or now,
+                    "updated_at": now,
+                }
+            )
 
-        added, duplicates = await self._txn(op) if parsed else (0, 0)
+        async def op(conn):
+            inserted = await store.insert_knowledge_batch(conn, candidates)
+            if inserted:
+                fact_ids = [int(row["id"]) for row in inserted]
+                await self._index_knowledge_batch(conn, fact_ids)
+                await store.insert_events(
+                    conn,
+                    [
+                        {
+                            "kind": "knowledge_fact",
+                            "channel_id": None,
+                            "entity_id": int(row["id"]),
+                            "payload": knowledge.event_payload(knowledge.shape_fact(row)),
+                            "created_at": now,
+                        }
+                        for row in inserted
+                    ],
+                )
+            return len(inserted)
+
+        added = await self._txn(op) if candidates else 0
+        duplicates = len(parsed) - added
         return {"added": added, "duplicates": duplicates, "invalid": invalid}
 
     async def knowledge_export_jsonl(self, project: Any = None, status: Any = "active") -> dict[str, Any]:
@@ -1919,6 +1964,31 @@ class Hub:
         lines = [knowledge.serialize_fact(knowledge.shape_fact(row)) for row in rows]
         return {"jsonl": "".join(line + "\n" for line in lines), "count": len(lines)}
 
+    async def knowledge_export_chunks(self, project: Any = None, status: Any = "active"):
+        """Validate export filters and return an async iterator of JSONL chunks (oldest first)."""
+        clean_project = knowledge.optional_project(project)
+        clean_status = None if status == "all" else knowledge.status_value(status or "active")
+
+        async def generate():
+            after_id = 0
+            while True:
+                batch_size = store.EXPORT_BATCH
+                rows = await self.db.read(
+                    lambda conn, cur=after_id, sz=batch_size: store.export_knowledge_page(
+                        conn, project=clean_project, status=clean_status, after_id=cur, limit=sz
+                    )
+                )
+                if not rows:
+                    break
+                after_id = int(rows[-1]["id"])
+                yield "".join(
+                    knowledge.serialize_fact(knowledge.shape_fact(row)) + "\n" for row in rows
+                )
+                if len(rows) < batch_size:
+                    break
+
+        return generate()
+
     async def knowledge_from_feed_post(self, result: dict[str, Any]) -> None:
         """``feed_post_hooks`` callback: a ``LEARNED:`` post becomes a fact by its author.
 
@@ -1929,14 +1999,23 @@ class Hub:
         found = knowledge.learned_from_post(post)
         if found is None:
             return
-        await self.knowledge_add(
-            found["project"],
-            found["fact"],
-            topic=found["topic"],
-            author=post.get("author"),
-            source_run=found["source_run"],
-            source_step=found["source_step"],
-        )
+        try:
+            await self.knowledge_add(
+                found["project"],
+                found["fact"],
+                topic=found["topic"],
+                author=post.get("author"),
+                source_run=found["source_run"],
+                source_step=found["source_step"],
+            )
+        except HubError as exc:
+            logger.warning(
+                "rejected LEARNED fact from feed post %s by %s: %s",
+                post.get("id"),
+                post.get("author"),
+                exc.message,
+            )
+            result["knowledge_error"] = exc.message
 
     @staticmethod
     def _hook_ident(value: Any) -> int | str:
