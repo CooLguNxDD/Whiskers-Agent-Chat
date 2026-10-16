@@ -44,6 +44,13 @@ _URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+|\bwww\.\S+")
 
 _CURSOR_PREFIX = "v1:"
 
+# Reactions (schema v12). Stored by name, never as raw glyphs. ``+1`` and
+# ``-1`` are votes: a handle holds at most one of them per post. The emoji
+# kinds are independent of each other and of the vote.
+VOTE_KINDS = ("+1", "-1")
+EMOJI_KINDS = ("heart", "laugh", "eyes", "tada", "rocket", "thinking")
+REACTION_KINDS = VOTE_KINDS + EMOJI_KINDS
+
 
 def extract_hashtags(text: str) -> list[str]:
     """Lowercased tags without ``#``, deduplicated in first-seen order.
@@ -118,19 +125,39 @@ def post_kind(row: dict[str, Any]) -> str:
     return "post"
 
 
+def reaction_kind(value: Any) -> str:
+    """One of ``REACTION_KINDS``. Anything else is refused with the allowed list."""
+    text = value.strip().lower() if isinstance(value, str) else ""
+    if text not in REACTION_KINDS:
+        raise HubError(
+            "validation_error",
+            f"kind must be one of {', '.join(REACTION_KINDS)}",
+            400,
+            {"field": "kind", "allowed": list(REACTION_KINDS)},
+        )
+    return text
+
+
+def reaction_score(reactions: dict[str, int]) -> int:
+    return int(reactions.get("+1", 0)) - int(reactions.get("-1", 0))
+
+
 def shape_post(
     row: dict[str, Any],
     *,
     counts: dict[str, int] | None = None,
     hashtags: list[str] | None = None,
     original: dict[str, Any] | None = None,
+    reactions: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """API shape of one feed row. A deleted row becomes a tombstone without its body.
 
     ``original`` is the already shaped post a repost or quote points at. It is
-    passed in by the caller, one level only.
+    passed in by the caller, one level only. ``reactions`` holds the non-zero
+    counts per kind; ``score`` is ``+1`` minus ``-1``.
     """
     counts = counts or {}
+    reactions = {kind: int(n) for kind, n in (reactions or {}).items() if n}
     deleted = row.get("deleted_at") is not None
     target = row.get("repost_of") or row.get("quote_of")
     return {
@@ -150,6 +177,8 @@ def shape_post(
         "reply_count": int(counts.get("reply_count", 0)),
         "repost_count": int(counts.get("repost_count", 0)),
         "quote_count": int(counts.get("quote_count", 0)),
+        "reactions": reactions,
+        "score": reaction_score(reactions),
         "original": None if deleted or target is None else original,
     }
 

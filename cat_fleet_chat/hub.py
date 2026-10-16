@@ -1336,6 +1336,7 @@ class Hub:
         ids = [row["id"] for row in rows] + list(originals)
         counts = await store.feed_counts(conn, ids)
         tags = await store.feed_tags_for(conn, ids)
+        reacted = await store.reaction_counts(conn, ids)
         inline: dict[int, dict[str, Any]] = {}
         for target in targets:
             found = originals.get(target)
@@ -1343,7 +1344,10 @@ class Hub:
                 inline[target] = feed.tombstone_original(target)
             else:
                 inline[target] = feed.shape_post(
-                    found, counts=counts.get(target), hashtags=tags.get(target)
+                    found,
+                    counts=counts.get(target),
+                    hashtags=tags.get(target),
+                    reactions=reacted.get(target),
                 )
         return [
             feed.shape_post(
@@ -1351,6 +1355,7 @@ class Hub:
                 counts=counts.get(row["id"]),
                 hashtags=tags.get(row["id"]),
                 original=inline.get(row.get("repost_of") or row.get("quote_of")),
+                reactions=reacted.get(row["id"]),
             )
             for row in rows
         ]
@@ -1752,6 +1757,125 @@ class Hub:
             return await store.trending_tags(conn, since=clean_since, limit=clean_limit)
 
         return {"since": clean_since, "tags": await self.db.read(op)}
+
+    # ---- reactions ------------------------------------------------------
+
+    @staticmethod
+    async def _reaction_target(conn, post_id: int, *, live: bool) -> dict[str, Any]:
+        """The post a reaction lands on. A plain repost resolves to what it reposted.
+
+        ``live`` also refuses a deleted post, with the same not-found error as a missing one.
+        """
+        found = await store.get_feed_row(conn, post_id)
+        if found is not None and found["repost_of"] is not None:
+            found = await store.get_feed_row(conn, found["repost_of"])
+        if found is None or (live and found["deleted_at"] is not None):
+            raise HubError("not_found", f"post {post_id} not found", 404, {"field": "post_id"})
+        return found
+
+    @staticmethod
+    async def _reaction_state(conn, post_id: int, who: str) -> dict[str, Any]:
+        counts = (await store.reaction_counts(conn, [post_id])).get(post_id, {})
+        return {
+            "post_id": post_id,
+            "handle": who,
+            "reactions": counts,
+            "score": feed.reaction_score(counts),
+            "mine": await store.handle_reactions(conn, post_id, who),
+        }
+
+    @staticmethod
+    async def _reaction_event(
+        conn, kind: str, post: dict[str, Any], who: str, reaction: str, created_at: str
+    ) -> None:
+        await store.insert_event(
+            conn,
+            kind,
+            None,
+            int(post["id"]),
+            {"post_id": int(post["id"]), "handle": who, "kind": reaction, "post_author": post["author"]},
+            created_at,
+        )
+
+    async def react(self, handle_value: Any, post_id: Any, kind: Any) -> dict[str, Any]:
+        """``handle`` reacts to a post with ``kind`` (``feed.REACTION_KINDS``).
+
+        Repeating a reaction is a no-op. ``+1`` and ``-1`` exclude each other:
+        voting one removes the other (``replaced`` names it). Emoji kinds are
+        independent. A missing or deleted post is not found.
+        """
+        who = handle(handle_value, "handle")
+        target = require_id(post_id, "post_id")
+        clean_kind = feed.reaction_kind(kind)
+
+        async def op(conn):
+            post = await self._reaction_target(conn, target, live=True)
+            created_at = utc_now()
+            replaced: list[str] = []
+            if clean_kind in feed.VOTE_KINDS:
+                for other in feed.VOTE_KINDS:
+                    if other != clean_kind and await store.delete_reaction(conn, post["id"], who, other):
+                        replaced.append(other)
+                        await self._reaction_event(conn, "reaction_removed", post, who, other, created_at)
+            added = await store.insert_reaction(conn, post["id"], who, clean_kind, created_at)
+            if added:
+                await self._reaction_event(conn, "reaction_added", post, who, clean_kind, created_at)
+            state = await self._reaction_state(conn, int(post["id"]), who)
+            return {**state, "kind": clean_kind, "replaced": replaced, "idempotent": not added}
+
+        return await self._txn(op)
+
+    async def unreact(self, handle_value: Any, post_id: Any, kind: Any) -> dict[str, Any]:
+        """Remove one of ``handle``'s reactions. Removing one it does not hold is a no-op."""
+        who = handle(handle_value, "handle")
+        target = require_id(post_id, "post_id")
+        clean_kind = feed.reaction_kind(kind)
+
+        async def op(conn):
+            post = await self._reaction_target(conn, target, live=False)
+            removed = await store.delete_reaction(conn, post["id"], who, clean_kind)
+            if removed:
+                await self._reaction_event(conn, "reaction_removed", post, who, clean_kind, utc_now())
+            state = await self._reaction_state(conn, int(post["id"]), who)
+            return {**state, "kind": clean_kind, "idempotent": not removed}
+
+        return await self._txn(op)
+
+    async def list_reactions(self, post_id: Any) -> dict[str, Any]:
+        """Counts and reacting handles per kind for one post, plus ``score``."""
+        target = require_id(post_id, "post_id")
+
+        async def op(conn):
+            post = await self._reaction_target(conn, target, live=False)
+            return int(post["id"]), await store.reaction_rows(conn, int(post["id"]))
+
+        found_id, rows = await self.db.read(op)
+        by_kind: dict[str, list[str]] = {}
+        for row in rows:
+            by_kind.setdefault(row["kind"], []).append(row["handle"])
+        counts = {kind: len(by_kind[kind]) for kind in feed.REACTION_KINDS if kind in by_kind}
+        return {
+            "post_id": found_id,
+            "reactions": counts,
+            "handles": {kind: by_kind[kind] for kind in counts},
+            "score": feed.reaction_score(counts),
+        }
+
+    async def reaction_counts(self, post_ids: Any) -> dict[int, dict[str, Any]]:
+        """``{post_id: {"reactions": {kind: n}, "score": n}}`` for many posts in one query.
+
+        Every requested id is in the answer, with empty counts when nothing reacted.
+        """
+        ids = sorted({require_id(value, "post_ids") for value in (post_ids or [])})
+
+        async def op(conn):
+            return await store.reaction_counts(conn, ids)
+
+        found = await self.db.read(op) if ids else {}
+        return {
+            post_id: {"reactions": found.get(post_id, {}), "score": feed.reaction_score(found.get(post_id, {}))}
+            for post_id in ids
+        }
 
     # ---- webhooks -------------------------------------------------------
 
