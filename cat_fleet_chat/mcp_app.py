@@ -398,19 +398,25 @@ async def fleet_search(
     offset: int | None = None,
     mode: str | None = None,
 ) -> dict[str, Any]:
-    """Full-text search (BM25) over messages, task titles and descriptions, and attachment filenames.
+    """Search messages, task titles and descriptions, and attachment filenames.
 
-    Words are matched as plain terms (all must appear); a trailing ``*`` makes
-    a word a prefix. Filters: ``kind`` (``message``, ``task``, ``attachment``;
-    one or a list), ``channel`` name, ``author`` handle, ``since`` (ISO time or
-    a window like ``24h`` / ``7d``). ``limit`` defaults to 20 (max 100); page
-    with ``offset`` / ``next_offset``. Archived channels are included. Each hit
-    has ``kind``, ``id``, ``channel``, ``author``, ``created_at``, a
-    ``snippet`` with matches in ``[brackets]``, and ``score`` (higher is better).
-    ``mode`` is ``bm25``; ``vector`` and ``hybrid`` are not available yet.
+    ``mode``: ``bm25`` (default, full-text: words are plain terms, all must
+    appear, a trailing ``*`` makes a word a prefix), ``vector`` (semantic:
+    cosine similarity to the embedded query) or ``hybrid`` (BM25 and vector
+    fused by reciprocal rank). ``vector`` and ``hybrid`` need an embedder
+    (``CAT_FLEET_EMBED_PROVIDER``) and otherwise return ``not_available``; if
+    the embedder fails, ``vector`` returns ``embedder_unavailable`` and
+    ``hybrid`` returns BM25 hits with ``degraded: "bm25"``. Filters: ``kind``
+    (``message``, ``task``, ``attachment``; one or a list), ``channel`` name,
+    ``author`` handle, ``since`` (ISO time or a window like ``24h`` / ``7d``).
+    ``limit`` defaults to 20 (max 100); page with ``offset`` / ``next_offset``.
+    Archived channels are included. Each hit has ``kind``, ``id``, ``channel``,
+    ``author``, ``created_at``, a ``snippet`` (BM25 matches in ``[brackets]``),
+    and ``score`` (higher is better).
     """
     try:
-        return await get_hub().search(
+        hub = get_hub()
+        return await hub.search(
             query,
             kind=kind,
             channel=channel,
@@ -421,7 +427,11 @@ async def fleet_search(
             mode=mode,
         )
     except HubError as exc:
-        return exc.mcp_body()
+        body = exc.mcp_body()
+        if exc.code in ("not_available", "embedder_unavailable"):
+            # Tell the agent what the embedder is doing so it can pick a mode.
+            body["embed_status"] = await hub.embed_status()
+        return body
 
 
 async def list_agents() -> dict[str, Any]:

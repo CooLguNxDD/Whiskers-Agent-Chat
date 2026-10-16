@@ -9,8 +9,10 @@ prefix search on that word.
 
 from __future__ import annotations
 
+import heapq
 import re
 import sys
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -74,18 +76,20 @@ def build_match(value: str) -> str | None:
     return " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' + ("*" if prefix else "") for word, prefix in terms)
 
 
-def search_mode(value: Any) -> str:
+def search_mode(value: Any, available: frozenset[str] = AVAILABLE_MODES) -> str:
+    """The requested mode. ``available`` grows to every mode when an embedder is configured."""
     if value is None or value == "":
         return "bm25"
     mode = str(value).strip().lower()
     if mode not in SEARCH_MODES:
         raise _fail(f"mode must be one of {', '.join(SEARCH_MODES)}", "mode")
-    if mode not in AVAILABLE_MODES:
+    if mode not in available:
         raise HubError(
             "not_available",
-            f"search mode {mode} is not available yet; use bm25",
+            f"search mode {mode} is not available: no embedder is configured "
+            "(set CAT_FLEET_EMBED_PROVIDER, CAT_FLEET_EMBED_URL and CAT_FLEET_EMBED_MODEL); use bm25",
             400,
-            {"mode": mode, "available": sorted(AVAILABLE_MODES)},
+            {"mode": mode, "available": sorted(available)},
         )
     return mode
 
@@ -200,3 +204,90 @@ def shape_results(
 
 def empty_results(*, limit: int, offset: int, mode: str = "bm25") -> dict[str, Any]:
     return shape_results([], 0, limit=limit, offset=offset, mode=mode)
+
+
+# ---- vector and hybrid ranking ---------------------------------------------
+#
+# Hybrid search fuses the BM25 and vector rankings with reciprocal rank fusion
+# (RRF): every list a hit appears in adds ``1 / (RRF_K + rank)``, rank from 1.
+# RRF needs no score calibration between the two rankers.
+
+RRF_K = 60
+# Each ranker contributes at least this many candidates to the fusion.
+FUSION_POOL_MIN = 50
+# The query is embedded with at most this timeout, even if the provider's is longer.
+QUERY_EMBED_TIMEOUT = 5.0
+
+
+def fusion_pool(limit: int) -> int:
+    """Candidates per ranker: ``max(limit*3, 50)``.
+
+    Independent of ``offset`` so every page of one query pages through the same
+    fused list (RRF scores do not shift between pages); hybrid hits end there.
+    """
+    return max(limit * 3, FUSION_POOL_MIN)
+
+
+def top_k(scored: Iterable[tuple[float, Any]], k: int) -> list[tuple[float, Any]]:
+    """The ``k`` best ``(score, item)`` pairs, best first, keeping only ``k`` in memory."""
+    heap: list[tuple[float, int, Any]] = []
+    for seq, (value, item) in enumerate(scored):
+        entry = (value, -seq, item)
+        if len(heap) < k:
+            heapq.heappush(heap, entry)
+        elif entry[:2] > heap[0][:2]:
+            heapq.heapreplace(heap, entry)
+    heap.sort(key=lambda entry: entry[:2], reverse=True)
+    return [(value, item) for value, _, item in heap]
+
+
+def rrf_fuse(rankings: Iterable[list[tuple[str, int]]], k: int = RRF_K) -> list[tuple[tuple[str, int], float]]:
+    """Reciprocal rank fusion of ranked ``(kind, id)`` lists, de-duplicated, best first.
+
+    Ties keep the order in which keys were first seen (the first ranking wins).
+    """
+    scores: dict[tuple[str, int], float] = {}
+    for ranking in rankings:
+        seen: set[tuple[str, int]] = set()
+        for rank, key in enumerate(ranking, start=1):
+            if key in seen:
+                continue
+            seen.add(key)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+    order = {key: index for index, key in enumerate(scores)}
+    return sorted(scores.items(), key=lambda item: (-item[1], order[item[0]]))
+
+
+def plain_snippet(row: dict[str, Any]) -> str:
+    """A snippet for a hit with no FTS5 highlight: the first words of the entry."""
+    words = " ".join(part for part in (row.get("title") or "", row.get("body") or "") if part).split()
+    if len(words) <= SNIPPET_TOKENS:
+        return " ".join(words)
+    return " ".join(words[:SNIPPET_TOKENS]) + SNIPPET_MARKERS[2]
+
+
+def shape_vector_hit(row: dict[str, Any], value: float) -> dict[str, Any]:
+    return {
+        "kind": row["kind"],
+        "id": int(row["ref_id"]),
+        "channel": row["channel"],
+        "author": row["author"] or None,
+        "created_at": row["created_at"],
+        "snippet": row.get("snippet") if row.get("snippet") is not None else plain_snippet(row),
+        "score": float(value),
+    }
+
+
+def shape_scored(
+    hits: list[dict[str, Any]], total: int, *, limit: int, offset: int, mode: str
+) -> dict[str, Any]:
+    """Result page for already shaped hits (vector, hybrid). Same keys as :func:`shape_results`."""
+    end = offset + len(hits)
+    return {
+        "results": hits,
+        "total_estimate": total,
+        "mode": mode,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": end if end < total else None,
+    }

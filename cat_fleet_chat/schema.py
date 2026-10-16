@@ -16,6 +16,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     PrimaryKeyConstraint,
     Table,
@@ -212,6 +213,24 @@ mailbox = Table(
         "id",
         sqlite_where=text("acked_at IS NULL"),
     ),
+)
+
+# Schema v9. One float32 vector per indexed row and embedding model (see
+# embed.pack). ``kind`` / ``ref_id`` name a search_index entry, so new kinds
+# need no change here. Vectors are L2-normalised, so cosine is a dot product.
+# ``text_hash`` is the sha256 of the embedded text: a row is embedded again
+# only when it changes. Rows of another model stay put and search ignores them.
+embeddings = Table(
+    "embeddings",
+    metadata,
+    Column("kind", Text, nullable=False),
+    Column("ref_id", Integer, nullable=False),
+    Column("model", Text, nullable=False),
+    Column("dim", Integer, nullable=False),
+    Column("vector", LargeBinary, nullable=False),
+    Column("text_hash", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    PrimaryKeyConstraint("kind", "ref_id", "model"),
 )
 
 # Columns that a database created at an older version is missing. SQLite has

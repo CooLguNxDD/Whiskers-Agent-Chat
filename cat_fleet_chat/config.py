@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ipaddress
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+EMBED_PROVIDERS = ("off", "openai", "content-parts")
 
 
 def _env_str(name: str, default: str) -> str:
@@ -34,6 +36,14 @@ class Settings:
     # Kill switch for the outbound dispatcher (CAT_FLEET_WEBHOOKS=0). Inbound
     # hooks and hook management stay available either way.
     webhooks_enabled: bool = True
+    # Optional embeddings for vector / hybrid search (embed.build_embedder).
+    # ``off`` keeps search BM25 only. The API key never appears in repr.
+    embed_provider: str = "off"
+    embed_url: str | None = None
+    embed_model: str | None = None
+    embed_api_key: str | None = field(default=None, repr=False)
+    embed_batch: int = 16
+    embed_timeout: float = 20.0
 
     @property
     def loopback_bind(self) -> bool:
@@ -66,6 +76,28 @@ def load_settings() -> Settings:
         "http://127.0.0.1:3001,http://localhost:3001",
     )
     dev_origins = tuple(part.strip().rstrip("/") for part in origins.split(",") if part.strip())
+    provider = _env_str("CAT_FLEET_EMBED_PROVIDER", "off").lower()
+    if provider not in EMBED_PROVIDERS:
+        raise SystemExit(
+            f"CAT_FLEET_EMBED_PROVIDER must be one of {', '.join(EMBED_PROVIDERS)}, got {provider!r}"
+        )
+    batch_raw = _env_str("CAT_FLEET_EMBED_BATCH", "16")
+    timeout_raw = _env_str("CAT_FLEET_EMBED_TIMEOUT", "20")
+    try:
+        embed_batch = int(batch_raw)
+        embed_timeout = float(timeout_raw)
+    except ValueError as exc:
+        raise SystemExit(
+            "CAT_FLEET_EMBED_BATCH must be an integer and CAT_FLEET_EMBED_TIMEOUT a number of seconds"
+        ) from exc
+    if embed_batch < 1 or embed_timeout <= 0:
+        raise SystemExit("CAT_FLEET_EMBED_BATCH and CAT_FLEET_EMBED_TIMEOUT must be positive")
+    embed_url = _env_optional("CAT_FLEET_EMBED_URL")
+    embed_model = _env_optional("CAT_FLEET_EMBED_MODEL")
+    if provider != "off" and (embed_url is None or embed_model is None):
+        raise SystemExit(
+            f"CAT_FLEET_EMBED_PROVIDER={provider} needs CAT_FLEET_EMBED_URL and CAT_FLEET_EMBED_MODEL"
+        )
     return Settings(
         host=_env_str("CAT_FLEET_HOST", "127.0.0.1"),
         port=port,
@@ -73,6 +105,12 @@ def load_settings() -> Settings:
         token=_env_optional("CAT_FLEET_TOKEN"),
         dev_origins=dev_origins,
         webhooks_enabled=_env_str("CAT_FLEET_WEBHOOKS", "1").lower() not in {"0", "false", "no", "off"},
+        embed_provider=provider,
+        embed_url=embed_url,
+        embed_model=embed_model,
+        embed_api_key=_env_optional("CAT_FLEET_EMBED_API_KEY"),
+        embed_batch=embed_batch,
+        embed_timeout=embed_timeout,
     )
 
 
