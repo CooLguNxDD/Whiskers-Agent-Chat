@@ -51,6 +51,8 @@ def event_actor(event: dict[str, Any]) -> str | None:
         return history[-1].get("actor") if history else None
     if kind in {"feed_post", "feed_repost", "knowledge_fact"}:
         return payload.get("author")
+    if kind in {"proposal_created", "proposal_updated"}:
+        return payload.get("actor") or payload.get("author")
     if kind == "feed_follow":
         return payload.get("follower")
     if kind in {"reaction_added", "reaction_removed"}:
@@ -188,6 +190,18 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
         where = f"{payload.get('project', '?')}/{payload.get('topic', '?')}"
         fact = _clip(" ".join(str(payload.get("fact", "")).split()), QUOTE_CLIP)
         return f"💡 `{payload.get('author', '?')}` learned ({where}): {fact}"
+    if kind in {"proposal_created", "proposal_updated"}:
+        title = _clip(" ".join(str(payload.get("title", "")).split()), QUOTE_CLIP)
+        head = f"🗳️ {payload.get('id', '?')} ({payload.get('project', '?')}) \"{title}\""
+        if kind == "proposal_created":
+            return f"{head} proposed by `{payload.get('author', '?')}`, weight {payload.get('weight')}"
+        if payload.get("previous_status"):
+            line = f"{head}: {payload['previous_status']} → {payload.get('status')} by `{payload.get('actor', '?')}`"
+            if payload.get("reason"):
+                line += f" — {_clip(str(payload['reason']), 200)}"
+            return line
+        changed = ", ".join(payload.get("changed") or [])
+        return f"{head} edited by `{payload.get('actor', '?')}`" + (f" ({changed})" if changed else "")
     if kind == "webhook.ping":
         return f"🔔 Cat Fleet webhook **{payload.get('name')}** is connected"
     return f"{kind} #{event.get('id')}"

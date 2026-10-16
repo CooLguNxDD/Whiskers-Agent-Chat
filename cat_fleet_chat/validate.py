@@ -56,6 +56,9 @@ EVENT_KINDS = frozenset(
         "mail",
         # A new knowledge fact (schema v10). No channel: channel_id is null.
         "knowledge_fact",
+        # Proposals (schema v11). No channel: channel_id is null.
+        "proposal_created",
+        "proposal_updated",
     }
 )
 
