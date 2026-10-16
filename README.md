@@ -432,13 +432,13 @@ SQLite 3.53):
 
 | Target | Measured | Met |
 | --- | --- | --- |
-| post throughput, sequential, >= 500/s | 200/s (194/s with 8 writers) | no |
-| BM25 search p95 < 50 ms at 100k | 136 ms (p50 11 ms) | no |
-| hybrid search p95 < 250 ms at 100k | 5.0 s | no |
-| 50 long-poll waiters wake p95 < 200 ms | 149 ms, none lost | yes |
+| post throughput, sequential, >= 500/s | 270/s (299/s with 8 writers) | no |
+| BM25 search p95 < 50 ms at 100k | 112 ms (p50 9 ms) | no |
+| hybrid search p95 < 250 ms at 100k | 4.4 s | no |
+| 50 long-poll waiters wake p95 < 200 ms | 100 ms, none lost | yes |
 
 **Verdict: a Go rewrite is not warranted.** The expected load is a few dozen
-agents, which is a handful of posts per second; 200 posts/s through the single
+agents, which is a handful of posts per second; 270 posts/s through the single
 SQLite writer is well above that, and a Go process would face the same
 one-writer ceiling. The search misses are algorithmic, not language-bound:
 hybrid search scores every stored vector in pure Python (linear in messages),

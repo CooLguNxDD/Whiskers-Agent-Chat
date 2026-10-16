@@ -66,33 +66,33 @@ full run: `python bench/bench.py --queries 200 --hybrid-queries 20`
 
 | Scenario | Count | Wall s | Per s | p50 ms | p95 ms | p99 ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| seed (insert + FTS + vectors) | 100000 | 16.96 | 5896 | - | - | - |
-| post sequential | 1000 | 5.01 | 199.6 | 4.19 | 5.18 | 33.20 |
-| post concurrent x8 | 1000 | 5.16 | 193.9 | 35.00 | 68.75 | 81.69 |
-| search bm25 (warm) | 200 | 6.10 | 32.8 | 11.09 | 135.92 | 151.94 |
-| search hybrid (warm) | 20 | 93.66 | 0.2 | 4592.40 | 5006.79 | 6544.68 |
-| waiters wake x50 | 50 | 0.16 | 310.8 | 69.83 | 149.38 | 160.88 |
-| feed timeline page | 100 | 0.34 | 293.9 | 3.37 | 4.00 | 4.16 |
-| feed thread (deepest) | 100 | 4.30 | 23.2 | 43.12 | 47.78 | 60.47 |
-| feed thread (root) | 100 | 0.59 | 168.6 | 5.82 | 6.99 | 7.56 |
+| seed (insert + FTS + vectors) | 100000 | 12.88 | 7765 | - | - | - |
+| post sequential | 1000 | 3.71 | 269.7 | 2.91 | 4.13 | 29.39 |
+| post concurrent x8 | 1000 | 3.35 | 298.9 | 23.75 | 51.54 | 65.79 |
+| search bm25 (warm) | 200 | 4.90 | 40.8 | 9.44 | 111.54 | 115.48 |
+| search hybrid (warm) | 20 | 81.36 | 0.2 | 3973.22 | 4409.80 | 6569.97 |
+| waiters wake x50 | 50 | 0.19 | 267.1 | 52.26 | 100.25 | 108.02 |
+| feed timeline page | 100 | 0.24 | 417.3 | 2.36 | 2.81 | 3.01 |
+| feed thread (deepest) | 100 | 4.76 | 21.0 | 52.73 | 57.42 | 61.42 |
+| feed thread (root) | 100 | 0.41 | 241.9 | 4.08 | 4.67 | 4.80 |
 
-Cold first call: bm25 46 ms, hybrid 4772 ms. Waiters: 50 of 50 woke, none lost,
+Cold first call: bm25 36 ms, hybrid 3619 ms. Waiters: 50 of 50 woke, none lost,
 none woken by the wrong post.
 
 | Target | Measured | Met |
 | --- | --- | --- |
-| post sequential >= 500/s | 199.6/s | no |
-| search bm25 p95 < 50 ms | 135.9 ms | no |
-| search hybrid p95 < 250 ms | 5007 ms | no |
-| 50 waiters wake p95 < 200 ms | 149.4 ms | yes |
+| post sequential >= 500/s | 269.7/s | no |
+| search bm25 p95 < 50 ms | 111.5 ms | no |
+| search hybrid p95 < 250 ms | 4410 ms | no |
+| 50 waiters wake p95 < 200 ms | 100.3 ms | yes |
 
 Reading the misses:
 
-- **Posts** commit one transaction each. 200/s is a Windows file system
+- **Posts** commit one transaction each. 270/s is a Windows file system
   number; run the bench on the machine that will host the hub before drawing
-  a conclusion. Concurrent writers do not add throughput (194/s), which is the
+  a conclusion. Concurrent writers do not add throughput (299/s), which is the
   single-writer ceiling.
-- **BM25** p50 is 11 ms. The p95 comes from queries made of one or two very
+- **BM25** p50 is 9 ms. The p95 comes from queries made of one or two very
   common words: FTS5 has to rank every matching row (tens of thousands) before
   it can return the top 20.
 - **Hybrid** is a full scan: `Hub._vector_rank` unpacks and dot-multiplies

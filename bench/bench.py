@@ -47,6 +47,7 @@ TARGETS = {
     "waiters_wake_p95": ("ms", "<", 200.0),
 }
 FULL_MESSAGES = 100_000
+WAITER_TARGET_COUNT = 50  # the waiter target only counts with this many parked, none lost or woken early
 CHANNELS = 6
 AGENTS = 24
 VOCAB_SIZE = 2_000
@@ -359,6 +360,7 @@ async def scenario_waiters(hub: Hub, count: int) -> dict[str, Any]:
     first, second = names[::2], names[1::2]
     latencies: list[float] = []
     wrongly_woken = 0
+    wake_wall = 0.0  # sum of post -> last wake over both batches, excluding the settle sleeps
 
     for group, other in ((first, second), (second, [])):
         text = " ".join(f"@{name}" for name in group) + " bench wake"
@@ -366,6 +368,7 @@ async def scenario_waiters(hub: Hub, count: int) -> dict[str, Any]:
         await hub.post_message("bench-0", "bench-poster", text)
         await wait_until(lambda group=group: all(name in done_at for name in group), timeout=30.0)
         latencies.extend((done_at[name] - posted) * 1000.0 for name in group if name in done_at)
+        wake_wall += max((done_at[name] for name in group if name in done_at), default=posted) - posted
         # The other half must still be parked after this post.
         await asyncio.sleep(0.05)
         wrongly_woken += sum(1 for name in other if name in done_at)
@@ -380,7 +383,7 @@ async def scenario_waiters(hub: Hub, count: int) -> dict[str, Any]:
         for name in names
         if name in results and not results[name]["timed_out"] and results[name]["messages"]
     )
-    summary = summarize(latencies, max(latencies) / 1000.0 if latencies else 0.0)
+    summary = summarize(latencies, wake_wall)
     return {
         "waiters": count,
         "all_parked": parked,
@@ -388,6 +391,7 @@ async def scenario_waiters(hub: Hub, count: int) -> dict[str, Any]:
         "lost": count - woken,
         "wrongly_woken": wrongly_woken,
         "wake": summary,
+        "clean": parked and woken == count and wrongly_woken == 0,
     }
 
 
@@ -480,6 +484,13 @@ def evaluate(report: dict[str, Any]) -> list[dict[str, Any]]:
     for name, (unit, op, limit) in TARGETS.items():
         value = measured[name]
         met = value >= limit if op == ">=" else value < limit
+        if name == "waiters_wake_p95":
+            waiters = scenarios["waiters"]
+            met = bool(
+                met
+                and waiters["waiters"] >= WAITER_TARGET_COUNT
+                and waiters["clean"]
+            )
         rows.append(
             {
                 "name": name,
