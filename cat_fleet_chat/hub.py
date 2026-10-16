@@ -1764,13 +1764,17 @@ class Hub:
     async def _reaction_target(conn, post_id: int, *, live: bool) -> dict[str, Any]:
         """The post a reaction lands on. A plain repost resolves to what it reposted.
 
-        ``live`` also refuses a deleted post, with the same not-found error as a missing one.
+        ``live`` also refuses a deleted post (the repost itself or what it reposted),
+        with the same not-found error as a missing one.
         """
+        missing = HubError("not_found", f"post {post_id} not found", 404, {"field": "post_id"})
         found = await store.get_feed_row(conn, post_id)
+        if found is not None and live and found["deleted_at"] is not None:
+            raise missing
         if found is not None and found["repost_of"] is not None:
             found = await store.get_feed_row(conn, found["repost_of"])
         if found is None or (live and found["deleted_at"] is not None):
-            raise HubError("not_found", f"post {post_id} not found", 404, {"field": "post_id"})
+            raise missing
         return found
 
     @staticmethod

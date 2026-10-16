@@ -150,6 +150,16 @@ async def test_reacting_to_a_repost_lands_on_the_original(hub):
     assert (await hub.list_reactions(original))["reactions"] == {"tada": 1}
 
 
+async def test_reacting_to_a_deleted_repost_is_not_found(hub):
+    original = pid(await hub.feed_post("ada", "still live"))
+    repost = pid(await hub.feed_repost("bob", original))
+    await hub.feed_delete("bob", repost)
+    with pytest.raises(HubError) as caught:
+        await hub.react("cy", repost, "+1")
+    assert caught.value.code == "not_found" and caught.value.status == 404
+    assert (await hub.list_reactions(original))["reactions"] == {}
+
+
 # ---- counts on shaped posts -------------------------------------------------
 
 
