@@ -45,6 +45,8 @@ EVENT_KINDS = frozenset(
         "channel.archived",
         "channel.unarchived",
         "channel.state_changed",
+        # A direct mail was sent. The payload never carries the body.
+        "mail",
     }
 )
 

@@ -1,4 +1,4 @@
-"""All SQL for channels, messages, mentions, tasks, attachments, and the event stream.
+"""All SQL for channels, messages, mentions, tasks, attachments, mail, and the event stream.
 
 Statements are built with SQLAlchemy Core (see ``schema.py``) and run on the
 caller's aiosqlite connection. Callers own the transaction. This module does
@@ -13,8 +13,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import aiosqlite
-from sqlalchemy import delete, func, insert, literal, select, union_all, update
+from sqlalchemy import case, delete, func, insert, literal, select, union_all, update
 
+from cat_fleet_chat.mailbox import mail_row
 from cat_fleet_chat.schema import (
     attachments,
     channels,
@@ -22,6 +23,7 @@ from cat_fleet_chat.schema import (
     fetch_all,
     fetch_one,
     idempotency,
+    mailbox,
     mentions,
     messages,
     run,
@@ -449,6 +451,140 @@ async def events_after(
         stmt = stmt.where(events.c.kind.in_(sorted(kinds)))
     rows = await fetch_all(conn, stmt.order_by(events.c.id.asc()).limit(limit))
     return [_event_row(row) for row in rows]
+
+
+async def insert_mail(
+    conn: aiosqlite.Connection,
+    *,
+    recipient: str,
+    sender: str,
+    subject: str,
+    body: str,
+    reply_to: int | None,
+    created_at: str,
+    message_id: int | None = None,
+) -> int:
+    cursor = await run(
+        conn,
+        insert(mailbox).values(
+            recipient=recipient,
+            sender=sender,
+            subject=subject,
+            body=body,
+            reply_to=reply_to,
+            created_at=created_at,
+            message_id=message_id,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+async def get_mail(conn: aiosqlite.Connection, mail_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(mailbox).where(mailbox.c.id == mail_id))
+    return None if row is None else mail_row(row)
+
+
+async def get_mail_many(conn: aiosqlite.Connection, mail_ids: Iterable[int]) -> list[dict[str, Any]]:
+    wanted = sorted(set(mail_ids))
+    if not wanted:
+        return []
+    rows = await fetch_all(
+        conn, select(mailbox).where(mailbox.c.id.in_(wanted)).order_by(mailbox.c.id.asc())
+    )
+    return [mail_row(row) for row in rows]
+
+
+async def list_mail(
+    conn: aiosqlite.Connection,
+    recipient: str,
+    *,
+    state: str,
+    since_id: int,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Mail for ``recipient`` after ``since_id``, ascending, plus ``has_more``.
+
+    ``state`` is ``unread`` (never read), ``read`` (read or acked) or ``all``.
+    """
+    stmt = select(mailbox).where(mailbox.c.recipient == recipient, mailbox.c.id > since_id)
+    if state == "unread":
+        stmt = stmt.where(mailbox.c.read_at.is_(None))
+    elif state == "read":
+        stmt = stmt.where(mailbox.c.read_at.is_not(None))
+    rows = await fetch_all(conn, stmt.order_by(mailbox.c.id.asc()).limit(limit + 1))
+    return [mail_row(row) for row in rows[:limit]], len(rows) > limit
+
+
+async def max_mail_id(conn: aiosqlite.Connection, recipient: str) -> int:
+    row = await fetch_one(
+        conn,
+        select(func.coalesce(func.max(mailbox.c.id), 0).label("n")).where(
+            mailbox.c.recipient == recipient
+        ),
+    )
+    return int(row["n"])
+
+
+async def mail_counts(conn: aiosqlite.Connection, recipient: str) -> dict[str, int]:
+    row = await fetch_one(
+        conn,
+        select(
+            func.count().label("total"),
+            func.coalesce(
+                func.sum(case((mailbox.c.read_at.is_(None), 1), else_=0)), 0
+            ).label("unread"),
+            func.coalesce(
+                func.sum(case((mailbox.c.acked_at.is_(None), 1), else_=0)), 0
+            ).label("unacked"),
+        ).where(mailbox.c.recipient == recipient),
+    )
+    return {"unread": int(row["unread"]), "unacked": int(row["unacked"]), "total": int(row["total"])}
+
+
+async def mark_mail_read(
+    conn: aiosqlite.Connection,
+    recipient: str,
+    *,
+    mail_ids: list[int] | None,
+    up_to_id: int | None,
+    read_at: str,
+) -> list[int]:
+    """Stamp ``read_at`` on unread mail of ``recipient``. Returns the ids that changed."""
+    where = [mailbox.c.recipient == recipient, mailbox.c.read_at.is_(None)]
+    if mail_ids is not None:
+        where.append(mailbox.c.id.in_(mail_ids))
+    if up_to_id is not None:
+        where.append(mailbox.c.id <= up_to_id)
+    changed = [
+        int(row["id"])
+        for row in await fetch_all(conn, select(mailbox.c.id).where(*where).order_by(mailbox.c.id))
+    ]
+    if changed:
+        await run(conn, update(mailbox).where(mailbox.c.id.in_(changed)).values(read_at=read_at))
+    return changed
+
+
+async def ack_mail(
+    conn: aiosqlite.Connection, recipient: str, mail_ids: list[int], acked_at: str
+) -> list[int]:
+    """Stamp ``acked_at`` (and ``read_at`` when unset). Returns the ids that changed."""
+    where = (
+        mailbox.c.recipient == recipient,
+        mailbox.c.id.in_(mail_ids),
+        mailbox.c.acked_at.is_(None),
+    )
+    changed = [
+        int(row["id"])
+        for row in await fetch_all(conn, select(mailbox.c.id).where(*where).order_by(mailbox.c.id))
+    ]
+    if changed:
+        await run(
+            conn,
+            update(mailbox)
+            .where(mailbox.c.id.in_(changed))
+            .values(acked_at=acked_at, read_at=func.coalesce(mailbox.c.read_at, acked_at)),
+        )
+    return changed
 
 
 _WEBHOOK_LISTS = ("kinds", "channels", "mentions", "exclude_authors")

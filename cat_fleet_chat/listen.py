@@ -5,9 +5,13 @@ JSON line on stdout, or runs ``--exec`` once per event with the event JSON on
 stdin. This process pulls; to have the hub push to a URL instead, use an
 outbound webhook (see webhooks.py).
 
+Direct mail to ``--agent`` arrives as a line with ``"kind": "mail"`` whose
+``mail`` field holds the full mail (subject, body, sender).
+
 Examples::
 
     cat-fleet-listen --agent codex                  # stream JSON lines
+    cat-fleet-listen --agent codex --mail-only      # only direct mail
     cat-fleet-listen --agent claude --once          # block until one batch, print, exit
     cat-fleet-listen --agent grok --exec "python on_event.py" --state-file .fleet-cursor
 """
@@ -48,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--agent", help="handle to notify; omit for every event")
     parser.add_argument("--kinds", help="comma-separated event kinds, e.g. message.created")
+    parser.add_argument(
+        "--mail-only",
+        action="store_true",
+        help="only direct mail to --agent (same as --kinds mail)",
+    )
     parser.add_argument("--channel", help="only events from this channel")
     parser.add_argument(
         "--after",
@@ -165,6 +174,8 @@ async def listen(
                 value = getattr(args, name)
                 if value:
                     params[name] = value
+            if getattr(args, "mail_only", False):
+                params["kinds"] = "mail"
             response = await client.get(
                 f"{base}/api/v1/notifications",
                 params=params,
@@ -183,7 +194,11 @@ async def listen(
             backoff = min(backoff * 2, BACKOFF_MAX)
             continue
         backoff = 1.0
+        # Mail rides the event cursor, so a reconnect neither drops nor replays it.
+        letters = {mail["id"]: mail for mail in page.get("mail") or []}
         for event in page["events"]:
+            if event["kind"] == "mail" and event["entity_id"] in letters:
+                event = {**event, "mail": letters[event["entity_id"]]}
             deliver(event)
         cursor = int(page["cursor"])
         _write_state(args.state_file, cursor)
