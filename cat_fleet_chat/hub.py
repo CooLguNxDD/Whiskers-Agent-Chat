@@ -1160,12 +1160,11 @@ class Hub:
             )
             result["degraded"] = "bm25"
             return result
-        pool = search_rules.fusion_pool(clean_limit, clean_offset)
-        bm25_rows, bm25_total = await self.db.read(lambda conn: op(conn, limit=pool, offset=0))
+        pool = search_rules.fusion_pool(clean_limit)
+        bm25_rows, _ = await self.db.read(lambda conn: op(conn, limit=pool, offset=0))
         vector_scored: list[tuple[float, dict[str, Any]]] = []
-        vector_total = 0
         if query_vec is not None:
-            vector_scored, vector_total = await self._vector_rank(query_vec, pool, filters)
+            vector_scored, _ = await self._vector_rank(query_vec, pool, filters)
         by_key: dict[tuple[str, int], dict[str, Any]] = {}
         for _, row in vector_scored:
             by_key[(row["kind"], int(row["ref_id"]))] = row
@@ -1180,7 +1179,8 @@ class Hub:
         )
         page = fused[clean_offset : clean_offset + clean_limit]
         hits = [search_rules.shape_vector_hit(by_key[key], value) for key, value in page]
-        total = max(len(fused), bm25_total, vector_total)
+        # Paging stops at the end of the fused pool, so it never points at empty pages.
+        total = len(fused)
         return search_rules.shape_scored(
             hits, total, limit=clean_limit, offset=clean_offset, mode="hybrid"
         )

@@ -320,7 +320,10 @@ class EmbedQueue:
         self.idle_wait = idle_wait
         self.failures = 0
         self.last_error: str | None = None
-        self._dirty: set[tuple[str, int]] = set()
+        # key -> mark generation. A key is cleared only if nobody marked it again
+        # while its batch was in flight, so an edit made mid-embed is not lost.
+        self._dirty: dict[tuple[str, int], int] = {}
+        self._generation = 0
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._rescanned = False
@@ -335,10 +338,19 @@ class EmbedQueue:
             return
         added = False
         for kind, ref_id in keys:
-            self._dirty.add((kind, int(ref_id)))
+            self._touch((kind, int(ref_id)))
             added = True
         if added:
             self._wake.set()
+
+    def _touch(self, key: tuple[str, int]) -> None:
+        self._generation += 1
+        self._dirty[key] = self._generation
+
+    def _settle(self, key: tuple[str, int], generation: int | None) -> None:
+        """Clear ``key`` unless it was marked again after ``generation`` was read."""
+        if generation is not None and self._dirty.get(key) == generation:
+            del self._dirty[key]
 
     def start(self) -> None:
         if self._task is None and self.active:
@@ -367,7 +379,7 @@ class EmbedQueue:
                 break
             for row in rows:
                 if text_hash(entry_text(row)) != row["text_hash"]:
-                    self._dirty.add((row["kind"], int(row["ref_id"])))
+                    self._touch((row["kind"], int(row["ref_id"])))
                     stale += 1
             after = int(rows[-1]["rowid"])
         return stale
@@ -383,8 +395,9 @@ class EmbedQueue:
         dim = self.embedder.dim
         todo: dict[tuple[str, int], dict[str, Any]] = {}
 
-        if self._dirty:
-            keys = list(self._dirty)
+        seen = dict(self._dirty)
+        if seen:
+            keys = list(seen)
             rows = await self.db.read(lambda conn: store.index_entries(conn, keys, model))
             present = set()
             for row in rows:
@@ -398,9 +411,10 @@ class EmbedQueue:
                 if row["text_hash"] != digest or stale_dim:
                     todo[key] = {"text": body, "hash": digest}
                 else:
-                    self._dirty.discard(key)
+                    self._settle(key, seen[key])
             # Deleted sources have no index row left: nothing to embed.
-            self._dirty.difference_update(set(keys) - present)
+            for key in set(keys) - present:
+                self._settle(key, seen[key])
 
         if len(todo) < self.batch:
             missing = await self.db.read(
@@ -443,7 +457,8 @@ class EmbedQueue:
             await conn.commit()
 
         await self.db.write(write)
-        self._dirty.difference_update(keys)
+        for key in keys:
+            self._settle(key, seen.get(key))
         return len(rows)
 
     async def drain(self, max_batches: int = 1_000) -> int:

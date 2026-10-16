@@ -140,9 +140,9 @@ def test_rrf_fusion_math_and_dedup():
     assert scores[("message", 3)] == pytest.approx(1 / (k + 3))
     # one entry per key, best first; ties keep first-seen order
     assert [key for key, _ in fused] == [("task", 2), ("message", 1), ("message", 4), ("message", 3)]
-    assert search.fusion_pool(20, 0) == 60
-    assert search.fusion_pool(5, 0) == 50
-    assert search.fusion_pool(20, 40) == 180
+    assert search.fusion_pool(20) == 60
+    assert search.fusion_pool(5) == 50
+    assert search.fusion_pool(100) == 300
 
 
 def test_top_k_keeps_best_in_order():
@@ -152,6 +152,37 @@ def test_top_k_keeps_best_in_order():
 
 
 # ---- queue -----------------------------------------------------------------
+
+
+async def test_edit_during_embed_call_is_not_lost(hub):
+    from cat_fleet_chat import store
+
+    fake = FakeEmbedder()
+    queue = wire(hub, fake)
+    created = await hub.create_task("fleet", "Old title", actor="ada")
+    task_id = created["task"]["id"]
+    embed_call = fake.embed
+
+    async def edit(conn):
+        await conn.execute("BEGIN IMMEDIATE")
+        await conn.execute("UPDATE tasks SET title = 'Fresh deploy plan' WHERE id = ?", (task_id,))
+        await store.reindex(conn, "task", task_id)
+        await conn.commit()
+
+    async def racing_embed(texts):
+        # The task is edited (and marked) while its old text is being embedded.
+        if len(fake.calls) == 0:
+            await hub.db.write(edit)
+            queue.mark([("task", task_id)])
+        return await embed_call(texts)
+
+    fake.embed = racing_embed
+    await queue.drain()
+    assert fake.calls[0] == ["Old title"]
+    assert fake.calls[-1] == ["Fresh deploy plan"]
+    (row,) = await stored(hub)
+    assert row[4] == embed.text_hash("Fresh deploy plan")
+    assert not queue._dirty
 
 
 async def test_queue_embeds_new_rows_and_skips_unchanged_hash(hub):
@@ -384,6 +415,35 @@ async def test_hybrid_pagination_covers_deep_pages(hub):
         seen += keys(page)
         offset = page["next_offset"]
     assert len(seen) == len(set(seen)) == 12
+
+
+async def test_hybrid_pool_is_fixed_across_pages(hub, monkeypatch):
+    queue = wire(hub)
+    for i in range(70):
+        await hub.post_message("fleet", "ada", f"kitten note {i}")
+    await queue.drain()
+    pools = []
+    rank = hub._vector_rank
+
+    async def spy(query_vec, k, filters):
+        pools.append(k)
+        return await rank(query_vec, k, filters)
+
+    monkeypatch.setattr(hub, "_vector_rank", spy)
+    seen, scores, totals = [], [], set()
+    offset = 0
+    while offset is not None:
+        page = await hub.search("kitten", mode="hybrid", limit=10, offset=offset)
+        assert page["results"], "next_offset must never point at an empty page"
+        seen += keys(page)
+        scores += [hit["score"] for hit in page["results"]]
+        totals.add(page["total_estimate"])
+        offset = page["next_offset"]
+    # max(limit*3, 50) per ranker on every page, so pages slice one fused list
+    assert set(pools) == {search.fusion_pool(10)} == {50}
+    assert len(totals) == 1 and len(seen) == totals.pop()
+    assert len(seen) == len(set(seen))
+    assert scores == sorted(scores, reverse=True)
 
 
 async def test_off_keeps_not_available(hub):

@@ -219,9 +219,13 @@ FUSION_POOL_MIN = 50
 QUERY_EMBED_TIMEOUT = 5.0
 
 
-def fusion_pool(limit: int, offset: int) -> int:
-    """Candidates per ranker. Covers ``offset + limit`` so deeper pages stay complete."""
-    return max((offset + limit) * 3, FUSION_POOL_MIN)
+def fusion_pool(limit: int) -> int:
+    """Candidates per ranker: ``max(limit*3, 50)``.
+
+    Independent of ``offset`` so every page of one query pages through the same
+    fused list (RRF scores do not shift between pages); hybrid hits end there.
+    """
+    return max(limit * 3, FUSION_POOL_MIN)
 
 
 def top_k(scored: Iterable[tuple[float, Any]], k: int) -> list[tuple[float, Any]]:
