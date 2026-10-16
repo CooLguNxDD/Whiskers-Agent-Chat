@@ -280,6 +280,7 @@ async def send_mail(request: Request) -> JSONResponse:
             subject=body.get("subject"),
             reply_to=body.get("reply_to"),
             client_request_id=body.get("client_request_id"),
+            message_id=body.get("message_id"),
         )
         return JSONResponse(result, status_code=201)
     except HubError as exc:

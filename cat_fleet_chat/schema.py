@@ -206,6 +206,12 @@ mailbox = Table(
         "id",
         sqlite_where=text("read_at IS NULL"),
     ),
+    Index(
+        "idx_mailbox_unacked",
+        "recipient",
+        "id",
+        sqlite_where=text("acked_at IS NULL"),
+    ),
 )
 
 # Columns that a database created at an older version is missing. SQLite has

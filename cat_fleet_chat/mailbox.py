@@ -58,6 +58,15 @@ def reply_to(value: Any) -> int | None:
     return parsed or None
 
 
+def message_id(value: Any) -> int | None:
+    """Optional id of the chat message a mail links to."""
+    try:
+        parsed = optional_id(value, "message_id")
+    except HubError as exc:
+        raise _fail(exc.message, "message_id") from exc
+    return parsed or None
+
+
 def state(value: Any) -> str:
     if value in (None, ""):
         return "unread"
@@ -83,16 +92,15 @@ def ids(value: Any, field: str = "ids") -> list[int]:
         raise _fail(f"{field} must be a non-empty list of mail ids", field)
     if len(items) > IDS_MAX:
         raise _fail(f"{field} may name at most {IDS_MAX} mail ids", field)
-    seen: list[int] = []
+    seen: dict[int, None] = {}
     for item in items:
         if isinstance(item, bool):
             raise _fail(f"{field} must hold integers", field)
         parsed = optional_id(item, field)
         if parsed is None or parsed < 1:
             raise _fail(f"{field} must hold positive integers", field)
-        if parsed not in seen:
-            seen.append(parsed)
-    return seen
+        seen[parsed] = None
+    return list(seen)
 
 
 def mail_state(row: dict[str, Any]) -> str:
