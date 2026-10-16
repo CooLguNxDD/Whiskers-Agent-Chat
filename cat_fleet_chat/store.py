@@ -1136,16 +1136,22 @@ async def vector_candidates(
     channel_id: int | None,
     author: str | None,
     since: str | None,
+    scan_limit: int | None = None,
 ):
-    """Yield every embedded entry of ``model`` / ``dim`` that passes the BM25 filters.
+    """Yield the newest embedded entries of ``model`` / ``dim`` that pass the BM25 filters.
 
     Rows stream from the cursor so the caller can keep a bounded top-k heap.
+    ``scan_limit`` caps how many rows are read (newest first); ``None`` reads all.
     """
     where, params = _search_where(
         kinds=kinds, channel_id=channel_id, author=author, since=since, match=False
     )
     params["model"] = model
     params["dim"] = dim
+    tail = ""
+    if scan_limit is not None:
+        params["scan_limit"] = int(scan_limit)
+        tail = f" ORDER BY {SEARCH_INDEX}.rowid DESC LIMIT :scan_limit"
     sql = (
         f"SELECT {SEARCH_INDEX}.kind AS kind, {SEARCH_INDEX}.ref_id AS ref_id, "
         f"{SEARCH_INDEX}.channel_id AS channel_id, channels.name AS channel, "
@@ -1153,7 +1159,7 @@ async def vector_candidates(
         f"{SEARCH_INDEX}.title AS title, {SEARCH_INDEX}.body AS body, "
         "embeddings.vector AS vector "
         f"FROM {SEARCH_INDEX} CROSS JOIN embeddings ON {_EMBED_JOIN} AND embeddings.dim = :dim "
-        f"LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id WHERE {where}"
+        f"LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id WHERE {where}{tail}"
     )
     cursor = await run(conn, _bind(sql, params))
     async for row in cursor:

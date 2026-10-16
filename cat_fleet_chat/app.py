@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
 from contextlib import asynccontextmanager
 
 import httpx
@@ -17,6 +19,8 @@ from cat_fleet_chat.rest_app import Guard, api_routes, hook_routes
 from cat_fleet_chat.waiters import WaitHub
 from cat_fleet_chat.web_app import spa_routes
 from cat_fleet_chat.webhooks import WebhookDispatcher
+
+logger = logging.getLogger("cat_fleet_chat.app")
 
 
 def create_app(
@@ -69,17 +73,37 @@ def create_app(
             async with mcp_http.lifespan(app):
                 yield
         finally:
-            await queue.stop()
-            hub.embed_queue = None
+            # Every step runs even if an earlier one raises; the first error is re-raised last.
+            errors: list[BaseException] = []
+
+            async def step(action):
+                try:
+                    result = action()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as exc:  # noqa: BLE001 — keep releasing the rest
+                    logger.exception("shutdown step failed")
+                    errors.append(exc)
+
+            def detach_embed() -> None:
+                hub.embed_queue = None
+
+            def detach_dispatcher() -> None:
+                set_dispatcher(None)
+                hub.discord_resolver = None
+
+            await step(queue.stop)
+            await step(detach_embed)
             if embedder is None:
-                await active_embedder.aclose()
-            set_dispatcher(None)
-            hub.discord_resolver = None
+                await step(active_embedder.aclose)
+            await step(detach_dispatcher)
             if dispatcher is not None:
-                await dispatcher.stop()
-            set_hub(None)
-            await db.close()
-            lock.release()
+                await step(dispatcher.stop)
+            await step(lambda: set_hub(None))
+            await step(db.close)
+            await step(lock.release)
+            if errors:
+                raise errors[0]
 
     app = Starlette(
         routes=[
