@@ -675,6 +675,44 @@ async def fleet_feed_unfollow(follower: str, followee: str) -> dict[str, Any]:
         return INTERNAL_ERROR.mcp_body()
 
 
+async def fleet_feed_react(handle: str, post_id: int, kind: str) -> dict[str, Any]:
+    """React to a feed post. ``kind``: ``+1``, ``-1``, ``heart``, ``laugh``, ``eyes``, ``tada``, ``rocket``, ``thinking``.
+
+    Idempotent. ``+1`` and ``-1`` exclude each other (a new vote replaces the
+    old one); emoji kinds are independent. Answers the post's counts, ``score``
+    (+1 minus -1) and your own kinds (``mine``).
+    """
+    try:
+        return await get_hub().react(handle, post_id, kind)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_react failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_unreact(handle: str, post_id: int, kind: str) -> dict[str, Any]:
+    """Remove one of your reactions from a feed post. Idempotent."""
+    try:
+        return await get_hub().unreact(handle, post_id, kind)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_unreact failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_list_reactions(post_id: int) -> dict[str, Any]:
+    """Reactions on a feed post: counts and handles per kind, plus ``score``."""
+    try:
+        return await get_hub().list_reactions(post_id)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_list_reactions failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
 async def fleet_knowledge_add(
     project: str,
     fact: str,
@@ -892,6 +930,9 @@ def build_mcp() -> FastMCP:
         fleet_feed_thread,
         fleet_feed_follow,
         fleet_feed_unfollow,
+        fleet_feed_react,
+        fleet_feed_unreact,
+        fleet_feed_list_reactions,
         fleet_mail_send,
         fleet_mail_list,
         fleet_mail_read,

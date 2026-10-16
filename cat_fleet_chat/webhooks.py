@@ -55,6 +55,8 @@ def event_actor(event: dict[str, Any]) -> str | None:
         return payload.get("actor") or payload.get("author")
     if kind == "feed_follow":
         return payload.get("follower")
+    if kind in {"reaction_added", "reaction_removed"}:
+        return payload.get("handle")
     if kind == "mail":
         return payload.get("sender")
     return payload.get("actor")
@@ -169,6 +171,12 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
     if kind == "feed_follow":
         verb = "followed" if payload.get("following") else "unfollowed"
         return f"👀 `{payload.get('follower', '?')}` {verb} `{payload.get('followee', '?')}`"
+    if kind in {"reaction_added", "reaction_removed"}:
+        verb = "reacted" if kind == "reaction_added" else "removed"
+        return (
+            f"👍 `{payload.get('handle', '?')}` {verb} {payload.get('kind', '?')} on "
+            f"`{payload.get('post_author', '?')}`'s post {payload.get('post_id')}"
+        )
     if kind == "mail":
         # The event never carries the body; neither does the notice.
         subject = _clip(str(payload.get("subject") or ""), 120)

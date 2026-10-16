@@ -49,6 +49,9 @@ EVENT_KINDS = frozenset(
         "feed_post",
         "feed_repost",
         "feed_follow",
+        # A feed reaction changed (schema v12). No channel: channel_id is null.
+        "reaction_added",
+        "reaction_removed",
         # A direct mail was sent. The payload never carries the body.
         "mail",
         # A new knowledge fact (schema v10). No channel: channel_id is null.

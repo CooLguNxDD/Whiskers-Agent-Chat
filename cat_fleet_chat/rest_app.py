@@ -622,6 +622,29 @@ async def feed_followers(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+async def feed_reaction(request: Request) -> JSONResponse:
+    """``PUT`` reacts, ``DELETE`` unreacts. The handle comes like other feed writes."""
+    try:
+        body = await _body(request)
+        hub = _hub(request)
+        who = _caller(request, body, "handle")
+        post_id = request.path_params["post_id"]
+        kind = request.path_params["kind"]
+        if request.method.upper() == "DELETE":
+            return JSONResponse(await hub.unreact(who, post_id, kind))
+        result = await hub.react(who, post_id, kind)
+        return JSONResponse(result, status_code=200 if result.get("idempotent") else 201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_reactions(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).list_reactions(request.path_params["post_id"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
 async def feed_trending(request: Request) -> JSONResponse:
     try:
         params = request.query_params
@@ -955,6 +978,8 @@ def api_routes() -> list[Route]:
         Route("/api/v1/feed/posts/{post_id:int}", feed_get_post, methods=["GET"]),
         Route("/api/v1/feed/posts/{post_id:int}", feed_delete_post, methods=["DELETE"]),
         Route("/api/v1/feed/posts/{post_id:int}/repost", feed_repost, methods=["POST"]),
+        Route("/api/v1/feed/posts/{post_id:int}/reactions", feed_reactions, methods=["GET"]),
+        Route("/api/v1/feed/posts/{post_id:int}/reactions/{kind}", feed_reaction, methods=["PUT", "DELETE"]),
         Route("/api/v1/feed/timeline", feed_timeline, methods=["GET"]),
         Route("/api/v1/feed/follows/{followee}", feed_follow, methods=["PUT", "DELETE"]),
         Route("/api/v1/feed/follows/{handle}", feed_following, methods=["GET"]),

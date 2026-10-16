@@ -37,6 +37,7 @@ from cat_fleet_chat.schema import (
     mentions,
     messages,
     proposals,
+    reactions,
     run,
     search_rowid,
     task_events,
@@ -1393,6 +1394,70 @@ async def feed_tags_for(
     for row in rows:
         found.setdefault(row["post_id"], []).append(row["tag"])
     return found
+
+
+async def reaction_counts(
+    conn: aiosqlite.Connection, post_ids: Iterable[int]
+) -> dict[int, dict[str, int]]:
+    """Non-zero reaction counts per kind for each post, in one grouped query."""
+    ids = sorted(set(post_ids))
+    if not ids:
+        return {}
+    rows = await fetch_all(
+        conn,
+        select(reactions.c.post_id, reactions.c.kind, func.count().label("n"))
+        .where(reactions.c.post_id.in_(ids))
+        .group_by(reactions.c.post_id, reactions.c.kind),
+    )
+    found: dict[int, dict[str, int]] = {}
+    for row in rows:
+        found.setdefault(row["post_id"], {})[row["kind"]] = int(row["n"])
+    return found
+
+
+async def reaction_rows(conn: aiosqlite.Connection, post_id: int) -> list[dict[str, Any]]:
+    """Every reaction on one post, oldest first."""
+    rows = await fetch_all(
+        conn,
+        select(reactions.c.kind, reactions.c.handle, reactions.c.created_at)
+        .where(reactions.c.post_id == post_id)
+        .order_by(reactions.c.id),
+    )
+    return [dict(row) for row in rows]
+
+
+async def handle_reactions(conn: aiosqlite.Connection, post_id: int, handle: str) -> list[str]:
+    """The kinds ``handle`` holds on one post."""
+    rows = await fetch_all(
+        conn,
+        select(reactions.c.kind)
+        .where(reactions.c.post_id == post_id, reactions.c.handle == handle)
+        .order_by(reactions.c.id),
+    )
+    return [row["kind"] for row in rows]
+
+
+async def insert_reaction(
+    conn: aiosqlite.Connection, post_id: int, handle: str, kind: str, created_at: str
+) -> bool:
+    """Whether a new row was written (``False`` when the handle already had that kind)."""
+    cursor = await run(
+        conn,
+        insert(reactions)
+        .prefix_with("OR IGNORE")
+        .values(post_id=post_id, handle=handle, kind=kind, created_at=created_at),
+    )
+    return cursor.rowcount == 1
+
+
+async def delete_reaction(conn: aiosqlite.Connection, post_id: int, handle: str, kind: str) -> bool:
+    cursor = await run(
+        conn,
+        delete(reactions).where(
+            reactions.c.post_id == post_id, reactions.c.handle == handle, reactions.c.kind == kind
+        ),
+    )
+    return cursor.rowcount == 1
 
 
 async def feed_timeline_rows(

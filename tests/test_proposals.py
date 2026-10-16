@@ -56,8 +56,9 @@ async def walk(hub: Hub, number: int, *statuses: str) -> dict:
 # ---- pure helpers -----------------------------------------------------------
 
 
-def test_schema_version_is_11():
-    assert SCHEMA_VERSION == 11
+def test_schema_version_includes_v11():
+    # v11 added proposals; later steps may bump the version further (v12 reactions).
+    assert SCHEMA_VERSION >= 11
 
 
 def test_proposal_number_accepts_p_prefix_and_plain_ids():
@@ -469,6 +470,7 @@ async def test_v10_database_migrates_to_v11(tmp_path):
     await db.close()
     with sqlite3.connect(path) as conn:
         conn.execute("DROP TABLE proposals")
+        conn.execute("DROP TABLE IF EXISTS reactions")
         conn.execute("DELETE FROM schema_migrations WHERE version >= 11")
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "proposals" not in tables
@@ -485,7 +487,7 @@ async def test_v10_database_migrates_to_v11(tmp_path):
         messages = [r[0] for r in conn.execute("SELECT text FROM messages")]
         posts = [r[0] for r in conn.execute("SELECT body FROM feed_posts")]
         facts = [r[0] for r in conn.execute("SELECT fact FROM knowledge_facts")]
-    assert versions == list(range(1, 12))
+    assert versions == list(range(1, SCHEMA_VERSION + 1))
     assert columns == [
         "id", "project", "title", "summary", "evidence", "weight", "status", "author",
         "decided_by", "decided_at", "reason", "run_ref", "step_ref", "pr_ref", "post_id",
