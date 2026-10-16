@@ -423,6 +423,27 @@ async def insert_event(
     return int(cursor.lastrowid)
 
 
+async def insert_events(
+    conn: aiosqlite.Connection,
+    items: list[dict[str, Any]],
+) -> None:
+    """Insert multiple events in chunks."""
+    if not items:
+        return
+    for start in range(0, len(items), 150):
+        chunk = [
+            {
+                "kind": item["kind"],
+                "channel_id": item.get("channel_id"),
+                "entity_id": item["entity_id"],
+                "payload_json": json.dumps(item["payload"], separators=(",", ":")),
+                "created_at": item["created_at"],
+            }
+            for item in items[start : start + 150]
+        ]
+        await run(conn, insert(events).values(chunk))
+
+
 def _event_row(row: aiosqlite.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -932,14 +953,13 @@ _INDEX_SOURCES = {
     "knowledge": _INDEX_KNOWLEDGE,
 }
 
-# Hits on a fact carry its project and topic. The join is by primary key and
-# never drives the query: search_index stays the outer table.
-_KNOWLEDGE_JOIN = (
-    f"LEFT JOIN knowledge_facts kf ON {SEARCH_INDEX}.kind = 'knowledge' AND kf.id = {SEARCH_INDEX}.ref_id "
-)
-_KNOWLEDGE_FIELDS = "kf.project AS project, kf.topic AS topic, "
-
 _UNINDEX = text(f"DELETE FROM {SEARCH_INDEX} WHERE rowid = :rowid")
+_INDEX_KNOWLEDGE_MANY = text(
+    _INDEX_COLUMNS
+    + f"SELECT k.id * {SEARCH_ROWID_STRIDE} + {SEARCH_KIND_CODES['knowledge']}, {KNOWLEDGE_TITLE_SQL}, "
+    "k.fact, 'knowledge', k.id, NULL, k.author, k.created_at FROM knowledge_facts k "
+    "WHERE k.id IN :ref_ids AND k.status = 'active'"
+).bindparams(bindparam("ref_ids", expanding=True))
 
 
 async def unindex(conn: aiosqlite.Connection, kind: str, ref_id: int) -> None:
@@ -950,6 +970,37 @@ async def reindex(conn: aiosqlite.Connection, kind: str, ref_id: int) -> None:
     """Replace the index entry for one source row with its current contents."""
     await unindex(conn, kind, ref_id)
     await run(conn, _INDEX_SOURCES[kind].bindparams(ref_id=ref_id))
+
+
+async def index_knowledge_batch(conn: aiosqlite.Connection, fact_ids: list[int]) -> None:
+    """Index newly inserted knowledge facts in chunks."""
+    if not fact_ids:
+        return
+    for start in range(0, len(fact_ids), 400):
+        chunk = fact_ids[start : start + 400]
+        await run(conn, _INDEX_KNOWLEDGE_MANY.bindparams(ref_ids=chunk))
+
+
+async def attach_knowledge_meta(
+    conn: aiosqlite.Connection, rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Attach ``project`` and ``topic`` to ``knowledge`` search hits in one batch query."""
+    fact_ids = sorted({int(row["ref_id"]) for row in rows if row.get("kind") == "knowledge"})
+    if not fact_ids:
+        return rows
+    meta_rows = await fetch_all(
+        conn,
+        select(knowledge_facts.c.id, knowledge_facts.c.project, knowledge_facts.c.topic).where(
+            knowledge_facts.c.id.in_(fact_ids)
+        ),
+    )
+    meta = {int(row["id"]): (row["project"], row["topic"]) for row in meta_rows}
+    for row in rows:
+        if row.get("kind") == "knowledge":
+            project, topic = meta.get(int(row["ref_id"]), (None, None))
+            row["project"] = project
+            row["topic"] = topic
+    return rows
 
 
 async def index_message(conn: aiosqlite.Connection, message_id: int) -> None:
@@ -1022,12 +1073,10 @@ async def search_index(
         f"SELECT {SEARCH_INDEX}.kind AS kind, {SEARCH_INDEX}.ref_id AS ref_id, "
         f"{SEARCH_INDEX}.channel_id AS channel_id, channels.name AS channel, "
         f"{SEARCH_INDEX}.author AS author, {SEARCH_INDEX}.created_at AS created_at, "
-        + _KNOWLEDGE_FIELDS
-        + f"snippet({SEARCH_INDEX}, -1, :open, :close, :ellipsis, :tokens) AS snippet, "
+        f"snippet({SEARCH_INDEX}, -1, :open, :close, :ellipsis, :tokens) AS snippet, "
         f"bm25({SEARCH_INDEX}, {float(title_weight)}, {float(body_weight)}) AS bm25_rank "
         f"FROM {SEARCH_INDEX} LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id "
-        + _KNOWLEDGE_JOIN
-        + f"WHERE {where} ORDER BY bm25_rank ASC, {SEARCH_INDEX}.created_at DESC, {SEARCH_INDEX}.rowid DESC "
+        f"WHERE {where} ORDER BY bm25_rank ASC, {SEARCH_INDEX}.created_at DESC, {SEARCH_INDEX}.rowid DESC "
         "LIMIT :limit OFFSET :offset"
     )
     page_params = {
@@ -1044,7 +1093,8 @@ async def search_index(
         conn, _bind(f"SELECT count(*) AS n FROM {SEARCH_INDEX} WHERE {where}", params)
     )
     total = int(count_row["n"]) if count_row is not None else 0
-    return [dict(row) for row in rows], total
+    hits = await attach_knowledge_meta(conn, [dict(row) for row in rows])
+    return hits, total
 
 
 # ---- embeddings (schema v9) ----------------------------------------------
@@ -1181,12 +1231,10 @@ async def vector_candidates(
         f"{SEARCH_INDEX}.channel_id AS channel_id, channels.name AS channel, "
         f"{SEARCH_INDEX}.author AS author, {SEARCH_INDEX}.created_at AS created_at, "
         f"{SEARCH_INDEX}.title AS title, {SEARCH_INDEX}.body AS body, "
-        + _KNOWLEDGE_FIELDS
-        + "embeddings.vector AS vector "
+        "embeddings.vector AS vector "
         f"FROM {SEARCH_INDEX} CROSS JOIN embeddings ON {_EMBED_JOIN} AND embeddings.dim = :dim "
         f"LEFT JOIN channels ON channels.id = {SEARCH_INDEX}.channel_id "
-        + _KNOWLEDGE_JOIN
-        + f"WHERE {where}{tail}"
+        f"WHERE {where}{tail}"
     )
     cursor = await run(conn, _bind(sql, params))
     async for row in cursor:
@@ -1493,10 +1541,32 @@ KNOWLEDGE_COLUMNS = (
     knowledge_facts.c.updated_at,
 )
 
+EXPORT_BATCH = 500
+
 
 async def insert_knowledge(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
     cursor = await run(conn, insert(knowledge_facts).values(**values))
     return int(cursor.lastrowid)
+
+
+async def insert_knowledge_batch(
+    conn: aiosqlite.Connection, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Insert multiple candidate facts, ignoring duplicates on ``(project, norm)``, and return inserted rows."""
+    if not items:
+        return []
+    inserted: list[dict[str, Any]] = []
+    for start in range(0, len(items), 80):
+        chunk = items[start : start + 80]
+        stmt = (
+            sqlite_insert(knowledge_facts)
+            .values(chunk)
+            .on_conflict_do_nothing(index_elements=[knowledge_facts.c.project, knowledge_facts.c.norm])
+            .returning(*KNOWLEDGE_COLUMNS)
+        )
+        rows = await fetch_all(conn, stmt)
+        inserted.extend(dict(row) for row in rows)
+    return inserted
 
 
 async def get_knowledge(conn: aiosqlite.Connection, fact_id: int) -> dict[str, Any] | None:
@@ -1555,6 +1625,22 @@ async def export_knowledge(
         select(*KNOWLEDGE_COLUMNS), project=project, topic=None, status=status, author=None
     )
     rows = await fetch_all(conn, stmt.order_by(knowledge_facts.c.id.asc()))
+    return [dict(row) for row in rows]
+
+
+async def export_knowledge_page(
+    conn: aiosqlite.Connection,
+    *,
+    project: str | None,
+    status: str | None,
+    after_id: int = 0,
+    limit: int = EXPORT_BATCH,
+) -> list[dict[str, Any]]:
+    """Up to ``limit`` matching facts after ``after_id``, oldest first."""
+    stmt = _knowledge_filters(
+        select(*KNOWLEDGE_COLUMNS), project=project, topic=None, status=status, author=None
+    ).where(knowledge_facts.c.id > after_id)
+    rows = await fetch_all(conn, stmt.order_by(knowledge_facts.c.id.asc()).limit(limit))
     return [dict(row) for row in rows]
 
 
