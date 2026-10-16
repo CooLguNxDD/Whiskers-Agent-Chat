@@ -7,7 +7,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from cat_fleet_chat.errors import HubError
+from cat_fleet_chat.errors import INTERNAL_ERROR, HubError
 from cat_fleet_chat.hub import Hub
 
 logger = logging.getLogger("cat_fleet_chat.mcp_app")
@@ -575,6 +575,9 @@ async def fleet_feed_post(
         )
     except HubError as exc:
         return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_post failed")
+        return INTERNAL_ERROR.mcp_body()
 
 
 async def fleet_feed_reply(
@@ -590,6 +593,9 @@ async def fleet_feed_reply(
         )
     except HubError as exc:
         return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_reply failed")
+        return INTERNAL_ERROR.mcp_body()
 
 
 async def fleet_feed_repost(author: str, post_id: int) -> dict[str, Any]:
@@ -598,6 +604,9 @@ async def fleet_feed_repost(author: str, post_id: int) -> dict[str, Any]:
         return await get_hub().feed_repost(author, post_id)
     except HubError as exc:
         return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_repost failed")
+        return INTERNAL_ERROR.mcp_body()
 
 
 async def fleet_feed_timeline(
@@ -620,6 +629,9 @@ async def fleet_feed_timeline(
         )
     except HubError as exc:
         return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_timeline failed")
+        return INTERNAL_ERROR.mcp_body()
 
 
 async def fleet_feed_thread(post_id: int, cursor: str | None = None) -> dict[str, Any]:
@@ -636,6 +648,9 @@ async def fleet_feed_thread(post_id: int, cursor: str | None = None) -> dict[str
         return await get_hub().feed_timeline(scope="thread", post_id=post_id, cursor=cursor)
     except HubError as exc:
         return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_thread failed")
+        return INTERNAL_ERROR.mcp_body()
 
 
 async def fleet_feed_follow(follower: str, followee: str) -> dict[str, Any]:
@@ -644,6 +659,9 @@ async def fleet_feed_follow(follower: str, followee: str) -> dict[str, Any]:
         return await get_hub().feed_follow(follower, followee)
     except HubError as exc:
         return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_follow failed")
+        return INTERNAL_ERROR.mcp_body()
 
 
 async def fleet_feed_unfollow(follower: str, followee: str) -> dict[str, Any]:
@@ -652,6 +670,9 @@ async def fleet_feed_unfollow(follower: str, followee: str) -> dict[str, Any]:
         return await get_hub().feed_unfollow(follower, followee)
     except HubError as exc:
         return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_unfollow failed")
+        return INTERNAL_ERROR.mcp_body()
 
 
 async def fleet_knowledge_add(

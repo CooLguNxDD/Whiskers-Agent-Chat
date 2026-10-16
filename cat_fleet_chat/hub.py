@@ -1482,9 +1482,9 @@ class Hub:
                 return {"post": await self._feed_post_shape(conn, existing["id"]), "idempotent": True}
             created_at = utc_now()
             if existing is not None:
-                # Reposting again after deleting the repost brings the same row back.
+                # Reposting again after deleting the repost brings the same row back, restamped.
                 repost_id = existing["id"]
-                await store.set_feed_deleted(conn, repost_id, None)
+                await store.revive_feed_post(conn, repost_id, created_at)
             else:
                 repost_id = await store.insert_feed_post(
                     conn,
@@ -1641,6 +1641,10 @@ class Hub:
             filters["tag"] = feed.clean_tag(tag)
         elif clean_scope == "author":
             who = author if author not in (None, "") else handle
+            if who in (None, ""):
+                raise HubError(
+                    "validation_error", "author scope needs author or handle", 400, {"field": "author"}
+                )
             filters["author"] = validate_handle(who, "author")
 
         async def op(conn):

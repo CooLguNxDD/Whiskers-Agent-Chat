@@ -15,7 +15,7 @@ from cat_fleet_chat.db import Database, ProcessLock
 from cat_fleet_chat.embed import Embedder, EmbedQueue, build_embedder
 from cat_fleet_chat.hub import Hub
 from cat_fleet_chat.mcp_app import build_mcp, set_dispatcher, set_hub
-from cat_fleet_chat.rest_app import Guard, api_routes, hook_routes
+from cat_fleet_chat.rest_app import Guard, api_routes, hook_routes, internal_error_handler
 from cat_fleet_chat.waiters import WaitHub
 from cat_fleet_chat.web_app import spa_routes
 from cat_fleet_chat.webhooks import WebhookDispatcher
@@ -115,6 +115,7 @@ def create_app(
             *spa_routes(),
         ],
         lifespan=lifespan,
+        exception_handlers={Exception: internal_error_handler},
     )
     app.add_middleware(Guard, settings=settings)
     return app

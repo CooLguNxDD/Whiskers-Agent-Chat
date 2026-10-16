@@ -684,3 +684,102 @@ async def test_v5_database_upgrades_to_the_feed_schema(tmp_path):
     assert {"idx_feed_posts_root", "idx_feed_hashtags_tag", "uq_feed_posts_repost"} <= indexes
     assert SCHEMA_VERSION >= 8 and versions == list(range(1, SCHEMA_VERSION + 1))
     assert kept == ("kept",)
+
+
+async def test_author_scope_needs_author_or_handle(hub):
+    with pytest.raises(HubError) as caught:
+        await hub.feed_timeline(scope="author")
+    assert caught.value.code == "validation_error"
+    assert caught.value.message == "author scope needs author or handle"
+    assert caught.value.status == 400
+    assert caught.value.details == {"field": "author"}
+
+
+async def test_revived_repost_gets_fresh_created_at(hub):
+    from cat_fleet_chat import store
+
+    root = pid(await hub.feed_post("ada", "original"))
+    repost = pid(await hub.feed_repost("bob", root))
+
+    async def created_at(conn):
+        return (await store.get_feed_row(conn, repost))["created_at"]
+
+    async def backdate(conn):
+        await conn.execute("UPDATE feed_posts SET created_at = '2000-01-01T00:00:00Z' WHERE id = ?", (repost,))
+
+    await hub.feed_delete("bob", repost)
+    await hub._txn(backdate)
+    assert await hub.db.read(created_at) == "2000-01-01T00:00:00Z"
+    await hub.feed_repost("bob", root)
+    assert await hub.db.read(created_at) > "2000-01-01T00:00:00Z"
+
+
+async def test_rest_feed_actor_fallback_and_missing_identity(running):
+    client, _ = running
+    post = (await client.post("/api/v1/feed/posts", json={"author": "ada", "body": "x"})).json()["post"]["id"]
+    missing = await client.request("DELETE", f"/api/v1/feed/posts/{post}")
+    assert missing.status_code == 401 and missing.json()["error"]["code"] == "unauthorized"
+    via_query = await client.request("DELETE", f"/api/v1/feed/posts/{post}", params={"actor": "ada"})
+    assert via_query.status_code == 200
+    via_agent_name = await client.request("DELETE", f"/api/v1/feed/posts/{post}", params={"agent_name": "ada"})
+    assert via_agent_name.status_code == 200
+    await client.put("/api/v1/feed/follows/ada", params={"follower": "cy"})
+    assert (await client.get("/api/v1/feed/follows/cy")).json()["following"] == ["ada"]
+    gone = await client.request("DELETE", "/api/v1/feed/follows/ada", params={"follower": "cy"})
+    assert gone.json()["following"] is False
+
+
+async def test_rest_feed_create_post_author_from_query_and_thread_flag_case(running):
+    client, _ = running
+    created = await client.post("/api/v1/feed/posts", params={"author": "ada"}, json={"body": "hello"})
+    assert created.status_code == 201, created.text
+    assert created.json()["post"]["author"] == "ada"
+    root = created.json()["post"]["id"]
+    thread = (await client.get(f"/api/v1/feed/posts/{root}", params={"thread": "TRUE"})).json()
+    assert "posts" in thread and thread["root_id"] == root
+
+
+async def test_rest_unexpected_error_is_json(running, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    _, app = running
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(app.state.hub, "list_destinations", boom)
+    monkeypatch.setattr(app.state.hub, "search", boom)
+    monkeypatch.setattr(app.state.hub, "feed_timeline", boom)
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        for path in ("/api/v1/destinations", "/api/v1/search?q=x", "/api/v1/feed/timeline"):
+            response = await client.get(path)
+            assert response.status_code == 500, path
+            assert response.headers["content-type"].startswith("application/json"), path
+            body = response.json()["error"]
+            assert body["code"] == "internal_error"
+            assert "disk on fire" not in response.text
+
+
+async def test_mcp_feed_tools_return_structured_error_on_unexpected_failure(hub, monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("store down")
+
+    mcp_app.set_hub(hub)
+    try:
+        monkeypatch.setattr(hub, "feed_post", boom)
+        monkeypatch.setattr(hub, "feed_timeline", boom)
+        for result in (
+            await mcp_app.fleet_feed_post("ada", "hi"),
+            await mcp_app.fleet_feed_reply("ada", 1, "hi"),
+            await mcp_app.fleet_feed_timeline(),
+            await mcp_app.fleet_feed_thread(1),
+        ):
+            assert result["status"] == "error" and result["error"] == "internal_error"
+            assert result["http_status"] == 500
+            assert "store down" not in result["message"]
+        # HubError keeps its own envelope.
+        bad = await mcp_app.fleet_feed_repost("ada", 999)
+        assert bad["error"] == "not_found"
+    finally:
+        mcp_app.set_hub(None)

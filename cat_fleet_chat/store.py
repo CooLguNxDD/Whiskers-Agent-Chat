@@ -1292,6 +1292,16 @@ async def set_feed_deleted(conn: aiosqlite.Connection, post_id: int, deleted_at:
     await run(conn, update(feed_posts).where(feed_posts.c.id == post_id).values(deleted_at=deleted_at))
 
 
+async def revive_feed_post(conn: aiosqlite.Connection, post_id: int, created_at: str) -> None:
+    """Undelete a post and restamp it, so it orders as new content."""
+    await run(
+        conn,
+        update(feed_posts)
+        .where(feed_posts.c.id == post_id)
+        .values(deleted_at=None, created_at=created_at),
+    )
+
+
 async def feed_counts(
     conn: aiosqlite.Connection, post_ids: Iterable[int]
 ) -> dict[int, dict[str, int]]:

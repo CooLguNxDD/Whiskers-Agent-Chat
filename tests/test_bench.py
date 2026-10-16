@@ -94,3 +94,8 @@ def test_targets_listed(report):
 def test_report_has_no_paths_or_hostnames(report):
     text = json.dumps(report)
     assert "\\" not in text and "/tmp" not in text and "Users" not in text
+
+
+def test_group_wake_wall_counts_elapsed_when_nobody_woke(bench):
+    assert bench.group_wake_wall({"a": 12.0, "b": 11.0}, ["a", "b"], 10.0, 99.0) == pytest.approx(2.0)
+    assert bench.group_wake_wall({}, ["a", "b"], 10.0, 15.5) == pytest.approx(5.5)

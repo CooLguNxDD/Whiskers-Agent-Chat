@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 from typing import Any
 
 from starlette.requests import Request
@@ -12,10 +13,12 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from cat_fleet_chat.config import Settings, allowed_hostnames, allowed_origins
-from cat_fleet_chat.errors import HubError
+from cat_fleet_chat.errors import INTERNAL_ERROR, HubError
 from cat_fleet_chat.hub import Hub, SSE_BATCH, agent_relevant
 from cat_fleet_chat.validate import channel_name, event_kinds, handle, optional_id
 from cat_fleet_chat.webhooks import sign
+
+logger = logging.getLogger("cat_fleet_chat.rest_app")
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -101,6 +104,12 @@ class Guard:
 
 def _json_error(exc: HubError) -> JSONResponse:
     return JSONResponse(exc.rest_body(), status_code=exc.status)
+
+
+async def internal_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Last-resort handler: unexpected failures answer JSON, not Starlette's plain-text 500."""
+    logger.error("unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(INTERNAL_ERROR.rest_body(), status_code=INTERNAL_ERROR.status)
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -520,7 +529,7 @@ async def feed_create_post(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
         result = await _hub(request).feed_post(
-            _author(body),
+            _caller(request, body, "author"),
             body.get("body"),
             parent_id=body.get("parent_id"),
             quote_of=body.get("quote_of"),
@@ -535,7 +544,7 @@ async def feed_get_post(request: Request) -> JSONResponse:
     try:
         hub = _hub(request)
         post_id = request.path_params["post_id"]
-        if request.query_params.get("thread") in ("1", "true", "yes"):
+        if request.query_params.get("thread", "").lower() in ("1", "true", "yes"):
             return JSONResponse(
                 await hub.feed_timeline(
                     scope="thread", post_id=post_id, cursor=request.query_params.get("cursor")
@@ -549,9 +558,10 @@ async def feed_get_post(request: Request) -> JSONResponse:
 async def feed_delete_post(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
-        result = await _hub(request).feed_delete(
-            _caller(request, body, "actor"), request.path_params["post_id"]
-        )
+        actor = _caller(request, body, "actor")
+        if actor in (None, ""):
+            raise HubError("unauthorized", "actor identity is required to delete a post", 401)
+        result = await _hub(request).feed_delete(actor, request.path_params["post_id"])
         return JSONResponse(result)
     except HubError as exc:
         return _json_error(exc)

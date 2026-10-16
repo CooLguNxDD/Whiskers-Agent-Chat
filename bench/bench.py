@@ -338,6 +338,12 @@ async def wait_until(predicate: Callable[[], bool], timeout: float = 30.0) -> bo
     return True
 
 
+def group_wake_wall(done_at: dict[str, float], group: list[str], posted: float, now: float) -> float:
+    """Seconds from the post to the last wake in ``group``; the full time waited (``now - posted``) if none woke."""
+    woken = [done_at[name] for name in group if name in done_at]
+    return (max(woken) if woken else now) - posted
+
+
 async def scenario_waiters(hub: Hub, count: int) -> dict[str, Any]:
     """``count`` parked ``wait_for_mentions`` calls; two posts wake the right halves, nobody is lost."""
     names = [f"bench-waiter-{index:03d}" for index in range(count)]
@@ -368,7 +374,7 @@ async def scenario_waiters(hub: Hub, count: int) -> dict[str, Any]:
         await hub.post_message("bench-0", "bench-poster", text)
         await wait_until(lambda group=group: all(name in done_at for name in group), timeout=30.0)
         latencies.extend((done_at[name] - posted) * 1000.0 for name in group if name in done_at)
-        wake_wall += max((done_at[name] for name in group if name in done_at), default=posted) - posted
+        wake_wall += group_wake_wall(done_at, group, posted, time.perf_counter())
         # The other half must still be parked after this post.
         await asyncio.sleep(0.05)
         wrongly_woken += sum(1 for name in other if name in done_at)
