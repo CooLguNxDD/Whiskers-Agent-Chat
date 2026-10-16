@@ -1,4 +1,4 @@
-"""All SQL for channels, messages, mentions, tasks, attachments, and the event stream.
+"""All SQL for channels, messages, mentions, tasks, attachments, the feed, and the event stream.
 
 Statements are built with SQLAlchemy Core (see ``schema.py``) and run on the
 caller's aiosqlite connection. Callers own the transaction. This module does
@@ -19,6 +19,9 @@ from cat_fleet_chat.schema import (
     attachments,
     channels,
     events,
+    feed_follows,
+    feed_hashtags,
+    feed_posts,
     fetch_all,
     fetch_one,
     idempotency,
@@ -738,3 +741,217 @@ async def list_agents(conn: aiosqlite.Connection) -> list[dict[str, Any]]:
         .order_by(last_activity.desc(), seen.c.name.asc()),
     )
     return [{"name": row["name"], "last_activity": row["last_activity"]} for row in rows]
+
+
+# ---- feed --------------------------------------------------------------
+
+FEED_COLUMNS = (
+    feed_posts.c.id,
+    feed_posts.c.author,
+    feed_posts.c.body,
+    feed_posts.c.parent_id,
+    feed_posts.c.root_id,
+    feed_posts.c.repost_of,
+    feed_posts.c.quote_of,
+    feed_posts.c.depth,
+    feed_posts.c.created_at,
+    feed_posts.c.deleted_at,
+)
+
+
+async def insert_feed_post(
+    conn: aiosqlite.Connection,
+    *,
+    author: str,
+    body: str,
+    parent_id: int | None,
+    root_id: int | None,
+    repost_of: int | None,
+    quote_of: int | None,
+    depth: int,
+    created_at: str,
+    tags: Iterable[str] = (),
+) -> int:
+    """Insert one post and its hashtags. A root (``root_id=None``) points at itself."""
+    cursor = await run(
+        conn,
+        insert(feed_posts).values(
+            author=author,
+            body=body,
+            parent_id=parent_id,
+            root_id=root_id,
+            repost_of=repost_of,
+            quote_of=quote_of,
+            depth=depth,
+            created_at=created_at,
+        ),
+    )
+    post_id = int(cursor.lastrowid)
+    if root_id is None:
+        await run(conn, update(feed_posts).where(feed_posts.c.id == post_id).values(root_id=post_id))
+    for tag in tags:
+        await run(conn, insert(feed_hashtags).values(post_id=post_id, tag=tag))
+    return post_id
+
+
+async def get_feed_row(conn: aiosqlite.Connection, post_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(*FEED_COLUMNS).where(feed_posts.c.id == post_id))
+    return dict(row) if row else None
+
+
+async def feed_rows(conn: aiosqlite.Connection, post_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
+    ids = sorted(set(post_ids))
+    if not ids:
+        return {}
+    rows = await fetch_all(conn, select(*FEED_COLUMNS).where(feed_posts.c.id.in_(ids)))
+    return {row["id"]: dict(row) for row in rows}
+
+
+async def find_repost(
+    conn: aiosqlite.Connection, author: str, original_id: int
+) -> dict[str, Any] | None:
+    row = await fetch_one(
+        conn,
+        select(*FEED_COLUMNS).where(
+            feed_posts.c.author == author, feed_posts.c.repost_of == original_id
+        ),
+    )
+    return dict(row) if row else None
+
+
+async def set_feed_deleted(conn: aiosqlite.Connection, post_id: int, deleted_at: str | None) -> None:
+    await run(conn, update(feed_posts).where(feed_posts.c.id == post_id).values(deleted_at=deleted_at))
+
+
+async def feed_counts(
+    conn: aiosqlite.Connection, post_ids: Iterable[int]
+) -> dict[int, dict[str, int]]:
+    """Live reply, repost and quote counts per post. Deleted posts do not count."""
+    ids = sorted(set(post_ids))
+    found: dict[int, dict[str, int]] = {
+        post_id: {"reply_count": 0, "repost_count": 0, "quote_count": 0} for post_id in ids
+    }
+    if not ids:
+        return found
+    for column, name in (
+        (feed_posts.c.parent_id, "reply_count"),
+        (feed_posts.c.repost_of, "repost_count"),
+        (feed_posts.c.quote_of, "quote_count"),
+    ):
+        rows = await fetch_all(
+            conn,
+            select(column.label("target"), func.count().label("n"))
+            .where(column.in_(ids), feed_posts.c.deleted_at.is_(None))
+            .group_by(column),
+        )
+        for row in rows:
+            found[row["target"]][name] = int(row["n"])
+    return found
+
+
+async def feed_tags_for(
+    conn: aiosqlite.Connection, post_ids: Iterable[int]
+) -> dict[int, list[str]]:
+    ids = sorted(set(post_ids))
+    if not ids:
+        return {}
+    rows = await fetch_all(
+        conn,
+        select(feed_hashtags.c.post_id, feed_hashtags.c.tag)
+        .where(feed_hashtags.c.post_id.in_(ids))
+        .order_by(feed_hashtags.c.post_id, feed_hashtags.c.tag),
+    )
+    found: dict[int, list[str]] = {}
+    for row in rows:
+        found.setdefault(row["post_id"], []).append(row["tag"])
+    return found
+
+
+async def feed_timeline_rows(
+    conn: aiosqlite.Connection,
+    *,
+    before_id: int | None,
+    limit: int,
+    author: str | None = None,
+    follower: str | None = None,
+    tag: str | None = None,
+) -> list[dict[str, Any]]:
+    """Live posts newest first, at most ``limit``. Filters combine with AND."""
+    stmt = select(*FEED_COLUMNS).where(feed_posts.c.deleted_at.is_(None))
+    if before_id is not None:
+        stmt = stmt.where(feed_posts.c.id < before_id)
+    if author is not None:
+        stmt = stmt.where(feed_posts.c.author == author)
+    if follower is not None:
+        followed = select(feed_follows.c.followee).where(feed_follows.c.follower == follower)
+        stmt = stmt.where(feed_posts.c.author.in_(followed.scalar_subquery()))
+    if tag is not None:
+        tagged = select(feed_hashtags.c.post_id).where(feed_hashtags.c.tag == tag)
+        stmt = stmt.where(feed_posts.c.id.in_(tagged.scalar_subquery()))
+    rows = await fetch_all(conn, stmt.order_by(feed_posts.c.id.desc()).limit(limit))
+    return [dict(row) for row in rows]
+
+
+async def feed_thread_rows(
+    conn: aiosqlite.Connection, root_id: int, limit: int
+) -> list[dict[str, Any]]:
+    """Every post in a thread, deleted ones included, oldest first, at most ``limit``."""
+    rows = await fetch_all(
+        conn,
+        select(*FEED_COLUMNS)
+        .where(feed_posts.c.root_id == root_id)
+        .order_by(feed_posts.c.id.asc())
+        .limit(limit),
+    )
+    return [dict(row) for row in rows]
+
+
+async def insert_follow(
+    conn: aiosqlite.Connection, follower: str, followee: str, created_at: str
+) -> bool:
+    """Whether a new follow row was written (``False`` when it already existed)."""
+    cursor = await run(
+        conn,
+        insert(feed_follows)
+        .prefix_with("OR IGNORE")
+        .values(follower=follower, followee=followee, created_at=created_at),
+    )
+    return cursor.rowcount == 1
+
+
+async def delete_follow(conn: aiosqlite.Connection, follower: str, followee: str) -> bool:
+    cursor = await run(
+        conn,
+        delete(feed_follows).where(
+            feed_follows.c.follower == follower, feed_follows.c.followee == followee
+        ),
+    )
+    return cursor.rowcount == 1
+
+
+async def list_follows(
+    conn: aiosqlite.Connection, *, follower: str | None = None, followee: str | None = None
+) -> list[dict[str, Any]]:
+    stmt = select(feed_follows.c.follower, feed_follows.c.followee, feed_follows.c.created_at)
+    if follower is not None:
+        stmt = stmt.where(feed_follows.c.follower == follower).order_by(feed_follows.c.followee)
+    if followee is not None:
+        stmt = stmt.where(feed_follows.c.followee == followee).order_by(feed_follows.c.follower)
+    return [dict(row) for row in await fetch_all(conn, stmt)]
+
+
+async def trending_tags(
+    conn: aiosqlite.Connection, *, since: str, limit: int
+) -> list[dict[str, Any]]:
+    """Tags by number of live posts created at or after ``since``."""
+    uses = func.count().label("count")
+    rows = await fetch_all(
+        conn,
+        select(feed_hashtags.c.tag, uses)
+        .join_from(feed_hashtags, feed_posts, feed_posts.c.id == feed_hashtags.c.post_id)
+        .where(feed_posts.c.created_at >= since, feed_posts.c.deleted_at.is_(None))
+        .group_by(feed_hashtags.c.tag)
+        .order_by(uses.desc(), feed_hashtags.c.tag.asc())
+        .limit(limit),
+    )
+    return [{"tag": row["tag"], "count": int(row["count"])} for row in rows]

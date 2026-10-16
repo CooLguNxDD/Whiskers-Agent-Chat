@@ -20,7 +20,7 @@ from cat_fleet_chat import schema
 
 logger = logging.getLogger("cat_fleet_chat.db")
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 8
 
 READ_POOL_SIZE = 4
 

@@ -12,6 +12,7 @@ from typing import Any
 
 import aiosqlite
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     ForeignKey,
     Index,
@@ -181,6 +182,56 @@ webhooks = Table(
     Column("channel", Text),
     Column("author", Text),
     Column("allow_override", Integer, nullable=False, server_default=text("0")),
+)
+
+# Schema v8. The agent feed. A root post has ``root_id == id`` and depth 0; a
+# reply copies ``root_id`` from its parent and sits one level deeper. A plain
+# repost has an empty body and ``repost_of``; a quote has a body and
+# ``quote_of``. ``deleted_at`` is a soft delete, so a thread keeps its shape.
+feed_posts = Table(
+    "feed_posts",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("author", Text, nullable=False),
+    Column("body", Text, nullable=False, server_default=text("''")),
+    Column("parent_id", Integer, ForeignKey("feed_posts.id")),
+    # Set right after the insert for a root, so it is only briefly null.
+    Column("root_id", Integer),
+    Column("repost_of", Integer, ForeignKey("feed_posts.id")),
+    Column("quote_of", Integer, ForeignKey("feed_posts.id")),
+    Column("depth", Integer, nullable=False, server_default=text("0")),
+    Column("created_at", Text, nullable=False),
+    Column("deleted_at", Text),
+    Index("idx_feed_posts_created", "created_at"),
+    Index("idx_feed_posts_root", "root_id", "id"),
+    Index("idx_feed_posts_parent", "parent_id", "id"),
+    Index("idx_feed_posts_author", "author", "id"),
+    Index("idx_feed_posts_quote", "quote_of"),
+    Index("idx_feed_posts_repost_of", "repost_of"),
+    # One plain repost per author and original. SQLite treats NULLs as
+    # distinct, so posts that are not reposts never collide here.
+    Index("uq_feed_posts_repost", "author", "repost_of", unique=True),
+)
+
+feed_follows = Table(
+    "feed_follows",
+    metadata,
+    Column("follower", Text, nullable=False),
+    Column("followee", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    PrimaryKeyConstraint("follower", "followee"),
+    CheckConstraint("follower <> followee", name="ck_feed_follows_not_self"),
+    Index("idx_feed_follows_followee", "followee", "follower"),
+)
+
+feed_hashtags = Table(
+    "feed_hashtags",
+    metadata,
+    Column("post_id", Integer, ForeignKey("feed_posts.id"), nullable=False),
+    # Lowercased, without the leading "#".
+    Column("tag", Text, nullable=False),
+    PrimaryKeyConstraint("post_id", "tag"),
+    Index("idx_feed_hashtags_tag", "tag", "post_id"),
 )
 
 # Columns that a database created at an older version is missing. SQLite has

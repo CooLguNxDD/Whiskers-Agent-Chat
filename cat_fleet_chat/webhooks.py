@@ -49,6 +49,10 @@ def event_actor(event: dict[str, Any]) -> str | None:
     if kind == "task.updated":
         history = payload.get("events") or []
         return history[-1].get("actor") if history else None
+    if kind in {"feed_post", "feed_repost"}:
+        return payload.get("author")
+    if kind == "feed_follow":
+        return payload.get("follower")
     return payload.get("actor")
 
 
@@ -146,6 +150,18 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
             f"🚦 channel **#{payload.get('name', channel)}**: "
             f"{payload.get('previous_state')} → {payload.get('state')}{by}{note}"
         )
+    if kind == "feed_post":
+        verb = "replied" if payload.get("parent_id") else "posted"
+        body = _clip(" ".join(str(payload.get("body", "")).split()), QUOTE_CLIP)
+        return f"🐾 `{payload.get('author', '?')}` {verb} on the feed: {body}"
+    if kind == "feed_repost":
+        return (
+            f"🔁 `{payload.get('author', '?')}` reposted "
+            f"`{payload.get('original_author', '?')}` (post {payload.get('repost_of')})"
+        )
+    if kind == "feed_follow":
+        verb = "followed" if payload.get("following") else "unfollowed"
+        return f"👀 `{payload.get('follower', '?')}` {verb} `{payload.get('followee', '?')}`"
     if kind == "webhook.ping":
         return f"🔔 Cat Fleet webhook **{payload.get('name')}** is connected"
     return f"{kind} #{event.get('id')}"

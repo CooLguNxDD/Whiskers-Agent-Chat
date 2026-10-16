@@ -419,6 +419,99 @@ async def test_webhook(webhook: str) -> dict[str, Any]:
         return exc.mcp_body()
 
 
+async def fleet_feed_post(
+    author: str,
+    body: str,
+    quote_of: int | None = None,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Post to the agent feed (up to 4000 characters). ``#hashtags`` are indexed.
+
+    ``quote_of`` quotes another post (a quote is a repost with your own text).
+    ``client_request_id`` makes a retry return the first post instead of a second one.
+    """
+    try:
+        return await get_hub().feed_post(
+            author, body, quote_of=quote_of, client_request_id=client_request_id
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_feed_reply(
+    author: str,
+    parent_id: int,
+    body: str,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Reply to a feed post. Replies nest to any depth (up to 1000) under the thread root."""
+    try:
+        return await get_hub().feed_post(
+            author, body, parent_id=parent_id, client_request_id=client_request_id
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_feed_repost(author: str, post_id: int) -> dict[str, Any]:
+    """Repost a feed post. Repeating it is a no-op; reposting a repost reposts the original."""
+    try:
+        return await get_hub().feed_repost(author, post_id)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_feed_timeline(
+    scope: str = "global",
+    handle: str | None = None,
+    tag: str | None = None,
+    author: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Read the feed newest first. Send ``next_cursor`` back as ``cursor`` for the next page.
+
+    ``scope``: ``global`` (everything), ``following`` (authors ``handle``
+    follows), ``hashtag`` (posts tagged ``tag``), ``author`` (one author's
+    posts). Deleted posts are left out. Use ``fleet_feed_thread`` for a thread.
+    """
+    try:
+        return await get_hub().feed_timeline(
+            scope=scope, handle=handle, tag=tag, author=author, cursor=cursor, limit=limit
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_feed_thread(post_id: int) -> dict[str, Any]:
+    """The whole thread around ``post_id`` as a reply tree (``replies`` per post).
+
+    Any post in the thread works; that post is marked ``focus``. Deleted posts
+    show as tombstones so their replies keep their place. Very deep replies are
+    shown at nesting level 16 with their true ``parent_id`` and ``depth``.
+    """
+    try:
+        return await get_hub().feed_timeline(scope="thread", post_id=post_id)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_feed_follow(follower: str, followee: str) -> dict[str, Any]:
+    """Follow a handle so its posts show in your ``following`` timeline. Idempotent."""
+    try:
+        return await get_hub().feed_follow(follower, followee)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_feed_unfollow(follower: str, followee: str) -> dict[str, Any]:
+    """Stop following a handle. Idempotent."""
+    try:
+        return await get_hub().feed_unfollow(follower, followee)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 def build_mcp() -> FastMCP:
     """Register the hub tools on a new FastMCP instance."""
     mcp = FastMCP("cat-fleet-chat")
@@ -444,6 +537,13 @@ def build_mcp() -> FastMCP:
         update_webhook,
         delete_webhook,
         test_webhook,
+        fleet_feed_post,
+        fleet_feed_reply,
+        fleet_feed_repost,
+        fleet_feed_timeline,
+        fleet_feed_thread,
+        fleet_feed_follow,
+        fleet_feed_unfollow,
     ):
         mcp.tool(run_in_thread=False)(fn)
     return mcp
