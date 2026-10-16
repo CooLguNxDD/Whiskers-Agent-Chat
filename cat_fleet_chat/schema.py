@@ -12,10 +12,12 @@ from typing import Any
 
 import aiosqlite
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     PrimaryKeyConstraint,
     Table,
@@ -183,6 +185,127 @@ webhooks = Table(
     Column("allow_override", Integer, nullable=False, server_default=text("0")),
 )
 
+# Schema v8. The agent feed. A root post has ``root_id == id`` and depth 0; a
+# reply copies ``root_id`` from its parent and sits one level deeper. A plain
+# repost has an empty body and ``repost_of``; a quote has a body and
+# ``quote_of``. ``deleted_at`` is a soft delete, so a thread keeps its shape.
+feed_posts = Table(
+    "feed_posts",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("author", Text, nullable=False),
+    Column("body", Text, nullable=False, server_default=text("''")),
+    Column("parent_id", Integer, ForeignKey("feed_posts.id")),
+    # Set right after the insert for a root, so it is only briefly null.
+    Column("root_id", Integer),
+    Column("repost_of", Integer, ForeignKey("feed_posts.id")),
+    Column("quote_of", Integer, ForeignKey("feed_posts.id")),
+    Column("depth", Integer, nullable=False, server_default=text("0")),
+    Column("created_at", Text, nullable=False),
+    Column("deleted_at", Text),
+    Index("idx_feed_posts_created", "created_at"),
+    Index("idx_feed_posts_root", "root_id", "id"),
+    Index("idx_feed_posts_parent", "parent_id", "id"),
+    Index("idx_feed_posts_author", "author", "id"),
+    Index("idx_feed_posts_quote", "quote_of"),
+    Index("idx_feed_posts_repost_of", "repost_of"),
+    # One plain repost per author and original. SQLite treats NULLs as
+    # distinct, so posts that are not reposts never collide here.
+    Index("uq_feed_posts_repost", "author", "repost_of", unique=True),
+)
+
+feed_follows = Table(
+    "feed_follows",
+    metadata,
+    Column("follower", Text, nullable=False),
+    Column("followee", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    PrimaryKeyConstraint("follower", "followee"),
+    CheckConstraint("follower <> followee", name="ck_feed_follows_not_self"),
+    Index("idx_feed_follows_followee", "followee", "follower"),
+)
+
+feed_hashtags = Table(
+    "feed_hashtags",
+    metadata,
+    Column("post_id", Integer, ForeignKey("feed_posts.id"), nullable=False),
+    # Lowercased, without the leading "#".
+    Column("tag", Text, nullable=False),
+    PrimaryKeyConstraint("post_id", "tag"),
+    Index("idx_feed_hashtags_tag", "tag", "post_id"),
+)
+
+# Schema v7. Durable per-handle inbox: direct mail from one handle to another.
+# ``read_at`` and ``acked_at`` stay null until the recipient reads or acks.
+# ``message_id`` links a mail to the chat message that produced it, if any.
+mailbox = Table(
+    "mailbox",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("recipient", Text, nullable=False),
+    Column("sender", Text, nullable=False),
+    Column("subject", Text, nullable=False, server_default=text("''")),
+    Column("body", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("read_at", Text),
+    Column("acked_at", Text),
+    Column("reply_to", Integer, ForeignKey("mailbox.id")),
+    Column("message_id", Integer, ForeignKey("messages.id")),
+    Index("idx_mailbox_recipient", "recipient", "id"),
+    Index(
+        "idx_mailbox_unread",
+        "recipient",
+        "id",
+        sqlite_where=text("read_at IS NULL"),
+    ),
+    Index(
+        "idx_mailbox_unacked",
+        "recipient",
+        "id",
+        sqlite_where=text("acked_at IS NULL"),
+    ),
+)
+
+# Schema v9. One float32 vector per indexed row and embedding model (see
+# embed.pack). ``kind`` / ``ref_id`` name a search_index entry, so new kinds
+# need no change here. Vectors are L2-normalised, so cosine is a dot product.
+# ``text_hash`` is the sha256 of the embedded text: a row is embedded again
+# only when it changes. Rows of another model stay put and search ignores them.
+embeddings = Table(
+    "embeddings",
+    metadata,
+    Column("kind", Text, nullable=False),
+    Column("ref_id", Integer, nullable=False),
+    Column("model", Text, nullable=False),
+    Column("dim", Integer, nullable=False),
+    Column("vector", LargeBinary, nullable=False),
+    Column("text_hash", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    PrimaryKeyConstraint("kind", "ref_id", "model"),
+)
+
+# Schema v10. Knowledge facts agents learned. ``norm`` is
+# ``knowledge.normalize_fact(fact)``: the same fact in another case, spacing or
+# trailing punctuation dedupes per project. Only ``active`` facts are searchable.
+knowledge_facts = Table(
+    "knowledge_facts",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("project", Text, nullable=False),
+    Column("topic", Text, nullable=False, server_default=text("'general'")),
+    Column("fact", Text, nullable=False),
+    Column("norm", Text, nullable=False),
+    Column("source_run", Text),
+    Column("source_step", Text),
+    Column("author", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'active'")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Index("uq_knowledge_facts_norm", "project", "norm", unique=True),
+    Index("idx_knowledge_facts_topic", "project", "topic", "id"),
+    Index("idx_knowledge_facts_status", "status", "id"),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (
@@ -198,6 +321,63 @@ ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (
     (webhooks, "directed_only"),
     (webhooks, "discord_channel_id"),
 )
+
+# Schema v6. One FTS5 table over message text, task title + description and
+# attachment filenames. SQLAlchemy cannot declare a virtual table, so the DDL
+# is raw. ``title`` holds the short field (task title, filename) and ``body``
+# the long one, so bm25 can weigh them apart. The other columns are filters.
+#
+# The rowid is derived from the source row: ``ref_id * SEARCH_ROWID_STRIDE +
+# kind code``. Replacing or deleting one entry is then a rowid lookup instead
+# of a scan over the UNINDEXED columns.
+SEARCH_INDEX = "search_index"
+SEARCH_KIND_CODES: dict[str, int] = {"message": 1, "task": 2, "attachment": 3, "knowledge": 4}
+SEARCH_ROWID_STRIDE = 8
+
+SEARCH_INDEX_DDL = (
+    f"CREATE VIRTUAL TABLE IF NOT EXISTS {SEARCH_INDEX} USING fts5("
+    "title, body, kind UNINDEXED, ref_id UNINDEXED, channel_id UNINDEXED, "
+    "author UNINDEXED, created_at UNINDEXED, "
+    "tokenize = 'unicode61 remove_diacritics 2')"
+)
+
+
+# A fact's short field: its project and topic, so either word finds it.
+KNOWLEDGE_TITLE_SQL = "k.project || ' ' || k.topic"
+
+
+def search_rowid(kind: str, ref_id: int) -> int:
+    return int(ref_id) * SEARCH_ROWID_STRIDE + SEARCH_KIND_CODES[kind]
+
+
+def search_backfill_sql() -> list[str]:
+    """Index every message, task, attachment and active fact that has no entry yet. Safe to repeat."""
+    stride = SEARCH_ROWID_STRIDE
+    codes = SEARCH_KIND_CODES
+    columns = f"INSERT INTO {SEARCH_INDEX} (rowid, title, body, kind, ref_id, channel_id, author, created_at) "
+    missing = f"NOT IN (SELECT rowid FROM {SEARCH_INDEX})"
+    message_rowid = f"m.id * {stride} + {codes['message']}"
+    task_rowid = f"t.id * {stride} + {codes['task']}"
+    attachment_rowid = f"a.id * {stride} + {codes['attachment']}"
+    knowledge_rowid = f"k.id * {stride} + {codes['knowledge']}"
+    return [
+        columns
+        + f"SELECT {message_rowid}, '', m.text, 'message', m.id, m.channel_id, m.author, m.created_at "
+        f"FROM messages m WHERE {message_rowid} {missing}",
+        columns
+        + f"SELECT {task_rowid}, t.title, t.description, 'task', t.id, t.channel_id, "
+        "COALESCE(t.assignee, (SELECT e.actor FROM task_events e WHERE e.task_id = t.id "
+        "ORDER BY e.id DESC LIMIT 1), ''), t.created_at "
+        f"FROM tasks t WHERE {task_rowid} {missing}",
+        columns
+        + f"SELECT {attachment_rowid}, a.filename, a.content_type, 'attachment', a.id, "
+        "m.channel_id, m.author, a.created_at "
+        f"FROM attachments a JOIN messages m ON m.id = a.message_id WHERE {attachment_rowid} {missing}",
+        columns
+        + f"SELECT {knowledge_rowid}, {KNOWLEDGE_TITLE_SQL}, k.fact, 'knowledge', k.id, NULL, k.author, "
+        f"k.created_at FROM knowledge_facts k WHERE k.status = 'active' AND {knowledge_rowid} {missing}",
+    ]
+
 
 DIALECT = sqlite.dialect(paramstyle="qmark")
 

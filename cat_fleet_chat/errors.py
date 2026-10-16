@@ -43,3 +43,7 @@ class HubError(Exception):
         if self.details:
             body["details"] = self.details
         return body
+
+
+# What adapters answer for a failure that is not a HubError; never carries the exception text.
+INTERNAL_ERROR = HubError("internal_error", "internal server error", 500)

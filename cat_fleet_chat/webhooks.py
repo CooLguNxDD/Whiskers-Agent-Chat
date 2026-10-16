@@ -49,6 +49,12 @@ def event_actor(event: dict[str, Any]) -> str | None:
     if kind == "task.updated":
         history = payload.get("events") or []
         return history[-1].get("actor") if history else None
+    if kind in {"feed_post", "feed_repost", "knowledge_fact"}:
+        return payload.get("author")
+    if kind == "feed_follow":
+        return payload.get("follower")
+    if kind == "mail":
+        return payload.get("sender")
     return payload.get("actor")
 
 
@@ -64,13 +70,16 @@ def matches(hook: dict[str, Any], event: dict[str, Any]) -> bool:
 
     A message addressed to this hook always matches, whatever its filters say.
     A ``directed_only`` hook matches nothing else. Otherwise an empty filter
-    lets everything through.
+    lets everything through, except ``mail`` notices: a hook gets those only
+    when its ``kinds`` name ``mail``.
     """
     destination = event_destination(event)
     if hook.get("directed_only"):
         return destination == hook["name"]
     if destination is not None and destination == hook["name"]:
         return True
+    if event["kind"] == "mail" and "mail" not in hook["kinds"]:
+        return False
     if hook["kinds"] and event["kind"] not in hook["kinds"]:
         return False
     if hook["channels"] and event.get("channel") not in hook["channels"]:
@@ -146,6 +155,27 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
             f"🚦 channel **#{payload.get('name', channel)}**: "
             f"{payload.get('previous_state')} → {payload.get('state')}{by}{note}"
         )
+    if kind == "feed_post":
+        verb = "replied" if payload.get("parent_id") else "posted"
+        body = _clip(" ".join(str(payload.get("body", "")).split()), QUOTE_CLIP)
+        return f"🐾 `{payload.get('author', '?')}` {verb} on the feed: {body}"
+    if kind == "feed_repost":
+        return (
+            f"🔁 `{payload.get('author', '?')}` reposted "
+            f"`{payload.get('original_author', '?')}` (post {payload.get('repost_of')})"
+        )
+    if kind == "feed_follow":
+        verb = "followed" if payload.get("following") else "unfollowed"
+        return f"👀 `{payload.get('follower', '?')}` {verb} `{payload.get('followee', '?')}`"
+    if kind == "mail":
+        # The event never carries the body; neither does the notice.
+        subject = _clip(str(payload.get("subject") or ""), 120)
+        about = f": {subject}" if subject else ""
+        return f"📬 mail #{payload.get('id')} from `{payload.get('sender', '?')}` to `{payload.get('recipient', '?')}`{about}"
+    if kind == "knowledge_fact":
+        where = f"{payload.get('project', '?')}/{payload.get('topic', '?')}"
+        fact = _clip(" ".join(str(payload.get("fact", "")).split()), QUOTE_CLIP)
+        return f"💡 `{payload.get('author', '?')}` learned ({where}): {fact}"
     if kind == "webhook.ping":
         return f"🔔 Cat Fleet webhook **{payload.get('name')}** is connected"
     return f"{kind} #{event.get('id')}"

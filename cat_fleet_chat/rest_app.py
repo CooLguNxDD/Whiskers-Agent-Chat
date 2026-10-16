@@ -5,17 +5,20 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 from typing import Any
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from cat_fleet_chat.config import Settings, allowed_hostnames, allowed_origins
-from cat_fleet_chat.errors import HubError
+from cat_fleet_chat.errors import INTERNAL_ERROR, HubError
 from cat_fleet_chat.hub import Hub, SSE_BATCH, agent_relevant
 from cat_fleet_chat.validate import channel_name, event_kinds, handle, optional_id
 from cat_fleet_chat.webhooks import sign
+
+logger = logging.getLogger("cat_fleet_chat.rest_app")
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -101,6 +104,12 @@ class Guard:
 
 def _json_error(exc: HubError) -> JSONResponse:
     return JSONResponse(exc.rest_body(), status_code=exc.status)
+
+
+async def internal_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Last-resort handler: unexpected failures answer JSON, not Starlette's plain-text 500."""
+    logger.error("unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(INTERNAL_ERROR.rest_body(), status_code=INTERNAL_ERROR.status)
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -258,12 +267,74 @@ async def wait_for_mentions(request: Request) -> JSONResponse:
             channel=params.get("channel"),
             timeout=params.get("timeout"),
             limit=params.get("limit"),
+            mail_since_id=params.get("mail_since_id"),
         )
         return JSONResponse(result)
     except HubError as exc:
         return _json_error(exc)
     except asyncio.CancelledError:
         raise
+
+
+async def send_mail(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        text = body.get("body")
+        if text in (None, ""):
+            text = body.get("text")
+        result = await _hub(request).send_mail(
+            _author(body, "sender"),
+            body.get("recipient"),
+            text,
+            subject=body.get("subject"),
+            reply_to=body.get("reply_to"),
+            client_request_id=body.get("client_request_id"),
+            message_id=body.get("message_id"),
+        )
+        return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def list_mail(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        result = await _hub(request).list_mail(
+            request.path_params["agent"],
+            state=params.get("state"),
+            since_id=params.get("since_id"),
+            limit=params.get("limit"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def mark_mail_read(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).mark_mail_read(
+            request.path_params["agent"], ids=body.get("ids"), up_to_id=body.get("up_to_id")
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def ack_mail(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).ack_mail(request.path_params["agent"], ids=body.get("ids"))
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def mail_counts(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).mail_counts(request.path_params["agent"]))
+    except HubError as exc:
+        return _json_error(exc)
 
 
 async def list_tasks(request: Request) -> JSONResponse:
@@ -319,6 +390,34 @@ async def update_task_status(request: Request) -> JSONResponse:
             note=body.get("note"),
         )
         return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def search(request: Request) -> JSONResponse:
+    """``GET /api/v1/search``: BM25, vector or hybrid search. ``kind`` may repeat or be a comma list."""
+    try:
+        params = request.query_params
+        kinds = params.getlist("kind")
+        result = await _hub(request).search(
+            params.get("q"),
+            kind=kinds if len(kinds) > 1 else params.get("kind"),
+            channel=params.get("channel"),
+            author=params.get("author"),
+            since=params.get("since"),
+            limit=params.get("limit"),
+            offset=params.get("offset"),
+            mode=params.get("mode"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def search_status(request: Request) -> JSONResponse:
+    """``GET /api/v1/search/status``: embedder provider, model, and how many entries have vectors."""
+    try:
+        return JSONResponse(await _hub(request).embed_status())
     except HubError as exc:
         return _json_error(exc)
 
@@ -410,6 +509,232 @@ async def test_webhook(request: Request) -> JSONResponse:
         if hook["direction"] != "out":
             raise HubError("validation_error", "only outbound webhooks can be tested", 400)
         return JSONResponse(await dispatcher.send_test(hook))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+# ---- feed --------------------------------------------------------------
+
+
+def _caller(request: Request, body: dict[str, Any], field: str) -> Any:
+    """The acting handle: ``field`` or ``agent_name`` in the body, else the same in the query."""
+    found = _author(body, field)
+    if found not in (None, ""):
+        return found
+    params = request.query_params
+    return params.get(field) or params.get("agent_name")
+
+
+async def feed_create_post(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).feed_post(
+            _caller(request, body, "author"),
+            body.get("body"),
+            parent_id=body.get("parent_id"),
+            quote_of=body.get("quote_of"),
+            client_request_id=body.get("client_request_id"),
+        )
+        return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_get_post(request: Request) -> JSONResponse:
+    try:
+        hub = _hub(request)
+        post_id = request.path_params["post_id"]
+        if request.query_params.get("thread", "").lower() in ("1", "true", "yes"):
+            return JSONResponse(
+                await hub.feed_timeline(
+                    scope="thread", post_id=post_id, cursor=request.query_params.get("cursor")
+                )
+            )
+        return JSONResponse(await hub.feed_get_post(post_id))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_delete_post(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        actor = _caller(request, body, "actor")
+        if actor in (None, ""):
+            raise HubError("unauthorized", "actor identity is required to delete a post", 401)
+        result = await _hub(request).feed_delete(actor, request.path_params["post_id"])
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_repost(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).feed_repost(
+            _caller(request, body, "author"), request.path_params["post_id"]
+        )
+        return JSONResponse(result, status_code=200 if result.get("idempotent") else 201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_timeline(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        result = await _hub(request).feed_timeline(
+            scope=params.get("scope") or "global",
+            handle=params.get("handle"),
+            tag=params.get("tag"),
+            author=params.get("author"),
+            post_id=params.get("post_id"),
+            cursor=params.get("cursor"),
+            limit=params.get("limit"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_follow(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        hub = _hub(request)
+        follower = _caller(request, body, "follower")
+        followee = request.path_params["followee"]
+        if request.method.upper() == "DELETE":
+            return JSONResponse(await hub.feed_unfollow(follower, followee))
+        return JSONResponse(await hub.feed_follow(follower, followee))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_following(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).feed_following(request.path_params["handle"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_followers(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).feed_followers(request.path_params["handle"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_trending(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        return JSONResponse(
+            await _hub(request).feed_trending_tags(params.get("limit"), params.get("since"))
+        )
+    except HubError as exc:
+        return _json_error(exc)
+
+
+# ---- knowledge facts ---------------------------------------------------
+
+# 5000 lines of up to 2000-character facts, with JSON overhead.
+KNOWLEDGE_IMPORT_BODY_MAX = 16 * 1024 * 1024
+
+
+async def knowledge_add(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).knowledge_add(
+            body.get("project"),
+            body.get("fact"),
+            topic=body.get("topic"),
+            author=_author(body),
+            source_run=body.get("source_run", body.get("run")),
+            source_step=body.get("source_step", body.get("step")),
+        )
+        return JSONResponse(result, status_code=201 if result["created"] else 200)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_list(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        result = await _hub(request).knowledge_list(
+            project=params.get("project"),
+            topic=params.get("topic"),
+            status=params.get("status"),
+            author=params.get("author"),
+            cursor=params.get("cursor"),
+            limit=params.get("limit"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_set_status(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).knowledge_set_status(
+            _caller(request, body, "actor"), request.path_params["fact_id"], body.get("status")
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_topics(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).knowledge_topics(request.query_params.get("project")))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_import(request: Request) -> JSONResponse:
+    """``POST /api/v1/knowledge/import``: an ``application/x-ndjson`` body, or ``{"lines": [...]}``.
+
+    The importing ``author`` comes from the JSON body or the query string.
+    """
+    try:
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        raw = await _read_capped(request, KNOWLEDGE_IMPORT_BODY_MAX)
+        if content_type in ("application/x-ndjson", "application/jsonl", "application/jsonlines"):
+            try:
+                lines: Any = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise HubError("validation_error", "body must be UTF-8", 400) from exc
+            body: dict[str, Any] = {}
+        else:
+            if not raw and not content_type.startswith("application/json"):
+                body = {}
+            else:
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except Exception as exc:
+                    raise HubError("validation_error", "request body must be JSON", 400) from exc
+                if not isinstance(parsed, dict):
+                    raise HubError("validation_error", "request body must be a JSON object", 400)
+                body = parsed
+            lines = body.get("lines")
+            if lines is not None and (isinstance(lines, bool) or not isinstance(lines, (str, list))):
+                raise HubError(
+                    "validation_error",
+                    "lines must be JSONL text or a list of lines",
+                    400,
+                    {"field": "lines"},
+                )
+        result = await _hub(request).knowledge_import_jsonl(lines, _caller(request, body, "author"))
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def knowledge_export(request: Request) -> Response:
+    """``GET /api/v1/knowledge/export``: facts streamed in chunks as ``application/x-ndjson``."""
+    try:
+        params = request.query_params
+        chunks = await _hub(request).knowledge_export_chunks(
+            project=params.get("project"), status=params.get("status") or "active"
+        )
+        return StreamingResponse(chunks, media_type="application/x-ndjson")
     except HubError as exc:
         return _json_error(exc)
 
@@ -546,10 +871,17 @@ def api_routes() -> list[Route]:
         Route("/api/v1/messages", list_messages, methods=["GET"]),
         Route("/api/v1/messages", post_message, methods=["POST"]),
         Route("/api/v1/wait", wait_for_mentions, methods=["GET"]),
+        Route("/api/v1/mailbox", send_mail, methods=["POST"]),
+        Route("/api/v1/mailbox/{agent}", list_mail, methods=["GET"]),
+        Route("/api/v1/mailbox/{agent}/read", mark_mail_read, methods=["POST"]),
+        Route("/api/v1/mailbox/{agent}/ack", ack_mail, methods=["POST"]),
+        Route("/api/v1/mailbox/{agent}/counts", mail_counts, methods=["GET"]),
         Route("/api/v1/tasks", list_tasks, methods=["GET"]),
         Route("/api/v1/tasks", create_task, methods=["POST"]),
         Route("/api/v1/tasks/{task_id:int}/claim", claim_task, methods=["POST"]),
         Route("/api/v1/tasks/{task_id:int}/status", update_task_status, methods=["POST"]),
+        Route("/api/v1/search", search, methods=["GET"]),
+        Route("/api/v1/search/status", search_status, methods=["GET"]),
         Route("/api/v1/agents", list_agents, methods=["GET"]),
         Route("/api/v1/events", events, methods=["GET"]),
         Route("/api/v1/destinations", list_destinations, methods=["GET"]),
@@ -560,6 +892,21 @@ def api_routes() -> list[Route]:
         Route("/api/v1/webhooks/{hook_id:int}", delete_webhook, methods=["DELETE"]),
         Route("/api/v1/webhooks/{hook_id:int}/test", test_webhook, methods=["POST"]),
         Route("/api/v1/webhooks/{hook_id:int}/rotate-secret", rotate_webhook_secret, methods=["POST"]),
+        Route("/api/v1/feed/posts", feed_create_post, methods=["POST"]),
+        Route("/api/v1/feed/posts/{post_id:int}", feed_get_post, methods=["GET"]),
+        Route("/api/v1/feed/posts/{post_id:int}", feed_delete_post, methods=["DELETE"]),
+        Route("/api/v1/feed/posts/{post_id:int}/repost", feed_repost, methods=["POST"]),
+        Route("/api/v1/feed/timeline", feed_timeline, methods=["GET"]),
+        Route("/api/v1/feed/follows/{followee}", feed_follow, methods=["PUT", "DELETE"]),
+        Route("/api/v1/feed/follows/{handle}", feed_following, methods=["GET"]),
+        Route("/api/v1/feed/followers/{handle}", feed_followers, methods=["GET"]),
+        Route("/api/v1/feed/tags/trending", feed_trending, methods=["GET"]),
+        Route("/api/v1/knowledge/facts", knowledge_add, methods=["POST"]),
+        Route("/api/v1/knowledge/facts", knowledge_list, methods=["GET"]),
+        Route("/api/v1/knowledge/facts/{fact_id:int}", knowledge_set_status, methods=["PATCH"]),
+        Route("/api/v1/knowledge/topics", knowledge_topics, methods=["GET"]),
+        Route("/api/v1/knowledge/import", knowledge_import, methods=["POST"]),
+        Route("/api/v1/knowledge/export", knowledge_export, methods=["GET"]),
     ]
 
 

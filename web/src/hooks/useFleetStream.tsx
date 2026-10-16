@@ -1,7 +1,7 @@
 import { createEffect, createSignal, onCleanup, type ParentProps } from "solid-js"
 import { useQueryClient } from "@tanstack/solid-query"
 import { openEventStream, createSseParser } from "@/api/stream"
-import { EventRefresh } from "@/api/eventRefresh"
+import { EventRefresh, REFRESH_KEYS } from "@/api/eventRefresh"
 import { refreshMessageWindows } from "./messageRefresh"
 import { useSession } from "@/store"
 
@@ -66,7 +66,8 @@ export function FleetStreamProvider(props: ParentProps) {
         setAttempt(0)
         attemptNumber = 0
         refreshMessageWindows()
-        for (const key of ["channels", "tasks", "agents"]) {
+        for (const key of REFRESH_KEYS) {
+          if (key === "messages") continue
           void queryClient.invalidateQueries({ queryKey: [key] })
         }
         reader = response.body.getReader()

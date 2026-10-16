@@ -31,6 +31,20 @@ export default function MessageStream(props: MessageStreamProps) {
     virtualizer.setOptions({ ...virtualizer.options, count: window.messages().length })
   })
 
+  // Opening a search hit: load history around the message, scroll to it and mark it.
+  const [marked, setMarked] = createSignal<number | null>(null)
+  createEffect(() => {
+    const target = ui.focusMessageId()
+    if (target == null) return
+    setAtLatest(false)
+    void window.jumpTo(target).then((found) => {
+      if (ui.focusMessageId() !== target) return
+      setMarked(found ? target : null)
+      const index = window.messages().findIndex((message) => message.id === target)
+      if (index >= 0) queueMicrotask(() => virtualizer.scrollToIndex(index, { align: "center" }))
+    })
+  })
+
   createEffect(() => {
     const count = window.messages().length
     if (!count || !atLatest() || !scroller) return
@@ -90,6 +104,8 @@ export default function MessageStream(props: MessageStreamProps) {
                 ref={(element) => virtualizer.measureElement(element)}
                 data-index={virtualRow.index}
                 class="absolute left-0 top-0 w-full"
+                classList={{ "rounded-lg ring-1 ring-brass": message()?.id != null && message()?.id === marked() }}
+                aria-current={message()?.id === marked() ? "true" : undefined}
                 style={{ transform: `translateY(${virtualRow.start}px)` }}
               >
                 <Show when={message()}>

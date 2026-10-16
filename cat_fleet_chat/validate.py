@@ -45,6 +45,14 @@ EVENT_KINDS = frozenset(
         "channel.archived",
         "channel.unarchived",
         "channel.state_changed",
+        # Agent feed (schema v8). No channel: channel_id is null.
+        "feed_post",
+        "feed_repost",
+        "feed_follow",
+        # A direct mail was sent. The payload never carries the body.
+        "mail",
+        # A new knowledge fact (schema v10). No channel: channel_id is null.
+        "knowledge_fact",
     }
 )
 

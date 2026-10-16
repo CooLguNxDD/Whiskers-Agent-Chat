@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import store
+from cat_fleet_chat import embed, feed, knowledge, mailbox, store, validate
+from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
     TERMINAL_STATUSES,
@@ -46,6 +48,8 @@ from cat_fleet_chat.validate import (
     webhook_patterns,
     webhook_url,
 )
+from cat_fleet_chat.validate import client_request_id as client_request_id_fn
+from cat_fleet_chat.validate import handle as validate_handle
 from cat_fleet_chat.waiters import WaitHub
 
 logger = logging.getLogger("cat_fleet_chat.hub")
@@ -81,12 +85,15 @@ def agent_relevant(event: dict[str, Any], agent: str | None) -> bool:
     """Whether ``event`` should notify ``agent``. No agent means every event.
 
     Mentions and task assignments go to that agent, never for its own action.
+    Mail goes to its recipient, including mail an agent sent itself.
     Channel lifecycle events are broadcast.
     """
     if agent is None:
         return True
     kind = event["kind"]
     payload = event.get("payload") or {}
+    if kind == "mail":
+        return payload.get("recipient") == agent
     if kind == "message.created":
         return agent in (payload.get("mentions") or []) and payload.get("author") != agent
     if kind == "task.updated":
@@ -104,6 +111,16 @@ class Hub:
         # Looks up which Discord channel a webhook URL posts to. The app wires
         # in the dispatcher; the hub itself makes no HTTP calls.
         self.discord_resolver: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None
+        # Awaited after a new feed post commits, with the post result. See feed_post.
+        self.feed_post_hooks: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
+        # Optional embeddings. The app swaps in the configured provider and
+        # starts the queue; without them vector and hybrid search answer
+        # not_available and nothing else changes.
+        self.embedder: embed.Embedder = embed.NullEmbedder()
+        self.embed_queue: embed.EmbedQueue | None = None
+        # Index entries touched by the running write transaction. They go to
+        # the embed queue only after the commit, so it never reads stale text.
+        self._reindexed: list[tuple[str, int]] = []
 
     async def _write(self, fn):
         result = await self.db.write(fn)
@@ -119,13 +136,18 @@ class Hub:
         """
 
         async def op(conn):
+            self._reindexed = []
             await conn.execute("BEGIN IMMEDIATE")
             try:
                 result = await fn(conn)
             except BaseException:
+                self._reindexed = []
                 await conn.rollback()
                 raise
             await conn.commit()
+            touched, self._reindexed = self._reindexed, []
+            if touched and self.embed_queue is not None:
+                self.embed_queue.mark(touched)
             return result
 
         return await self._write(op)
@@ -135,6 +157,27 @@ class Hub:
         channel = await store.get_channel_by_id(conn, task["channel_id"])
         if channel is not None:
             _require_writable(channel)
+
+    async def _index(self, conn, kind: str, ref_id: int) -> None:
+        """Refresh the search entry for one row, inside the caller's write transaction."""
+        if not self.db.fts5_available:
+            return
+        if kind == "message":
+            await store.index_message(conn, ref_id)
+        else:
+            await store.reindex(conn, kind, ref_id)
+        if self.embed_queue is not None:
+            # Attachments of a message are re-embedded when their own entry
+            # changes; the missing-vector scan picks up new ones.
+            self._reindexed.append((kind, ref_id))
+
+    async def _index_knowledge_batch(self, conn, fact_ids: list[int]) -> None:
+        """Refresh search index entries for multiple knowledge facts in one write transaction."""
+        if not fact_ids or not self.db.fts5_available:
+            return
+        await store.index_knowledge_batch(conn, fact_ids)
+        if self.embed_queue is not None:
+            self._reindexed.extend(("knowledge", fid) for fid in fact_ids)
 
     async def list_channels(
         self, include_archived: Any = False, state: Any = None
@@ -241,6 +284,7 @@ class Hub:
                 await store.insert_task_event(
                     conn, task["id"], actor, task["status"], "cancelled", reason, created_at
                 )
+                await self._index(conn, "task", task["id"])
                 fresh_task = await store.get_task(conn, task["id"])
                 await store.insert_event(
                     conn, "task.updated", found["id"], task["id"], fresh_task, created_at
@@ -423,6 +467,7 @@ class Hub:
                 destination=destination,
                 origin=clean_origin,
             )
+            await self._index(conn, "message", message_id)
             message = await store.get_message(conn, message_id)
             assert message is not None
             await store.insert_event(
@@ -570,6 +615,32 @@ class Hub:
             "channel": channel,
         }
 
+    async def read_mail_after(
+        self, agent: str, since_id: int, limit: int, *, with_unread: bool = True
+    ) -> dict[str, Any]:
+        """Mail for ``agent`` after the mail cursor, plus the unread count. For wait responses.
+
+        ``with_unread=False`` leaves ``mail_unread`` out: the wait loop checks
+        on every wake and needs the count only once, when it answers.
+        """
+
+        async def op(conn):
+            found, has_more = await store.list_mail(
+                conn, agent, state="all", since_id=since_id, limit=limit
+            )
+            unread = await store.count_unread_mail(conn, agent) if with_unread else None
+            return found, has_more, unread
+
+        found, has_more, unread = await self.db.read(op)
+        page: dict[str, Any] = {
+            "mail": found,
+            "mail_cursor": found[-1]["id"] if found else since_id,
+            "mail_has_more": has_more,
+        }
+        if unread is not None:
+            page["mail_unread"] = unread
+        return page
+
     async def wait_for_mentions(
         self,
         agent: Any,
@@ -578,13 +649,20 @@ class Hub:
         channel: Any = None,
         timeout: Any = None,
         limit: Any = None,
+        mail_since_id: Any = None,
     ) -> dict[str, Any]:
-        """Park until ``agent`` is mentioned after ``since_id``, or the deadline.
+        """Park until ``agent`` is mentioned after ``since_id`` or gets mail, or the deadline.
 
         The condition lock is held across the empty check and the sleep. A
         commit that happens in between blocks on the same lock, then notifies,
         so the wake cannot be lost. The deadline is monotonic and is not
         extended by unrelated notifications. Cancellation leaves the waiter.
+
+        Mail after ``mail_since_id`` wakes the waiter too; send back the
+        returned ``mail_cursor``. Without ``mail_since_id`` only mail that
+        arrives during this call wakes it, so a caller that never reads its
+        mail is not woken again and again by the same unread mail.
+        ``mail_unread`` always says how much is waiting.
         """
         import asyncio
         import time
@@ -594,29 +672,224 @@ class Hub:
         clean_channel = channel_name(channel) if channel not in (None, "") else None
         seconds = clamp_timeout(timeout)
         clean_limit = page_limit(limit)
+        explicit_mail = optional_id(mail_since_id, "mail_since_id")
         deadline = time.monotonic() + seconds
 
+        async def check() -> dict[str, Any]:
+            page = await self.read_mentions(
+                clean_agent, cursor, channel=clean_channel, limit=clean_limit
+            )
+            page.update(
+                await self.read_mail_after(clean_agent, mail_cursor, clean_limit, with_unread=False)
+            )
+            return page
+
+        async def answer(page: dict[str, Any]) -> dict[str, Any]:
+            page["mail_unread"] = await self.db.read(
+                lambda conn: store.count_unread_mail(conn, clean_agent)
+            )
+            return page
+
         async with self.waiters.condition:
-            while True:
-                page = await self.read_mentions(
-                    clean_agent, cursor, channel=clean_channel, limit=clean_limit
+            # Taken under the lock: mail committed after this point notifies us.
+            if explicit_mail is not None:
+                mail_cursor = explicit_mail
+            else:
+                mail_cursor = await self.db.read(
+                    lambda conn: store.max_mail_id(conn, clean_agent)
                 )
-                if page["messages"]:
-                    return page
+            while True:
+                page = await check()
+                if page["messages"] or page["mail"]:
+                    return await answer(page)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    final = await self.read_mentions(
-                        clean_agent, cursor, channel=clean_channel, limit=clean_limit
-                    )
-                    if final["messages"]:
-                        return final
-                    final["timed_out"] = True
-                    final["cursor"] = cursor
-                    return final
+                    # The check above found nothing, and a commit after it
+                    # would have waited on this lock; answer with the cursors
+                    # we hold instead of reading everything again.
+                    page["timed_out"] = True
+                    page["cursor"] = cursor
+                    page["mail_cursor"] = mail_cursor
+                    return await answer(page)
                 try:
                     await asyncio.wait_for(self.waiters.condition.wait(), remaining)
                 except asyncio.TimeoutError:
                     continue
+
+    # ---- mailbox --------------------------------------------------------
+
+    async def send_mail(
+        self,
+        sender: Any,
+        recipient: Any,
+        body: Any,
+        subject: Any = None,
+        reply_to: Any = None,
+        client_request_id: Any = None,
+        message_id: Any = None,
+    ) -> dict[str, Any]:
+        """Send a direct mail. Any valid handle may receive it, the sender included.
+
+        ``reply_to`` must be a mail the sender sent or received. ``message_id``
+        optionally links the mail to the chat message that prompted it.
+        ``client_request_id`` makes a retry return the original mail. The
+        ``mail`` event carries ids, sender and subject, never the body.
+        """
+        clean_sender = mailbox.sender(sender)
+        clean_recipient = mailbox.recipient(recipient)
+        clean_body = mailbox.body(body)
+        clean_subject = mailbox.subject(subject)
+        parent_id = mailbox.reply_to(reply_to)
+        linked_message = mailbox.message_id(message_id)
+        # The parameter shadows validate.client_request_id here.
+        key = validate.client_request_id(client_request_id)
+        payload = {
+            "sender": clean_sender,
+            "recipient": clean_recipient,
+            "subject": clean_subject,
+            "body": clean_body,
+            "reply_to": parent_id,
+        }
+        # Omitted when unset so retries of mail stored before message_id existed still match.
+        if linked_message is not None:
+            payload["message_id"] = linked_message
+        digest = fingerprint("mail", payload) if key else None
+
+        async def op(conn):
+            if key and digest is not None:
+                prior = await store.get_idempotency(conn, key)
+                if prior is not None:
+                    if prior["fingerprint"] != digest or prior["kind"] != "mail":
+                        raise HubError(
+                            "idempotency_conflict",
+                            "client_request_id was already used with a different payload",
+                            409,
+                            {"client_request_id": key},
+                        )
+                    return prior["result"]
+            if parent_id is not None:
+                parent = await store.get_mail(conn, parent_id)
+                if parent is None or clean_sender not in (parent["sender"], parent["recipient"]):
+                    raise HubError(
+                        "validation_error",
+                        "reply_to must be a mail you sent or received",
+                        400,
+                        {"field": "reply_to"},
+                    )
+            if linked_message is not None and await store.get_message(conn, linked_message) is None:
+                raise HubError(
+                    "validation_error",
+                    "message_id must be an existing chat message",
+                    400,
+                    {"field": "message_id"},
+                )
+            created_at = utc_now()
+            mail_id = await store.insert_mail(
+                conn,
+                recipient=clean_recipient,
+                sender=clean_sender,
+                subject=clean_subject,
+                body=clean_body,
+                reply_to=parent_id,
+                created_at=created_at,
+                message_id=linked_message,
+            )
+            mail = await store.get_mail(conn, mail_id)
+            assert mail is not None
+            await store.insert_event(
+                conn, "mail", None, mail_id, mailbox.event_payload(mail), created_at
+            )
+            result = {"mail": mail}
+            if key and digest is not None:
+                await store.insert_idempotency(conn, key, "mail", digest, result, created_at)
+            return result
+
+        return await self._txn(op)
+
+    async def list_mail(
+        self,
+        agent: Any,
+        *,
+        state: Any = "unread",
+        since_id: Any = 0,
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        """``agent``'s mail after ``since_id``, oldest first. Page with the returned ``cursor``."""
+        clean_agent = handle(agent, "agent")
+        clean_state = mailbox.state(state)
+        since = optional_id(since_id, "since_id") or 0
+        clean_limit = page_limit(limit)
+
+        async def op(conn):
+            return await store.list_mail(
+                conn, clean_agent, state=clean_state, since_id=since, limit=clean_limit
+            )
+
+        found, has_more = await self.db.read(op)
+        return {
+            "mail": found,
+            "cursor": found[-1]["id"] if found else since,
+            "has_more": has_more,
+            "agent": clean_agent,
+            "state": clean_state,
+        }
+
+    async def mail_counts(self, agent: Any) -> dict[str, Any]:
+        clean_agent = handle(agent, "agent")
+
+        async def op(conn):
+            return await store.mail_counts(conn, clean_agent)
+
+        return {"agent": clean_agent, **await self.db.read(op)}
+
+    @staticmethod
+    async def _require_own_mail(conn, agent: str, ids: list[int]) -> None:
+        """Every id must exist and be addressed to ``agent``."""
+        owners = await store.get_mail_owners(conn, ids)
+        missing = [mail_id for mail_id in ids if mail_id not in owners]
+        if missing:
+            raise HubError("not_found", "mail not found", 404, {"ids": missing})
+        foreign = [mail_id for mail_id in ids if owners[mail_id] != agent]
+        if foreign:
+            raise HubError(
+                "forbidden", "only the recipient may read or ack a mail", 403, {"ids": foreign}
+            )
+
+    async def mark_mail_read(
+        self, agent: Any, ids: Any = None, up_to_id: Any = None
+    ) -> dict[str, Any]:
+        """Mark ``ids``, or all of ``agent``'s mail up to ``up_to_id``, read. Repeating is a no-op."""
+        clean_agent = handle(agent, "agent")
+        clean_ids = mailbox.ids(ids) if ids not in (None, "", []) else None
+        up_to = optional_id(up_to_id, "up_to_id")
+        if (clean_ids is None) == (up_to is None):
+            raise HubError(
+                "validation_error", "send exactly one of ids or up_to_id", 400, {"field": "ids"}
+            )
+
+        async def op(conn):
+            if clean_ids is not None:
+                await self._require_own_mail(conn, clean_agent, clean_ids)
+            changed = await store.mark_mail_read(
+                conn, clean_agent, mail_ids=clean_ids, up_to_id=up_to, read_at=utc_now()
+            )
+            counts = await store.mail_counts(conn, clean_agent)
+            return {"agent": clean_agent, "updated": changed, **counts}
+
+        return await self._txn(op)
+
+    async def ack_mail(self, agent: Any, ids: Any = None) -> dict[str, Any]:
+        """Acknowledge ``ids``. Ack implies read. Repeating is a no-op."""
+        clean_agent = handle(agent, "agent")
+        clean_ids = mailbox.ids(ids)
+
+        async def op(conn):
+            await self._require_own_mail(conn, clean_agent, clean_ids)
+            changed = await store.ack_mail(conn, clean_agent, clean_ids, utc_now())
+            counts = await store.mail_counts(conn, clean_agent)
+            return {"agent": clean_agent, "updated": changed, **counts}
+
+        return await self._txn(op)
 
     async def create_task(
         self,
@@ -675,6 +948,7 @@ class Hub:
             await store.insert_task_event(
                 conn, task_id, clean_actor, None, status, "", created_at
             )
+            await self._index(conn, "task", task_id)
             task = await store.get_task(conn, task_id)
             assert task is not None
             await store.insert_event(
@@ -733,6 +1007,7 @@ class Hub:
             await store.insert_task_event(
                 conn, clean_id, clean_actor, "open", "claimed", "", created_at
             )
+            await self._index(conn, "task", clean_id)
             task = await store.get_task(conn, clean_id)
             assert task is not None
             await store.insert_event(
@@ -805,6 +1080,7 @@ class Hub:
                 clean_note,
                 created_at,
             )
+            await self._index(conn, "task", clean_id)
             task = await store.get_task(conn, clean_id)
             assert task is not None
             await store.insert_event(
@@ -840,6 +1116,200 @@ class Hub:
         tasks = await self.db.read(op)
         return {"tasks": tasks}
 
+    async def search(
+        self,
+        q: Any,
+        *,
+        kind: Any = None,
+        channel: Any = None,
+        author: Any = None,
+        since: Any = None,
+        limit: Any = None,
+        offset: Any = None,
+        mode: Any = None,
+    ) -> dict[str, Any]:
+        """Search over messages, tasks, attachment filenames and active knowledge facts.
+
+        ``bm25`` (default) is full-text search. ``vector`` ranks by cosine
+        similarity to the embedded query, ``hybrid`` fuses both with
+        reciprocal rank fusion; both need an embedder and otherwise answer
+        ``not_available``. Archived channels are searched too. A query with
+        no searchable words returns no results rather than an error.
+        """
+        clean_mode = search_rules.search_mode(mode, self._search_modes())
+        text = search_rules.query_text(q)
+        kinds = search_rules.search_kinds(kind)
+        clean_channel = channel_name(channel) if channel not in (None, "") else None
+        clean_author = handle(author, "author") if author not in (None, "") else None
+        clean_since = search_rules.search_since(since)
+        clean_limit = search_rules.search_limit(limit)
+        clean_offset = search_rules.search_offset(offset)
+        if not self.db.fts5_available:
+            raise HubError(
+                "search_unavailable",
+                "full-text search needs SQLite with FTS5, which this build lacks",
+                501,
+            )
+        match = search_rules.build_match(text)
+
+        async def op(conn, limit=clean_limit, offset=clean_offset):
+            channel_id = None
+            if clean_channel is not None:
+                found = await store.get_channel_by_name(conn, clean_channel)
+                if found is None:
+                    raise HubError("not_found", f"channel {clean_channel} not found", 404)
+                channel_id = found["id"]
+            if match is None:
+                return [], 0
+            return await store.search_index(
+                conn,
+                match,
+                kinds=kinds,
+                channel_id=channel_id,
+                author=clean_author,
+                since=clean_since,
+                limit=limit,
+                offset=offset,
+                weights=search_rules.BM25_WEIGHTS,
+                snippet_markers=search_rules.SNIPPET_MARKERS,
+                snippet_tokens=search_rules.SNIPPET_TOKENS,
+            )
+
+        if clean_mode == "bm25":
+            rows, total = await self.db.read(op)
+            return search_rules.shape_results(
+                rows, total, limit=clean_limit, offset=clean_offset, mode=clean_mode
+            )
+
+        filters = {"kinds": kinds, "channel": clean_channel, "author": clean_author, "since": clean_since}
+        if clean_mode == "vector":
+            if not text.strip():
+                return search_rules.empty_results(limit=clean_limit, offset=clean_offset, mode="vector")
+            query_vec = await self._embed_query(text, degrade=False)
+            scored, total = await self._vector_rank(query_vec, clean_offset + clean_limit, filters)
+            page = scored[clean_offset : clean_offset + clean_limit]
+            hits = [search_rules.shape_vector_hit(row, value) for value, row in page]
+            return search_rules.shape_scored(
+                hits, total, limit=clean_limit, offset=clean_offset, mode="vector"
+            )
+
+        # hybrid
+        query_vec = await self._embed_query(text, degrade=True) if text.strip() else None
+        if query_vec is None and text.strip():
+            rows, total = await self.db.read(op)
+            result = search_rules.shape_results(
+                rows, total, limit=clean_limit, offset=clean_offset, mode="hybrid"
+            )
+            result["degraded"] = "bm25"
+            return result
+        pool = search_rules.fusion_pool(clean_limit)
+        bm25_rows, _ = await self.db.read(lambda conn: op(conn, limit=pool, offset=0))
+        vector_scored: list[tuple[float, dict[str, Any]]] = []
+        if query_vec is not None:
+            vector_scored, _ = await self._vector_rank(query_vec, pool, filters)
+        by_key: dict[tuple[str, int], dict[str, Any]] = {}
+        for _, row in vector_scored:
+            by_key[(row["kind"], int(row["ref_id"]))] = row
+        for row in bm25_rows:
+            # BM25 rows win: their snippet carries the match highlight.
+            by_key[(row["kind"], int(row["ref_id"]))] = row
+        fused = search_rules.rrf_fuse(
+            [
+                [(row["kind"], int(row["ref_id"])) for row in bm25_rows],
+                [(row["kind"], int(row["ref_id"])) for _, row in vector_scored],
+            ]
+        )
+        page = fused[clean_offset : clean_offset + clean_limit]
+        hits = [search_rules.shape_vector_hit(by_key[key], value) for key, value in page]
+        # Paging stops at the end of the fused pool, so it never points at empty pages.
+        total = len(fused)
+        return search_rules.shape_scored(
+            hits, total, limit=clean_limit, offset=clean_offset, mode="hybrid"
+        )
+
+    def _search_modes(self) -> frozenset[str]:
+        if self.embedder.enabled:
+            return frozenset(search_rules.SEARCH_MODES)
+        return search_rules.AVAILABLE_MODES
+
+    async def _embed_query(self, text: str, *, degrade: bool) -> list[float] | None:
+        """The unit query vector. On failure: ``None`` when ``degrade``, else ``embedder_unavailable``."""
+        timeout = min(self.embedder.timeout or search_rules.QUERY_EMBED_TIMEOUT, search_rules.QUERY_EMBED_TIMEOUT)
+        try:
+            vectors = await asyncio.wait_for(self.embedder.embed([text[: embed.EMBED_TEXT_MAX]]), timeout)
+            if len(vectors) != 1 or not vectors[0]:
+                raise embed.EmbedderError("embedder returned no vector for the query")
+            return embed.normalize(vectors[0])
+        except Exception as exc:  # noqa: BLE001 — any provider failure maps to one clear error
+            reason = embed.safe_error(exc)
+            logger.warning("query embedding failed (%s)", reason)
+            if degrade:
+                return None
+            raise HubError(
+                "embedder_unavailable",
+                f"the embedder could not embed the query ({reason}); try mode=bm25",
+                503,
+                {"provider": self.embedder.provider, "model": self.embedder.name, "reason": reason},
+            ) from None
+
+    async def _vector_rank(
+        self, query_vec: list[float], k: int, filters: dict[str, Any]
+    ) -> tuple[list[tuple[float, dict[str, Any]]], int]:
+        """The ``k`` entries most similar to ``query_vec`` that pass ``filters``, plus how many were scored.
+
+        At most :data:`search.VECTOR_SCAN_MAX` of the newest entries are scored.
+        """
+        model = self.embedder.name
+        dim = len(query_vec)
+
+        async def op(conn):
+            channel_id = None
+            if filters["channel"] is not None:
+                found = await store.get_channel_by_name(conn, filters["channel"])
+                if found is None:
+                    raise HubError("not_found", f"channel {filters['channel']} not found", 404)
+                channel_id = found["id"]
+            count = 0
+            scored = []
+            async for row in store.vector_candidates(
+                conn,
+                model,
+                dim,
+                kinds=filters["kinds"],
+                channel_id=channel_id,
+                author=filters["author"],
+                since=filters["since"],
+                scan_limit=search_rules.VECTOR_SCAN_MAX,
+            ):
+                count += 1
+                scored.append((embed.dot(query_vec, embed.unpack(row["vector"])), row))
+                if len(scored) >= 4 * k + 256:
+                    scored = search_rules.top_k(scored, k)
+            best = search_rules.top_k(scored, k)
+            out = [(value, dict(row)) for value, row in best]
+            await store.attach_knowledge_meta(conn, [row for _, row in out])
+            return out, count
+
+        return await self.db.read(op)
+
+    async def embed_status(self) -> dict[str, Any]:
+        """Embedder and queue state: ``{provider, model, dim, indexed, pending, last_error}``."""
+        embedder = self.embedder
+        queue = self.embed_queue
+        counts = {"indexed": 0, "pending": 0}
+        if embedder.enabled and self.db.fts5_available:
+            counts = await self.db.read(
+                lambda conn: store.embed_counts(conn, embedder.name, embedder.dim)
+            )
+        return {
+            "provider": embedder.provider,
+            "model": embedder.name or None,
+            "dim": embedder.dim,
+            "indexed": counts["indexed"],
+            "pending": counts["pending"],
+            "last_error": queue.last_error if queue is not None else None,
+        }
+
     async def get_attachment(self, attachment_id: Any) -> dict[str, Any]:
         clean_id = require_id(attachment_id, "attachment_id")
 
@@ -851,7 +1321,701 @@ class Hub:
             raise HubError("not_found", f"attachment {clean_id} not found", 404)
         return {"attachment": found}
 
+    # ---- feed -----------------------------------------------------------
+
+    async def _shape_feed(self, conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """API shapes for feed rows, with counts, hashtags and the one-level inline original."""
+        if not rows:
+            return []
+        targets = {
+            target
+            for row in rows
+            if (target := row.get("repost_of") or row.get("quote_of")) is not None
+        }
+        originals = await store.feed_rows(conn, targets)
+        ids = [row["id"] for row in rows] + list(originals)
+        counts = await store.feed_counts(conn, ids)
+        tags = await store.feed_tags_for(conn, ids)
+        inline: dict[int, dict[str, Any]] = {}
+        for target in targets:
+            found = originals.get(target)
+            if found is None or found["deleted_at"] is not None:
+                inline[target] = feed.tombstone_original(target)
+            else:
+                inline[target] = feed.shape_post(
+                    found, counts=counts.get(target), hashtags=tags.get(target)
+                )
+        return [
+            feed.shape_post(
+                row,
+                counts=counts.get(row["id"]),
+                hashtags=tags.get(row["id"]),
+                original=inline.get(row.get("repost_of") or row.get("quote_of")),
+            )
+            for row in rows
+        ]
+
+    async def _feed_post_shape(self, conn, post_id: int) -> dict[str, Any]:
+        row = await store.get_feed_row(conn, post_id)
+        assert row is not None
+        return (await self._shape_feed(conn, [row]))[0]
+
+    @staticmethod
+    async def _live_original(conn, post_id: int, field: str) -> dict[str, Any]:
+        """The post a repost or quote points at. A repost resolves to what it reposted."""
+        found = await store.get_feed_row(conn, post_id)
+        if found is not None and found["repost_of"] is not None:
+            found = await store.get_feed_row(conn, found["repost_of"])
+        if found is None:
+            raise HubError("not_found", f"post {post_id} not found", 404, {"field": field})
+        if found["deleted_at"] is not None:
+            raise HubError("post_deleted", f"post {found['id']} was deleted", 409, {"field": field})
+        return found
+
+    async def feed_post(
+        self,
+        author: Any,
+        body: Any,
+        parent_id: Any = None,
+        quote_of: Any = None,
+        client_request_id: Any = None,
+    ) -> dict[str, Any]:
+        """Post to the feed. ``parent_id`` makes it a reply, ``quote_of`` a quote.
+
+        A reply inherits ``root_id`` from its parent and sits one level deeper,
+        at most ``feed.DEPTH_MAX``. The parent must exist and not be deleted.
+        ``client_request_id`` makes a retry return the first result.
+
+        After the commit, every callable in ``self.feed_post_hooks`` is awaited
+        with the result, for new posts only (not idempotent replays). This is
+        the extension point for later features (knowledge facts); a failing
+        hook is logged and never undoes or fails the post.
+        """
+        clean_author = handle(author, "author")
+        clean_body = feed.normalize_body(body)
+        parent = optional_id(parent_id, "parent_id") or None
+        quoted = optional_id(quote_of, "quote_of") or None
+        key = client_request_id_fn(client_request_id)
+        payload = {"author": clean_author, "body": clean_body, "parent_id": parent, "quote_of": quoted}
+        digest = fingerprint("feed_post", payload) if key else None
+        tags = feed.extract_hashtags(clean_body)
+
+        async def op(conn):
+            if key and digest is not None:
+                prior = await store.get_idempotency(conn, key)
+                if prior is not None:
+                    if prior["fingerprint"] != digest or prior["kind"] != "feed_post":
+                        raise HubError(
+                            "idempotency_conflict",
+                            "client_request_id was already used with a different payload",
+                            409,
+                            {"client_request_id": key},
+                        )
+                    return prior["result"], False
+            root_id: int | None = None
+            depth = 0
+            if parent is not None:
+                found = await store.get_feed_row(conn, parent)
+                if found is None:
+                    raise HubError("not_found", f"post {parent} not found", 404, {"field": "parent_id"})
+                if found["deleted_at"] is not None:
+                    raise HubError(
+                        "post_deleted", f"post {parent} was deleted", 409, {"field": "parent_id"}
+                    )
+                depth = int(found["depth"]) + 1
+                if depth > feed.DEPTH_MAX:
+                    raise HubError(
+                        "thread_too_deep",
+                        f"replies nest at most {feed.DEPTH_MAX} levels deep",
+                        409,
+                        {"field": "parent_id", "max_depth": feed.DEPTH_MAX},
+                    )
+                root_id = int(found["root_id"])
+            quote_target = None
+            if quoted is not None:
+                quote_target = (await self._live_original(conn, quoted, "quote_of"))["id"]
+            created_at = utc_now()
+            post_id = await store.insert_feed_post(
+                conn,
+                author=clean_author,
+                body=clean_body,
+                parent_id=parent,
+                root_id=root_id,
+                repost_of=None,
+                quote_of=quote_target,
+                depth=depth,
+                created_at=created_at,
+                tags=tags,
+            )
+            post = await self._feed_post_shape(conn, post_id)
+            await store.insert_event(
+                conn,
+                "feed_post",
+                None,
+                post_id,
+                {
+                    "id": post_id,
+                    "kind": post["kind"],
+                    "author": clean_author,
+                    "parent_id": parent,
+                    "root_id": post["root_id"],
+                    "quote_of": quote_target,
+                    "depth": depth,
+                    "hashtags": tags,
+                    "body": feed.event_snippet(clean_body),
+                },
+                created_at,
+            )
+            result = {"post": post}
+            if key and digest is not None:
+                await store.insert_idempotency(conn, key, "feed_post", digest, result, created_at)
+            return result, True
+
+        result, created = await self._txn(op)
+        if created:
+            for hook in list(self.feed_post_hooks):
+                try:
+                    await hook(result)
+                except Exception:
+                    logger.exception("feed post hook failed")
+        return result
+
+    async def feed_repost(self, author: Any, post_id: Any) -> dict[str, Any]:
+        """Repost a post. Repeating it returns the same repost; a repost of a repost reposts the original."""
+        clean_author = handle(author, "author")
+        target = require_id(post_id, "post_id")
+
+        async def op(conn):
+            original = await self._live_original(conn, target, "post_id")
+            existing = await store.find_repost(conn, clean_author, original["id"])
+            if existing is not None and existing["deleted_at"] is None:
+                return {"post": await self._feed_post_shape(conn, existing["id"]), "idempotent": True}
+            created_at = utc_now()
+            if existing is not None:
+                # Reposting again after deleting the repost brings the same row back, restamped.
+                repost_id = existing["id"]
+                await store.revive_feed_post(conn, repost_id, created_at)
+            else:
+                repost_id = await store.insert_feed_post(
+                    conn,
+                    author=clean_author,
+                    body="",
+                    parent_id=None,
+                    root_id=None,
+                    repost_of=original["id"],
+                    quote_of=None,
+                    depth=0,
+                    created_at=created_at,
+                )
+            await store.insert_event(
+                conn,
+                "feed_repost",
+                None,
+                repost_id,
+                {
+                    "id": repost_id,
+                    "author": clean_author,
+                    "repost_of": original["id"],
+                    "original_author": original["author"],
+                    "body": feed.event_snippet(original["body"]),
+                },
+                created_at,
+            )
+            return {"post": await self._feed_post_shape(conn, repost_id), "idempotent": False}
+
+        return await self._txn(op)
+
+    async def feed_delete(self, actor: Any, post_id: Any) -> dict[str, Any]:
+        """Soft delete. Only the author may delete; replies stay and the post becomes a tombstone."""
+        clean_actor = handle(actor, "actor")
+        target = require_id(post_id, "post_id")
+
+        async def op(conn):
+            found = await store.get_feed_row(conn, target)
+            if found is None:
+                raise HubError("not_found", f"post {target} not found", 404)
+            if found["author"] != clean_actor:
+                raise HubError("forbidden", "only the author can delete a post", 403, {"post_id": target})
+            if found["deleted_at"] is not None:
+                return {"post": await self._feed_post_shape(conn, target), "idempotent": True}
+            await store.set_feed_deleted(conn, target, utc_now())
+            return {"post": await self._feed_post_shape(conn, target), "idempotent": False}
+
+        return await self._txn(op)
+
+    async def feed_get_post(self, post_id: Any) -> dict[str, Any]:
+        """One post. A deleted post comes back as a tombstone."""
+        target = require_id(post_id, "post_id")
+
+        async def op(conn):
+            found = await store.get_feed_row(conn, target)
+            if found is None:
+                raise HubError("not_found", f"post {target} not found", 404)
+            return {"post": (await self._shape_feed(conn, [found]))[0]}
+
+        return await self.db.read(op)
+
+    async def _set_follow(self, follower: Any, followee: Any, following: bool) -> dict[str, Any]:
+        clean_follower = handle(follower, "follower")
+        clean_followee = handle(followee, "followee")
+        if clean_follower == clean_followee:
+            raise HubError("validation_error", "a handle cannot follow itself", 400, {"field": "followee"})
+
+        async def op(conn):
+            created_at = utc_now()
+            if following:
+                changed = await store.insert_follow(conn, clean_follower, clean_followee, created_at)
+            else:
+                changed = await store.delete_follow(conn, clean_follower, clean_followee)
+            if changed:
+                await store.insert_event(
+                    conn,
+                    "feed_follow",
+                    None,
+                    0,
+                    {"follower": clean_follower, "followee": clean_followee, "following": following},
+                    created_at,
+                )
+            return {
+                "follower": clean_follower,
+                "followee": clean_followee,
+                "following": following,
+                "idempotent": not changed,
+            }
+
+        return await self._txn(op)
+
+    async def feed_follow(self, follower: Any, followee: Any) -> dict[str, Any]:
+        """``follower`` follows ``followee``. Repeating it is a no-op."""
+        return await self._set_follow(follower, followee, True)
+
+    async def feed_unfollow(self, follower: Any, followee: Any) -> dict[str, Any]:
+        """Stop following. Unfollowing someone you do not follow is a no-op."""
+        return await self._set_follow(follower, followee, False)
+
+    async def feed_following(self, handle_value: Any) -> dict[str, Any]:
+        clean = handle(handle_value, "handle")
+
+        async def op(conn):
+            return await store.list_follows(conn, follower=clean)
+
+        rows = await self.db.read(op)
+        return {"handle": clean, "following": [row["followee"] for row in rows]}
+
+    async def feed_followers(self, handle_value: Any) -> dict[str, Any]:
+        clean = handle(handle_value, "handle")
+
+        async def op(conn):
+            return await store.list_follows(conn, followee=clean)
+
+        rows = await self.db.read(op)
+        return {"handle": clean, "followers": [row["follower"] for row in rows]}
+
+    async def feed_timeline(
+        self,
+        *,
+        scope: Any = "global",
+        handle: Any = None,
+        tag: Any = None,
+        author: Any = None,
+        post_id: Any = None,
+        cursor: Any = None,
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        """Newest-first live posts with opaque ``cursor`` paging, or one thread.
+
+        ``global`` is everything, ``following`` the authors ``handle`` follows,
+        ``hashtag`` posts tagged ``tag``, ``author`` one author's posts. Deleted
+        posts are left out. ``thread`` returns the nested tree around
+        ``post_id`` (any post in it), with deleted posts as tombstones; see
+        ``_feed_thread`` for its window and paging.
+        """
+        clean_scope = scope or "global"
+        if clean_scope not in feed.TIMELINE_SCOPES:
+            raise HubError(
+                "validation_error",
+                f"scope must be one of {', '.join(feed.TIMELINE_SCOPES)}",
+                400,
+                {"field": "scope", "allowed": list(feed.TIMELINE_SCOPES)},
+            )
+        if clean_scope == "thread":
+            return await self._feed_thread(require_id(post_id, "post_id"), cursor)
+        before = feed.decode_cursor(cursor)
+        clean_limit = page_limit(limit)
+        filters: dict[str, Any] = {}
+        if clean_scope == "following":
+            if handle in (None, ""):
+                raise HubError("validation_error", "following needs handle", 400, {"field": "handle"})
+            filters["follower"] = validate_handle(handle, "handle")
+        elif clean_scope == "hashtag":
+            filters["tag"] = feed.clean_tag(tag)
+        elif clean_scope == "author":
+            who = author if author not in (None, "") else handle
+            if who in (None, ""):
+                raise HubError(
+                    "validation_error", "author scope needs author or handle", 400, {"field": "author"}
+                )
+            filters["author"] = validate_handle(who, "author")
+
+        async def op(conn):
+            rows = await store.feed_timeline_rows(
+                conn, before_id=before, limit=clean_limit + 1, **filters
+            )
+            has_more = len(rows) > clean_limit
+            rows = rows[:clean_limit]
+            return await self._shape_feed(conn, rows), has_more
+
+        posts, has_more = await self.db.read(op)
+        return {
+            "scope": clean_scope,
+            "posts": posts,
+            "next_cursor": feed.encode_cursor(posts[-1]["id"]) if has_more and posts else None,
+            "has_more": has_more,
+        }
+
+    async def _feed_thread(self, post_id: int, cursor: Any = None) -> dict[str, Any]:
+        """A window of ``feed.THREAD_NEST_MAX`` levels of the thread around ``post_id``.
+
+        The window starts at the root, or a few levels above a deep post; the
+        posts above it come back flat in ``ancestors``. Nodes on the window's
+        last level with replies carry ``more_replies`` (read the thread at that
+        node to go deeper). A wide window pages by ``next_cursor``; the
+        requested post and its chain are always on the first page.
+        """
+        after = feed.decode_cursor(cursor)
+
+        async def op(conn):
+            chain = await store.feed_ancestor_rows(conn, post_id)
+            if not chain:
+                raise HubError("not_found", f"post {post_id} not found", 404)
+            focus_depth = int(chain[-1]["depth"])
+            top_depth = feed.thread_window_top(focus_depth)
+            top = chain[top_depth]
+            max_depth = top_depth + feed.THREAD_NEST_MAX - 1
+            in_window = chain[top_depth:]
+            rows = await store.feed_subtree_rows(
+                conn,
+                int(top["id"]),
+                max_depth=max_depth,
+                after_id=after,
+                limit=feed.THREAD_ROWS_MAX + 1,
+                exclude=[row["id"] for row in in_window] if after is not None else (),
+            )
+            has_more = len(rows) > feed.THREAD_ROWS_MAX
+            rows = rows[: feed.THREAD_ROWS_MAX]
+            last_id = rows[-1]["id"] if rows else None
+            if after is None:
+                listed = {row["id"] for row in rows}
+                rows += [row for row in in_window if row["id"] not in listed]
+            edge = [row["id"] for row in rows if row["depth"] >= max_depth]
+            deeper = await store.feed_ids_with_replies(conn, edge)
+            posts = await self._shape_feed(conn, rows)
+            for post in posts:
+                post["more_replies"] = post["id"] in deeper
+            ancestors = await self._shape_feed(conn, chain[:top_depth])
+            return int(chain[0]["id"]), int(top["id"]), ancestors, posts, has_more, last_id
+
+        root_id, top_id, ancestors, posts, has_more, last_id = await self.db.read(op)
+        return {
+            "scope": "thread",
+            "root_id": root_id,
+            "focus_id": post_id,
+            "top_id": top_id,
+            "ancestors": ancestors,
+            "count": len(posts),
+            "posts": feed.build_thread(posts, focus_id=post_id),
+            "next_cursor": feed.encode_cursor(last_id) if has_more and last_id else None,
+            "has_more": has_more,
+            "truncated": has_more,
+        }
+
+    async def feed_trending_tags(self, limit: Any = None, since: Any = None) -> dict[str, Any]:
+        """Most used tags on live posts since ``since`` (ISO time, default the last 24 hours)."""
+        if limit in (None, ""):
+            clean_limit = feed.TRENDING_DEFAULT
+        else:
+            clean_limit = min(page_limit(limit), feed.TRENDING_MAX)
+        if since in (None, ""):
+            start = datetime.now(timezone.utc) - timedelta(hours=feed.TRENDING_WINDOW_HOURS)
+        else:
+            try:
+                start = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise HubError(
+                    "validation_error", "since must be an ISO 8601 time", 400, {"field": "since"}
+                ) from exc
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+        clean_since = start.astimezone(timezone.utc).isoformat()
+
+        async def op(conn):
+            return await store.trending_tags(conn, since=clean_since, limit=clean_limit)
+
+        return {"since": clean_since, "tags": await self.db.read(op)}
+
     # ---- webhooks -------------------------------------------------------
+
+    # ---- knowledge facts --------------------------------------------------
+
+    async def _knowledge_insert(self, conn, clean: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Insert one validated fact, or return the existing one with the same dedupe key.
+
+        Runs inside the caller's write transaction. A new fact is indexed for
+        search and announced with a ``knowledge_fact`` event.
+        """
+        norm = knowledge.normalize_fact(clean["fact"])
+        existing = await store.find_knowledge(conn, clean["project"], norm)
+        if existing is not None:
+            return knowledge.shape_fact(existing), False
+        now = utc_now()
+        fact_id = await store.insert_knowledge(
+            conn,
+            {
+                "project": clean["project"],
+                "topic": clean["topic"],
+                "fact": clean["fact"],
+                "norm": norm,
+                "source_run": clean.get("source_run"),
+                "source_step": clean.get("source_step"),
+                "author": clean["author"],
+                "status": "active",
+                "created_at": clean.get("created_at") or now,
+                "updated_at": now,
+            },
+        )
+        await self._index(conn, "knowledge", fact_id)
+        row = await store.get_knowledge(conn, fact_id)
+        assert row is not None
+        fact = knowledge.shape_fact(row)
+        await store.insert_event(
+            conn, "knowledge_fact", None, fact_id, knowledge.event_payload(fact), now
+        )
+        return fact, True
+
+    async def knowledge_add(
+        self,
+        project: Any,
+        fact: Any,
+        topic: Any = None,
+        author: Any = None,
+        source_run: Any = None,
+        source_step: Any = None,
+    ) -> dict[str, Any]:
+        """Record a fact. The same fact again in ``project`` (any case, spacing or
+        trailing punctuation) returns the existing row with ``created: false``.
+        """
+        clean = {
+            "project": knowledge.project_slug(project),
+            "topic": knowledge.topic_slug(topic),
+            "fact": knowledge.fact_text(fact),
+            "author": handle(author, "author"),
+            "source_run": knowledge.source_id(source_run, "source_run"),
+            "source_step": knowledge.source_id(source_step, "source_step"),
+        }
+
+        async def op(conn):
+            return await self._knowledge_insert(conn, clean)
+
+        found, created = await self._txn(op)
+        return {"fact": found, "created": created}
+
+    async def knowledge_list(
+        self,
+        project: Any = None,
+        topic: Any = None,
+        status: Any = None,
+        author: Any = None,
+        cursor: Any = None,
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        """Facts newest first with opaque ``cursor`` paging. Filters are exact matches."""
+        filters = {
+            "project": knowledge.optional_project(project),
+            "topic": knowledge.optional_topic(topic),
+            "status": knowledge.optional_status(status),
+            "author": optional_handle(author, "author"),
+        }
+        before = feed.decode_cursor(cursor)
+        clean_limit = page_limit(limit)
+
+        async def op(conn):
+            return await store.list_knowledge(conn, before_id=before, limit=clean_limit + 1, **filters)
+
+        rows = await self.db.read(op)
+        has_more = len(rows) > clean_limit
+        facts = [knowledge.shape_fact(row) for row in rows[:clean_limit]]
+        return {
+            "facts": facts,
+            "next_cursor": feed.encode_cursor(facts[-1]["id"]) if has_more and facts else None,
+            "has_more": has_more,
+        }
+
+    async def knowledge_set_status(self, actor: Any, fact_id: Any, status: Any) -> dict[str, Any]:
+        """Mark a fact ``active``, ``superseded`` or ``rejected``. Only active facts are searchable."""
+        clean_actor = handle(actor, "actor")
+        clean_id = require_id(fact_id, "fact_id")
+        target = knowledge.status_value(status)
+
+        async def op(conn):
+            found = await store.get_knowledge(conn, clean_id)
+            if found is None:
+                raise HubError("not_found", f"fact {clean_id} not found", 404)
+            previous = found["status"]
+            if previous == target:
+                return {"fact": knowledge.shape_fact(found), "previous_status": previous, "idempotent": True}
+            await store.set_knowledge_status(conn, clean_id, target, utc_now())
+            await self._index(conn, "knowledge", clean_id)
+            fresh = await store.get_knowledge(conn, clean_id)
+            assert fresh is not None
+            logger.info("fact %s: %s -> %s by %s", clean_id, previous, target, clean_actor)
+            return {"fact": knowledge.shape_fact(fresh), "previous_status": previous, "idempotent": False}
+
+        return await self._txn(op)
+
+    async def knowledge_topics(self, project: Any = None) -> dict[str, Any]:
+        """Active fact counts per topic, most facts first."""
+        clean_project = knowledge.optional_project(project)
+
+        async def op(conn):
+            return await store.knowledge_topics(conn, project=clean_project, status="active")
+
+        return {"project": clean_project, "topics": await self.db.read(op)}
+
+    async def knowledge_import_jsonl(self, lines: Any, author: Any) -> dict[str, Any]:
+        """Import JSONL lines in the ``_knowledge-inbox.jsonl`` shape, in one transaction.
+
+        A line's own ``author`` wins over ``author``. Blank lines are skipped;
+        a bad line is reported in ``invalid`` (1-based ``line``) and the rest
+        still import. Duplicates, of stored facts or of earlier lines, count
+        in ``duplicates``. At most ``knowledge.IMPORT_MAX`` lines per call.
+        """
+        importer = handle(author, "author")
+        items = knowledge.import_lines(lines)
+        parsed: list[dict[str, Any]] = []
+        invalid: list[dict[str, Any]] = []
+        for number, line in enumerate(items, start=1):
+            if isinstance(line, str) and not line.strip():
+                continue
+            try:
+                clean = knowledge.parse_line(line)
+            except HubError as exc:
+                invalid.append({"line": number, "error": exc.message})
+                continue
+            clean["author"] = clean["author"] or importer
+            parsed.append(clean)
+
+        now = utc_now()
+        seen_keys: set[tuple[str, str]] = set()
+        candidates: list[dict[str, Any]] = []
+        for clean in parsed:
+            norm = knowledge.normalize_fact(clean["fact"])
+            key = (clean["project"], norm)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            candidates.append(
+                {
+                    "project": clean["project"],
+                    "topic": clean["topic"],
+                    "fact": clean["fact"],
+                    "norm": norm,
+                    "source_run": clean.get("source_run"),
+                    "source_step": clean.get("source_step"),
+                    "author": clean["author"],
+                    "status": "active",
+                    "created_at": clean.get("created_at") or now,
+                    "updated_at": now,
+                }
+            )
+
+        async def op(conn):
+            inserted = await store.insert_knowledge_batch(conn, candidates)
+            if inserted:
+                fact_ids = [int(row["id"]) for row in inserted]
+                await self._index_knowledge_batch(conn, fact_ids)
+                await store.insert_events(
+                    conn,
+                    [
+                        {
+                            "kind": "knowledge_fact",
+                            "channel_id": None,
+                            "entity_id": int(row["id"]),
+                            "payload": knowledge.event_payload(knowledge.shape_fact(row)),
+                            "created_at": now,
+                        }
+                        for row in inserted
+                    ],
+                )
+            return len(inserted)
+
+        added = await self._txn(op) if candidates else 0
+        duplicates = len(parsed) - added
+        return {"added": added, "duplicates": duplicates, "invalid": invalid}
+
+    async def knowledge_export_jsonl(self, project: Any = None, status: Any = "active") -> dict[str, Any]:
+        """Facts as JSONL in the inbox shape, oldest first. ``status`` ``all`` exports every status."""
+        clean_project = knowledge.optional_project(project)
+        clean_status = None if status == "all" else knowledge.status_value(status or "active")
+
+        async def op(conn):
+            return await store.export_knowledge(conn, project=clean_project, status=clean_status)
+
+        rows = await self.db.read(op)
+        lines = [knowledge.serialize_fact(knowledge.shape_fact(row)) for row in rows]
+        return {"jsonl": "".join(line + "\n" for line in lines), "count": len(lines)}
+
+    async def knowledge_export_chunks(self, project: Any = None, status: Any = "active"):
+        """Validate export filters and return an async iterator of JSONL chunks (oldest first)."""
+        clean_project = knowledge.optional_project(project)
+        clean_status = None if status == "all" else knowledge.status_value(status or "active")
+
+        async def generate():
+            after_id = 0
+            while True:
+                batch_size = store.EXPORT_BATCH
+                rows = await self.db.read(
+                    lambda conn, cur=after_id, sz=batch_size: store.export_knowledge_page(
+                        conn, project=clean_project, status=clean_status, after_id=cur, limit=sz
+                    )
+                )
+                if not rows:
+                    break
+                after_id = int(rows[-1]["id"])
+                yield "".join(
+                    knowledge.serialize_fact(knowledge.shape_fact(row)) + "\n" for row in rows
+                )
+                if len(rows) < batch_size:
+                    break
+
+        return generate()
+
+    async def knowledge_from_feed_post(self, result: dict[str, Any]) -> None:
+        """``feed_post_hooks`` callback: a ``LEARNED:`` post becomes a fact by its author.
+
+        The app registers it at startup. ``feed_post`` logs and swallows hook
+        failures, so a bad fact never fails the post.
+        """
+        post = result.get("post") or {}
+        found = knowledge.learned_from_post(post)
+        if found is None:
+            return
+        try:
+            await self.knowledge_add(
+                found["project"],
+                found["fact"],
+                topic=found["topic"],
+                author=post.get("author"),
+                source_run=found["source_run"],
+                source_step=found["source_step"],
+            )
+        except HubError as exc:
+            logger.warning(
+                "rejected LEARNED fact from feed post %s by %s: %s",
+                post.get("id"),
+                post.get("author"),
+                exc.message,
+            )
+            result["knowledge_error"] = exc.message
 
     @staticmethod
     def _hook_ident(value: Any) -> int | str:
@@ -1260,6 +2424,8 @@ class Hub:
         Same lock discipline as :meth:`wait_for_mentions`. ``timeout=0``
         returns at once. The returned ``cursor`` is always safe to send back,
         including on timeout, and skips events that were not relevant.
+        With an ``agent``, ``mail`` holds the full mail behind its ``mail``
+        events and ``mail_unread`` the number still unread.
         """
         import asyncio
         import time
@@ -1274,14 +2440,19 @@ class Hub:
         if clean_channel is not None:
             await self._require_channel(clean_channel)
 
-        def page(found: list[dict[str, Any]], at: int, more: bool, timed_out: bool):
-            return {
+        async def page(found: list[dict[str, Any]], at: int, more: bool, timed_out: bool):
+            result: dict[str, Any] = {
                 "events": found,
                 "cursor": at,
                 "has_more": more,
                 "timed_out": timed_out,
                 "agent": clean_agent,
+                # The full mail behind each ``mail`` event, for its recipient only.
+                "mail": [],
             }
+            if clean_agent is not None:
+                result.update(await self._mail_for_events(clean_agent, found))
+            return result
 
         async with self.waiters.condition:
             while True:
@@ -1293,14 +2464,30 @@ class Hub:
                     limit=clean_limit,
                 )
                 if found or more:
-                    return page(found, cursor, more, False)
+                    return await page(found, cursor, more, False)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return page([], cursor, False, seconds > 0)
+                    return await page([], cursor, False, seconds > 0)
                 try:
                     await asyncio.wait_for(self.waiters.condition.wait(), remaining)
                 except asyncio.TimeoutError:
                     continue
+
+    async def _mail_for_events(self, agent: str, found: list[dict[str, Any]]) -> dict[str, Any]:
+        ids = [
+            int(event["entity_id"])
+            for event in found
+            if event["kind"] == "mail" and (event.get("payload") or {}).get("recipient") == agent
+        ]
+
+        async def op(conn):
+            rows = await store.get_mail_many(conn, ids)
+            return [row for row in rows if row["recipient"] == agent], await store.mail_counts(
+                conn, agent
+            )
+
+        rows, counts = await self.db.read(op)
+        return {"mail": rows, "mail_unread": counts["unread"]}
 
     async def _require_channel(self, name: str) -> None:
         async def op(conn):

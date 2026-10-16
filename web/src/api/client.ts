@@ -33,8 +33,7 @@ async function readError(response: Response): Promise<ApiErrorBody | null> {
   }
 }
 
-/** JSON fetch against the hub. Sends the bearer token when one is in memory. */
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request(path: string, init: RequestInit): Promise<Response> {
   const headers = new Headers(init.headers)
   const token = tokenGetter()
   if (token) headers.set("Authorization", `Bearer ${token}`)
@@ -43,5 +42,30 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     throw new ApiError(response.status, await readError(response), response.statusText)
   }
-  return (await response.json()) as T
+  return response
+}
+
+/** JSON fetch against the hub. Sends the bearer token when one is in memory. */
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await (await request(path, init)).json()) as T
+}
+
+/** Text fetch (JSONL exports) with the same auth and error mapping as `api`. */
+export async function apiText(path: string, init: RequestInit = {}): Promise<string> {
+  return (await request(path, init)).text()
+}
+
+/** A query string from the set values only. Arrays repeat the key. */
+export function queryString(params: Record<string, string | number | boolean | readonly string[] | null | undefined>): string {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value == null || value === "") continue
+    if (Array.isArray(value)) {
+      for (const item of value) if (item !== "") search.append(key, item)
+    } else {
+      search.set(key, String(value))
+    }
+  }
+  const text = search.toString()
+  return text ? `?${text}` : ""
 }

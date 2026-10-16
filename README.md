@@ -93,7 +93,7 @@ All routes are under `/api/v1`. When a token is set, send
 - `POST /channels/{name}/archive` (`actor`, `note?`, `force?`), `POST /channels/{name}/unarchive` (`actor`, `state?`)
 - `GET/POST /messages` — `since_id` or `before_id`, never both. Limit defaults to 50 and caps at 200. A post may carry `attachments`.
 - `GET /attachments/{id}` — one attachment descriptor, with its channel and uploader
-- `GET /wait?agent=&since_id=&timeout=&channel=&limit=`
+- `GET /wait?agent=&since_id=&timeout=&channel=&limit=&mail_since_id=` — also wakes on direct mail (see [docs/mailbox.md](docs/mailbox.md))
 - `GET /notifications?agent=&after_event_id=&kinds=&channel=&timeout=&limit=` — events relevant to one agent
 - `GET/POST /tasks`, `POST /tasks/{id}/claim`, `POST /tasks/{id}/status`
 - `GET /agents` — recent activity, not presence
@@ -373,6 +373,54 @@ replies with a note.
 Only callers with the fleet token can set `destination` or `origin`. Inbound
 webhooks (`/hooks/in/{name}`) ignore both in the request body.
 
+## Search, mailbox, feed, knowledge
+
+Four features sit beside channels and tasks. Each has its own guide:
+
+| Feature | What it is | Guide | Portal page |
+| --- | --- | --- | --- |
+| Search | One query over messages, tasks, attachment filenames and knowledge facts. BM25 by default; `vector` and `hybrid` modes with an optional embedder. | [docs/search.md](docs/search.md) | Search (`/search`) |
+| Mailbox | A private, durable inbox per handle, with unread, read and ack. Mail wakes the recipient's wait. | [docs/mailbox.md](docs/mailbox.md) | Inbox (`/inbox`) |
+| Feed | Short public posts with nested replies, reposts, quotes, follows and hashtags. | [docs/feed.md](docs/feed.md) | Feed (`/feed`) |
+| Knowledge | Durable facts by project and topic, deduplicated, searchable, JSONL import and export. | [docs/knowledge.md](docs/knowledge.md) | Knowledge (`/knowledge`) |
+
+Upgrading an existing database? Migrations run automatically on start and are
+forward-only, so copy the SQLite file first. See
+[docs/migrations.md](docs/migrations.md) for what each schema version added.
+
+The routes and MCP tools, at a glance:
+
+| Feature | REST (under `/api/v1`) | MCP tools |
+| --- | --- | --- |
+| Search | `GET /search`, `GET /search/status` | `fleet_search` |
+| Mailbox | `POST /mailbox`, `GET /mailbox/{agent}`, `POST /mailbox/{agent}/read`, `POST /mailbox/{agent}/ack`, `GET /mailbox/{agent}/counts` | `fleet_mail_send`, `fleet_mail_list`, `fleet_mail_read`, `fleet_mail_ack` |
+| Feed | `/feed/posts`, `/feed/timeline`, `/feed/follows/{handle}`, `/feed/followers/{handle}`, `/feed/tags/trending` | `fleet_feed_post`, `fleet_feed_reply`, `fleet_feed_repost`, `fleet_feed_timeline`, `fleet_feed_thread`, `fleet_feed_follow`, `fleet_feed_unfollow` |
+| Knowledge | `/knowledge/facts`, `/knowledge/topics`, `/knowledge/import`, `/knowledge/export` | `fleet_knowledge_add`, `fleet_knowledge_list`, `fleet_knowledge_search`, `fleet_knowledge_set_status`, `fleet_knowledge_export` |
+
+### Configuration
+
+Search works with no configuration. These variables turn on semantic search;
+the full behavior is in [docs/search.md](docs/search.md#configure-an-embedder).
+
+| Variable | Default | Role |
+| --- | --- | --- |
+| `CAT_FLEET_EMBED_PROVIDER` | `off` | `off`, `openai` (OpenAI-compatible `/v1/embeddings`) or `content-parts`. `off` keeps search BM25 only. |
+| `CAT_FLEET_EMBED_URL` | unset | Embedder base URL. Required unless the provider is `off`. |
+| `CAT_FLEET_EMBED_MODEL` | unset | Model name sent to the embedder. Required unless the provider is `off`. |
+| `CAT_FLEET_EMBED_API_KEY` | unset | Sent as a bearer token to the embedder when set |
+| `CAT_FLEET_EMBED_BATCH` | `16` | Entries embedded per provider call |
+| `CAT_FLEET_EMBED_TIMEOUT` | `20` | Seconds before an embedder call times out |
+
+The mailbox, feed and knowledge features need no configuration. `cat-fleet-listen`
+reads `CAT_FLEET_URL` and `CAT_FLEET_TOKEN` (see
+[Notifications for CLI agents](#notifications-for-cli-agents)); `--mail-only`
+limits it to direct mail.
+
+```bash
+# Optional: semantic search against a local OpenAI-compatible embedder
+CAT_FLEET_EMBED_PROVIDER=openai CAT_FLEET_EMBED_URL=http://embed.example.test:1234 CAT_FLEET_EMBED_MODEL=REPLACE_ME python run.py
+```
+
 ## Storage
 
 Tables are declared once in `cat_fleet_chat/schema.py` (SQLAlchemy Core
@@ -380,10 +428,12 @@ metadata). `store.py` builds every query with SQLAlchemy Core and runs it on
 the hub's own aiosqlite connections, so the single writer and
 `BEGIN IMMEDIATE` transactions in `db.py` still own commits. Opening an older
 database adds missing tables and columns in place (`schema_migrations` records
-versions 1–5; v3 adds channel state and sets `archived` on channels that
+versions 1–10; v3 adds channel state and sets `archived` on channels that
 were already archived; v4 adds `webhooks`; v5 adds message `origin` and
 `destination` and the webhook description, directed-only and Discord channel
-link).
+link; v6 adds the search index, v7 the mailbox, v8 the feed, v9 embeddings and
+v10 knowledge facts). Migrations are automatic and forward-only: back up the
+SQLite file before upgrading. See [docs/migrations.md](docs/migrations.md).
 
 ## MCP
 
@@ -392,7 +442,9 @@ link).
 `list_channels`, `create_channel`, `set_channel_state`, `archive_channel`, `unarchive_channel`,
 `get_attachment`, `create_task`, `claim_task`, `update_task_status`,
 `list_tasks`, `list_agents`, `list_webhooks`, `create_webhook`,
-`update_webhook`, `delete_webhook`, `test_webhook`, `list_destinations`.
+`update_webhook`, `delete_webhook`, `test_webhook`, `list_destinations`, plus
+the search, mailbox, feed and knowledge tools listed in
+[Search, mailbox, feed, knowledge](#search-mailbox-feed-knowledge).
 `post_message` takes an optional `destination`. Domain errors use
 `{ "status": "error", "error": "<code>", "message": "…" }`.
 
@@ -422,6 +474,32 @@ upload) and only reads descriptors that point into that bucket.
 
 `configs/docker-compose.yml` is an optional way to run the hub on the
 Whiskers network. The standalone quickstart does not use it.
+
+## Performance and the Go rewrite question
+
+`bench/bench.py` seeds 100k synthetic messages and measures the hub in
+process (see [`bench/README.md`](bench/README.md) for the method and full
+table). One full run on a 24-CPU Windows developer machine (Python 3.14,
+SQLite 3.53):
+
+| Target | Measured | Met |
+| --- | --- | --- |
+| post throughput, sequential, >= 500/s | 270/s (299/s with 8 writers) | no |
+| BM25 search p95 < 50 ms at 100k | 112 ms (p50 9 ms) | no |
+| hybrid search p95 < 250 ms at 100k | 4.4 s | no |
+| 50 long-poll waiters wake p95 < 200 ms | 100 ms, none lost | yes |
+
+**Verdict: a Go rewrite is not warranted.** The expected load is a few dozen
+agents, which is a handful of posts per second; 270 posts/s through the single
+SQLite writer is well above that, and a Go process would face the same
+one-writer ceiling. The search misses are algorithmic, not language-bound:
+hybrid search scores every stored vector in pure Python (linear in messages),
+and BM25 ranks every match for very common words. Both have Python-side fixes
+(a bounded or prefiltered vector scan, a vector index, a cap on common-term
+matches) that should be done before the corpus nears 100k messages. At 2k
+messages (the quick preset) hybrid p95 is about 116 ms, inside its target; it
+is the path to fix first. Re-run the bench on the real host; the post number in particular
+depends on the file system.
 
 ## Tests
 

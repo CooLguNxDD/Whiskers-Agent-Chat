@@ -18,6 +18,8 @@ export interface MessageWindow {
   loadOlder: () => Promise<void>
   loadNewer: () => Promise<void>
   jumpLatest: () => Promise<void>
+  /** Replace the window with history around one message; resolves true when the message is in it. */
+  jumpTo: (messageId: number) => Promise<boolean>
   retry: () => Promise<void>
 }
 
@@ -39,6 +41,19 @@ function trimOldest(messages: FleetMessage[]) {
 export function mergeMessageWindow(current: FleetMessage[], incoming: FleetMessage[], edge: "older" | "newer") {
   const merged = appendUnique(current, incoming)
   return edge === "older" ? trimNewest(merged) : trimOldest(merged)
+}
+
+/** The page of history ending at `messageId` plus the page right after it, for jumping to a search hit. */
+export async function fetchAround(channel: string, messageId: number, signal?: AbortSignal, limit = 25) {
+  const [before, after] = await Promise.all([
+    getMessages(channel, { before_id: messageId + 1, limit }, signal),
+    getMessages(channel, { since_id: messageId, limit }, signal),
+  ])
+  return {
+    messages: appendUnique(before.messages, after.messages),
+    hasOlder: before.has_more,
+    hasNewer: after.has_more,
+  }
 }
 
 export function createMessageWindow(channel: Accessor<string>): MessageWindow {
@@ -144,6 +159,32 @@ export function createMessageWindow(channel: Accessor<string>): MessageWindow {
     if (signal) await fetchLatest(currentGeneration, signal)
   }
 
+  async function jumpTo(messageId: number) {
+    if (!activeChannel) return false
+    // A new generation drops any in-flight latest-page load for this channel.
+    generation += 1
+    const currentGeneration = generation
+    const signal = abort?.signal
+    if (!signal) return false
+    atLatest = false
+    setPendingNewer(false)
+    setLoading(true)
+    setError(null)
+    try {
+      const around = await fetchAround(activeChannel, messageId, signal)
+      if (!valid(currentGeneration, signal)) return false
+      setMessages(around.messages)
+      setHasOlder(around.hasOlder)
+      setHasNewer(around.hasNewer)
+      return around.messages.some((message) => message.id === messageId)
+    } catch (reason) {
+      if (valid(currentGeneration, signal)) setError(reason)
+      return false
+    } finally {
+      if (valid(currentGeneration, signal)) setLoading(false)
+    }
+  }
+
   createEffect(() => {
     const nextChannel = channel()
     activeChannel = nextChannel
@@ -180,6 +221,7 @@ export function createMessageWindow(channel: Accessor<string>): MessageWindow {
     loadOlder,
     loadNewer,
     jumpLatest,
+    jumpTo,
     retry: () => (messages().length ? loadNewer() : jumpLatest()),
   }
 }

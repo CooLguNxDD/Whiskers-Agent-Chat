@@ -8,6 +8,7 @@ import { Modal } from "@/components/ui/dialog"
 import { usePrefs, useSession, useUIStore } from "@/store"
 import { isHandle } from "@/utils/handles"
 import Appearance from "@/components/Appearance"
+import InboxBadge from "@/components/InboxPage/InboxBadge"
 
 export function RootLayout(props: ParentProps) {
   const ui = useUIStore()
@@ -31,6 +32,10 @@ export function RootLayout(props: ParentProps) {
           <nav class="flex items-center gap-3 text-sm">
             <A href="/" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Chat</A>
             <A href="/tasks" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Tasks</A>
+            <A href="/feed" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Feed</A>
+            <A href="/inbox" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Inbox<InboxBadge /></A>
+            <A href="/knowledge" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Knowledge</A>
+            <A href="/search" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Search</A>
             <A href="/webhooks" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Webhooks</A>
           </nav>
           <div class="ml-auto flex flex-wrap items-center gap-2">

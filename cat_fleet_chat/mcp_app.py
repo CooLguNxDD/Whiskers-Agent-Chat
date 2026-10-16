@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastmcp import FastMCP
 
-from cat_fleet_chat.errors import HubError
+from cat_fleet_chat.errors import INTERNAL_ERROR, HubError
 from cat_fleet_chat.hub import Hub
+
+logger = logging.getLogger("cat_fleet_chat.mcp_app")
 
 _hub: Hub | None = None
 _dispatcher: Any = None  # WebhookDispatcher | None; only test_webhook needs it
@@ -109,18 +112,95 @@ async def wait_for_mentions(
     channel: str | None = None,
     timeout: int | None = None,
     limit: int | None = None,
+    mail_since_id: int | None = None,
 ) -> dict[str, Any]:
-    """Park until ``agent`` is mentioned in a message with id greater than ``since_id``.
+    """Park until ``agent`` is mentioned in a message with id greater than ``since_id``, or gets mail.
 
     ``timeout`` is clamped to 1..300 seconds (default 60). An empty result
     keeps the cursor you passed and sets ``timed_out`` true. Drain ``has_more``
     pages before waiting again. Pass a shorter timeout when the MCP client
     cuts tools off sooner than the hub would return.
+
+    Direct mail also wakes the wait: ``mail`` lists mail after
+    ``mail_since_id`` and ``mail_unread`` counts unread mail. Send back
+    ``mail_cursor`` as ``mail_since_id``; without it only mail that arrives
+    during this call wakes you.
     """
     try:
         return await get_hub().wait_for_mentions(
-            agent, since_id, channel=channel, timeout=timeout, limit=limit
+            agent,
+            since_id,
+            channel=channel,
+            timeout=timeout,
+            limit=limit,
+            mail_since_id=mail_since_id,
         )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_mail_send(
+    sender: str,
+    recipient: str,
+    body: str,
+    subject: str | None = None,
+    reply_to: int | None = None,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Send a direct mail to one handle's private inbox. It wakes that agent's wait.
+
+    ``subject`` is optional (one line, up to 200 characters). ``reply_to`` is
+    the id of a mail you sent or received. ``client_request_id`` makes a retry
+    return the original mail. Use channels for anything the fleet should see.
+    """
+    try:
+        return await get_hub().send_mail(
+            sender,
+            recipient,
+            body,
+            subject=subject,
+            reply_to=reply_to,
+            client_request_id=client_request_id,
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_mail_list(
+    agent: str,
+    state: str = "unread",
+    since_id: int | None = 0,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """List ``agent``'s mail, oldest first. ``state`` is unread (default), read or all.
+
+    Page forward by sending the returned ``cursor`` as ``since_id`` while
+    ``has_more`` is true. Listing does not mark anything read.
+    """
+    try:
+        result = await get_hub().list_mail(agent, state=state, since_id=since_id, limit=limit)
+        result.update(await get_hub().mail_counts(agent))
+        return result
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_mail_read(
+    agent: str,
+    ids: list[int] | None = None,
+    up_to_id: int | None = None,
+) -> dict[str, Any]:
+    """Mark your mail read: the given ``ids``, or everything up to ``up_to_id``. Safe to repeat."""
+    try:
+        return await get_hub().mark_mail_read(agent, ids=ids, up_to_id=up_to_id)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_mail_ack(agent: str, ids: list[int]) -> dict[str, Any]:
+    """Acknowledge your mail (you acted on it). Ack implies read. Safe to repeat."""
+    try:
+        return await get_hub().ack_mail(agent, ids=ids)
     except HubError as exc:
         return exc.mcp_body()
 
@@ -207,8 +287,10 @@ async def wait_for_events(
     """Park until an event relevant to ``agent`` lands after ``after_event_id``.
 
     Relevant means: a message that mentions the agent (not its own), a task
-    assigned to it that someone else changed, or any channel lifecycle event
-    (created, archived, unarchived). Omit ``agent`` for every event.
+    assigned to it that someone else changed, mail addressed to it, or any
+    channel lifecycle event (created, archived, unarchived). Omit ``agent``
+    for every event. With ``agent``, ``mail`` holds the full mail behind
+    its ``mail`` events.
     ``kinds`` narrows by event kind. ``timeout`` is 1..300 seconds (default
     60); ``0`` returns at once. Always send back the returned ``cursor``.
     """
@@ -307,6 +389,63 @@ async def list_tasks(
         return await get_hub().list_tasks(channel=channel, status=status, assignee=assignee)
     except HubError as exc:
         return exc.mcp_body()
+
+
+async def fleet_search(
+    query: str,
+    kind: list[str] | str | None = None,
+    channel: str | None = None,
+    author: str | None = None,
+    since: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """Search messages, task titles and descriptions, attachment filenames, and knowledge facts.
+
+    ``mode``: ``bm25`` (default, full-text: words are plain terms, all must
+    appear, a trailing ``*`` makes a word a prefix), ``vector`` (semantic:
+    cosine similarity to the embedded query) or ``hybrid`` (BM25 and vector
+    fused by reciprocal rank). ``vector`` and ``hybrid`` need an embedder
+    (``CAT_FLEET_EMBED_PROVIDER``) and otherwise return ``not_available``; if
+    the embedder fails, ``vector`` returns ``embedder_unavailable`` and
+    ``hybrid`` returns BM25 hits with ``degraded: "bm25"``. Filters: ``kind``
+    (``message``, ``task``, ``attachment``, ``knowledge``; one or a list), ``channel`` name,
+    ``author`` handle, ``since`` (ISO time or a window like ``24h`` / ``7d``).
+    ``limit`` defaults to 20 (max 100); page with ``offset`` / ``next_offset``.
+    Archived channels are included. Each hit has ``kind``, ``id``, ``channel``,
+    ``author``, ``created_at``, a ``snippet`` (BM25 matches in ``[brackets]``),
+    and ``score`` (higher is better).
+    """
+    try:
+        hub = get_hub()
+        return await hub.search(
+            query,
+            kind=kind,
+            channel=channel,
+            author=author,
+            since=since,
+            limit=limit,
+            offset=offset,
+            mode=mode,
+        )
+    except HubError as exc:
+        body = exc.mcp_body()
+        if exc.code in ("not_available", "embedder_unavailable"):
+            # Tell the agent what the embedder is doing so it can pick a mode.
+            try:
+                body["embed_status"] = await hub.embed_status()
+            except Exception:  # noqa: BLE001 — the status is a hint; never mask the search error
+                logger.warning("embed status lookup failed", exc_info=True)
+                body["embed_status"] = {
+                    "provider": None,
+                    "model": None,
+                    "dim": None,
+                    "indexed": None,
+                    "pending": None,
+                    "last_error": "status unavailable",
+                }
+        return body
 
 
 async def list_agents() -> dict[str, Any]:
@@ -419,6 +558,204 @@ async def test_webhook(webhook: str) -> dict[str, Any]:
         return exc.mcp_body()
 
 
+async def fleet_feed_post(
+    author: str,
+    body: str,
+    quote_of: int | None = None,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Post to the agent feed (up to 4000 characters). ``#hashtags`` are indexed.
+
+    ``quote_of`` quotes another post (a quote is a repost with your own text).
+    ``client_request_id`` makes a retry return the first post instead of a second one.
+    """
+    try:
+        return await get_hub().feed_post(
+            author, body, quote_of=quote_of, client_request_id=client_request_id
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_post failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_reply(
+    author: str,
+    parent_id: int,
+    body: str,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Reply to a feed post. Replies nest to any depth (up to 1000) under the thread root."""
+    try:
+        return await get_hub().feed_post(
+            author, body, parent_id=parent_id, client_request_id=client_request_id
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_reply failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_repost(author: str, post_id: int) -> dict[str, Any]:
+    """Repost a feed post. Repeating it is a no-op; reposting a repost reposts the original."""
+    try:
+        return await get_hub().feed_repost(author, post_id)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_repost failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_timeline(
+    scope: str = "global",
+    handle: str | None = None,
+    tag: str | None = None,
+    author: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Read the feed newest first. Send ``next_cursor`` back as ``cursor`` for the next page.
+
+    ``scope``: ``global`` (everything), ``following`` (authors ``handle``
+    follows), ``hashtag`` (posts tagged ``tag``), ``author`` (one author's
+    posts). Deleted posts are left out. Use ``fleet_feed_thread`` for a thread.
+    """
+    try:
+        return await get_hub().feed_timeline(
+            scope=scope, handle=handle, tag=tag, author=author, cursor=cursor, limit=limit
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_timeline failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_thread(post_id: int, cursor: str | None = None) -> dict[str, Any]:
+    """The thread around ``post_id`` as a reply tree (``replies`` per post).
+
+    Any post in the thread works; that post is marked ``focus``. Deleted posts
+    show as tombstones so their replies keep their place. One read covers 16
+    levels: from the root, or from a few levels above a deep post (the posts
+    above come back flat in ``ancestors``). A post with ``more_replies`` has
+    deeper replies: call this tool with its id. Pass ``next_cursor`` back as
+    ``cursor`` for the rest of a very wide thread.
+    """
+    try:
+        return await get_hub().feed_timeline(scope="thread", post_id=post_id, cursor=cursor)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_thread failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_follow(follower: str, followee: str) -> dict[str, Any]:
+    """Follow a handle so its posts show in your ``following`` timeline. Idempotent."""
+    try:
+        return await get_hub().feed_follow(follower, followee)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_follow failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_unfollow(follower: str, followee: str) -> dict[str, Any]:
+    """Stop following a handle. Idempotent."""
+    try:
+        return await get_hub().feed_unfollow(follower, followee)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_unfollow failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_knowledge_add(
+    project: str,
+    fact: str,
+    author: str,
+    topic: str | None = None,
+    source_run: str | None = None,
+    source_step: str | None = None,
+) -> dict[str, Any]:
+    """Record a knowledge fact (up to 2000 characters) for ``project``.
+
+    ``topic`` is a short slug (default ``general``). The same fact again in
+    the project, in any case, spacing or trailing punctuation, returns the
+    stored one with ``created: false``. Tip: a feed post starting with
+    ``LEARNED:`` (optionally ``LEARNED: [topic] ...`` and a ``#project`` tag)
+    records a fact too.
+    """
+    try:
+        return await get_hub().knowledge_add(
+            project, fact, topic=topic, author=author, source_run=source_run, source_step=source_step
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_knowledge_list(
+    project: str | None = None,
+    topic: str | None = None,
+    status: str | None = None,
+    author: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """List knowledge facts newest first. Send ``next_cursor`` back as ``cursor`` for the next page.
+
+    Filters: ``project``, ``topic``, ``status`` (``active``, ``superseded``,
+    ``rejected``), ``author``.
+    """
+    try:
+        return await get_hub().knowledge_list(
+            project=project, topic=topic, status=status, author=author, cursor=cursor, limit=limit
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_knowledge_search(
+    query: str,
+    author: str | None = None,
+    since: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """Search active knowledge facts (``fleet_search`` limited to ``kind=knowledge``).
+
+    Each hit carries ``project`` and ``topic`` besides the usual search fields.
+    """
+    return await fleet_search(
+        query, kind="knowledge", author=author, since=since, limit=limit, offset=offset, mode=mode
+    )
+
+
+async def fleet_knowledge_set_status(actor: str, fact_id: int, status: str) -> dict[str, Any]:
+    """Mark a fact ``active``, ``superseded`` or ``rejected``. Only active facts are searchable."""
+    try:
+        return await get_hub().knowledge_set_status(actor, fact_id, status)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_knowledge_export(project: str | None = None, status: str = "active") -> dict[str, Any]:
+    """Facts as JSONL (``jsonl``, one object per line: project, topic, fact, run, step, author, ts).
+
+    ``status`` ``all`` exports every status. ``count`` is the number of lines.
+    """
+    try:
+        return await get_hub().knowledge_export_jsonl(project=project, status=status)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 def build_mcp() -> FastMCP:
     """Register the hub tools on a new FastMCP instance."""
     mcp = FastMCP("cat-fleet-chat")
@@ -437,6 +774,7 @@ def build_mcp() -> FastMCP:
         claim_task,
         update_task_status,
         list_tasks,
+        fleet_search,
         list_agents,
         list_destinations,
         list_webhooks,
@@ -444,6 +782,22 @@ def build_mcp() -> FastMCP:
         update_webhook,
         delete_webhook,
         test_webhook,
+        fleet_feed_post,
+        fleet_feed_reply,
+        fleet_feed_repost,
+        fleet_feed_timeline,
+        fleet_feed_thread,
+        fleet_feed_follow,
+        fleet_feed_unfollow,
+        fleet_mail_send,
+        fleet_mail_list,
+        fleet_mail_read,
+        fleet_mail_ack,
+        fleet_knowledge_add,
+        fleet_knowledge_list,
+        fleet_knowledge_search,
+        fleet_knowledge_set_status,
+        fleet_knowledge_export,
     ):
         mcp.tool(run_in_thread=False)(fn)
     return mcp
