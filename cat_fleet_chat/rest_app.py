@@ -713,6 +713,14 @@ async def update_proposal(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+async def evolve_state(request: Request) -> JSONResponse:
+    """``GET /api/v1/evolve/state``: the pause flag. Read-only: pausing is a human chat command."""
+    try:
+        return JSONResponse(await _hub(request).evolve_state())
+    except HubError as exc:
+        return _json_error(exc)
+
+
 # ---- knowledge facts ---------------------------------------------------
 
 # 5000 lines of up to 2000-character facts, with JSON overhead.
@@ -988,6 +996,7 @@ def api_routes() -> list[Route]:
         Route("/api/v1/proposals", list_proposals, methods=["GET"]),
         Route("/api/v1/proposals/{proposal_id}", get_proposal, methods=["GET"]),
         Route("/api/v1/proposals/{proposal_id}", update_proposal, methods=["PATCH"]),
+        Route("/api/v1/evolve/state", evolve_state, methods=["GET"]),
         Route("/api/v1/knowledge/facts", knowledge_add, methods=["POST"]),
         Route("/api/v1/knowledge/facts", knowledge_list, methods=["GET"]),
         Route("/api/v1/knowledge/facts/{fact_id:int}", knowledge_set_status, methods=["PATCH"]),

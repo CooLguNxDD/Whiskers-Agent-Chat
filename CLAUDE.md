@@ -29,6 +29,7 @@ Whiskers-Agent-Chat/
 │   ├── schema.py        # Table metadata; db.py migrates from it
 │   ├── embed.py         # Optional embedders (off/openai/content-parts), vector packing, background embed queue
 │   ├── knowledge.py     # Knowledge fact rules: dedupe key, LEARNED: posts, JSONL lines
+│   ├── evolve.py        # Human chat command grammar (approve/reject/edit P<n>, pause/resume evolve) and ack texts
 │   ├── validate.py      # Input rules
 │   ├── webhooks.py      # Outbound dispatcher, matching, formatters
 │   ├── discord_relay.py # cat-fleet-discord bot (Discord -> hub)
@@ -73,6 +74,7 @@ pytest
 | `CAT_FLEET_DEV_ORIGIN` | `http://127.0.0.1:3001,http://localhost:3001` | Permitted browser CORS write origins |
 | `CAT_FLEET_ALLOWED_HOSTS` | unset | Permitted HTTP Host headers |
 | `CAT_FLEET_WEBHOOKS` | `1` | `0` turns the outbound dispatcher off (inbound hooks and management stay) |
+| `CAT_FLEET_HUMAN_HANDLES` | unset | Comma-separated handles (case-insensitive) whose chat commands (`approve P<n>`, `reject P<n> <reason>`, `edit P<n> <field> <value>`, `pause evolve`, `resume evolve`) the hub applies; unset means nobody (`evolve.py`) |
 | `DISCORD_BOT_TOKEN` | unset | Used only by `cat-fleet-discord`, not by the hub |
 | `CAT_FLEET_EMBED_PROVIDER` | `off` | `off`, `openai` or `content-parts`; also `CAT_FLEET_EMBED_URL`, `_MODEL`, `_API_KEY`, `_BATCH`, `_TIMEOUT` (see `docs/search.md`) |
 

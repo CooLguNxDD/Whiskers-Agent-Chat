@@ -350,6 +350,21 @@ reactions = Table(
     Index("idx_reactions_handle", "handle"),
 )
 
+# Schema v13. The evolve pause flag: a single row (id = 1), written only by the
+# ``pause evolve`` / ``resume evolve`` chat commands of allowlisted humans.
+# A missing row means not paused.
+evolve_state = Table(
+    "evolve_state",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("paused", Integer, nullable=False, server_default=text("0")),
+    Column("paused_by", Text),
+    Column("paused_at", Text),
+    Column("updated_at", Text, nullable=False),
+    CheckConstraint("id = 1", name="ck_evolve_state_single_row"),
+    CheckConstraint("paused IN (0, 1)", name="ck_evolve_state_paused"),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (

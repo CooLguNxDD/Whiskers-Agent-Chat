@@ -44,8 +44,8 @@ async def stored_rows(hub: Hub, post_id: int) -> list[tuple[str, str]]:
 # ---- semantics --------------------------------------------------------------
 
 
-def test_schema_version_is_12():
-    assert SCHEMA_VERSION == 12
+def test_schema_version_includes_v12():
+    assert SCHEMA_VERSION >= 12
 
 
 async def test_react_is_idempotent_and_unique_per_post_handle_kind(hub):
@@ -356,7 +356,7 @@ async def test_v10_database_migrates_to_the_reactions_table(tmp_path):
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
         foreign = conn.execute("PRAGMA foreign_key_list(reactions)").fetchall()
     assert "reactions" in tables
-    assert versions == list(range(1, SCHEMA_VERSION + 1)) and versions[-1] == 12
+    assert versions == list(range(1, SCHEMA_VERSION + 1)) and 12 in versions
     assert any(row[2] == "feed_posts" and row[6] == "CASCADE" for row in foreign)
 
 

@@ -11,7 +11,7 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import embed, feed, knowledge, mailbox, proposals, store, validate
+from cat_fleet_chat import embed, evolve, feed, knowledge, mailbox, proposals, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -121,6 +121,9 @@ class Hub:
         # Index entries touched by the running write transaction. They go to
         # the embed queue only after the commit, so it never reads stale text.
         self._reindexed: list[tuple[str, int]] = []
+        # Handles whose chat commands (evolve.py) steer proposals and the evolve
+        # pause flag. The app sets it from CAT_FLEET_HUMAN_HANDLES; empty means nobody.
+        self.human_handles: frozenset[str] = frozenset()
 
     async def _write(self, fn):
         result = await self.db.write(fn)
@@ -426,8 +429,10 @@ class Hub:
         if clean_origin:
             payload["origin"] = clean_origin
         digest = fingerprint("message", payload) if key else None
+        replayed = False
 
         async def op(conn):
+            nonlocal replayed
             if key and digest is not None:
                 prior = await store.get_idempotency(conn, key)
                 if prior is not None:
@@ -438,6 +443,7 @@ class Hub:
                             409,
                             {"client_request_id": key},
                         )
+                    replayed = True
                     return prior["result"]
             found = await store.get_channel_by_name(conn, clean_channel)
             if found is None:
@@ -485,7 +491,11 @@ class Hub:
                 await store.insert_idempotency(conn, key, "message", digest, result, created_at)
             return result
 
-        return await self._txn(op)
+        result = await self._txn(op)
+        # A retried post already ran its command the first time.
+        if not replayed:
+            await self._run_command(result["message"])
+        return result
 
     @staticmethod
     async def _resolve_destination(
@@ -2365,6 +2375,112 @@ class Hub:
                 now,
             )
             return {"proposal": shaped, "previous_status": previous, "idempotent": False}
+
+        return await self._txn(op)
+
+    # ---- evolve commands --------------------------------------------------
+
+    def is_human(self, author: Any) -> bool:
+        """Whether ``author`` is on the human allowlist (case-insensitive)."""
+        if not isinstance(author, str) or not self.human_handles:
+            return False
+        return author.lower() in {name.lower() for name in self.human_handles}
+
+    async def _run_command(self, message: dict[str, Any]) -> None:
+        """Apply the evolve command in a stored message and ack it in the same channel.
+
+        Only allowlisted humans command. Other senders' messages stay ordinary
+        messages: no error and no ack. The ack is posted as ``evolve.ACK_AUTHOR``,
+        whose messages are never parsed, so acks cannot loop. A failure here never
+        reaches the sender: their message is already stored.
+        """
+        author = message.get("author")
+        if author == evolve.ACK_AUTHOR or not self.is_human(author):
+            return
+        command = evolve.parse_command(message.get("text"))
+        if command is None:
+            return
+        try:
+            outcome = await self.apply_command(command, author)
+            await self.post_message(
+                message["channel"], evolve.ACK_AUTHOR, outcome["text"], reply_to=message["id"]
+            )
+        except Exception:  # noqa: BLE001 — the command message itself is committed
+            logger.exception("evolve command in message %s failed", message.get("id"))
+
+    async def apply_command(self, command: evolve.Command, handle_value: Any) -> dict[str, Any]:
+        """Apply one parsed command for ``handle_value`` and describe the outcome.
+
+        Returns ``ok``, ``command`` and ``text`` (the ack), plus ``proposal`` or
+        ``evolve`` on success and ``error`` (a HubError code) on refusal. An
+        unknown proposal, an invalid transition or a bad value never raises.
+        The caller checks the allowlist.
+        """
+        base: dict[str, Any] = {"command": command.verb}
+        try:
+            if command.verb in ("pause", "resume"):
+                result = await self.set_evolve_paused(command.verb == "pause", handle_value)
+                return {**base, "ok": True, "evolve": result["evolve"], "text": evolve.ack_text(command, result)}
+            if command.verb == "approve":
+                changes: dict[str, Any] = {"status": "accepted"}
+            elif command.verb == "reject":
+                changes = {"status": "rejected", "reason": command.reason}
+            elif command.verb == "edit" and command.field is not None:
+                changes = {command.field: command.value}
+            else:
+                raise HubError("validation_error", f"unknown command {command.verb}", 400)
+            result = await self.update_proposal(command.number, handle_value, changes)
+            return {**base, "ok": True, "proposal": result["proposal"], "text": evolve.ack_text(command, result)}
+        except HubError as exc:
+            return {
+                **base,
+                "ok": False,
+                "error": exc.code,
+                "text": evolve.error_text(command, exc.code, exc.message),
+            }
+
+    @staticmethod
+    def _shape_evolve(row: dict[str, Any] | None) -> dict[str, Any]:
+        if row is None:
+            return {"paused": False, "by": None, "at": None}
+        return {"paused": bool(row["paused"]), "by": row["paused_by"], "at": row["paused_at"]}
+
+    async def evolve_state(self) -> dict[str, Any]:
+        """The evolve pause flag: ``{"paused", "by", "at"}``. ``by``/``at`` say who paused and when."""
+        return self._shape_evolve(await self.db.read(store.get_evolve_state))
+
+    async def set_evolve_paused(self, paused: Any, handle_value: Any) -> dict[str, Any]:
+        """Pause or resume evolve. Setting the current value returns ``idempotent: true``.
+
+        Only the ``pause evolve`` / ``resume evolve`` chat commands of allowlisted
+        humans call this; there is no REST or MCP write. Emits ``evolve_paused``
+        or ``evolve_resumed`` with no channel.
+        """
+        target = _flag(paused)
+        actor = handle(handle_value, "actor")
+
+        async def op(conn):
+            current = self._shape_evolve(await store.get_evolve_state(conn))
+            if current["paused"] == target:
+                return {"evolve": current, "idempotent": True}
+            now = utc_now()
+            await store.set_evolve_state(
+                conn,
+                paused=target,
+                paused_by=actor if target else None,
+                paused_at=now if target else None,
+                updated_at=now,
+            )
+            fresh = self._shape_evolve(await store.get_evolve_state(conn))
+            await store.insert_event(
+                conn,
+                "evolve_paused" if target else "evolve_resumed",
+                None,
+                1,
+                {**fresh, "actor": actor},
+                now,
+            )
+            return {"evolve": fresh, "idempotent": False}
 
         return await self._txn(op)
 

@@ -202,6 +202,9 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
             return line
         changed = ", ".join(payload.get("changed") or [])
         return f"{head} edited by `{payload.get('actor', '?')}`" + (f" ({changed})" if changed else "")
+    if kind in {"evolve_paused", "evolve_resumed"}:
+        icon, verb = ("⏸️", "paused") if kind == "evolve_paused" else ("▶️", "resumed")
+        return f"{icon} evolve {verb} by `{payload.get('actor', '?')}`"
     if kind == "webhook.ping":
         return f"🔔 Cat Fleet webhook **{payload.get('name')}** is connected"
     return f"{kind} #{event.get('id')}"
