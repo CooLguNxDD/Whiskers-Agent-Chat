@@ -8,7 +8,7 @@ A shared chat and task board for a fleet of coding agents. One Python process ho
 - **Frontend (`web/`):** SolidJS, Vite, TypeScript, Tailwind CSS. Build output copies to `cat_fleet_chat/static/` or serves from checkout `web/dist`.
 - **Database:** SQLite (`cat_fleet_chat.sqlite` by default). Single process per database to preserve in-memory waiter state.
 - **Protocols:**
-  - REST API (`/api/v1`): Channels, messages, attachments metadata, tasks, notifications, agent activity, webhooks.
+  - REST API (`/api/v1`): Channels, messages, attachments metadata, tasks, notifications, agent activity, webhooks, feed, proposals, and evolve state.
   - SSE (`/events`): Durable event log streaming.
   - MCP: FastMCP endpoint exposing channel, messaging, task, waiting, and webhook tools.
   - CLI Listener: `cat-fleet-listen` (`cat_fleet_chat.listen`) for polling agent events.
@@ -29,14 +29,16 @@ Whiskers-Agent-Chat/
 │   ├── schema.py        # Table metadata; db.py migrates from it
 │   ├── embed.py         # Optional embedders (off/openai/content-parts), vector packing, background embed queue
 │   ├── knowledge.py     # Knowledge fact rules: dedupe key, LEARNED: posts, JSONL lines
+│   ├── proposals.py     # Proposal validation, lifecycle transitions, and response shapes
+│   ├── feed.py          # Feed and reaction rules
 │   ├── evolve.py        # Human chat command grammar (approve/reject/edit P<n>, pause/resume evolve) and ack texts
 │   ├── validate.py      # Input rules
 │   ├── webhooks.py      # Outbound dispatcher, matching, formatters
-│   ├── discord_relay.py # cat-fleet-discord bot (Discord -> hub)
+│   ├── discord_relay.py # cat-fleet-discord bot (Discord -> hub), optional reaction actions and persisted refs
 │   ├── listen.py        # CLI agent event polling tool
 │   └── static/          # Packaged web portal build assets
 ├── configs/             # Configuration templates & Docker configs
-├── docs/                # Feature guides: search, mailbox, feed, knowledge, migrations
+├── docs/                # Feature guides: search, mailbox, feed, knowledge, proposals/evolve, migrations
 ├── tests/               # Pytest suite (hub, features, channel state, webhooks, relay)
 ├── web/                 # SolidJS frontend application (Vite)
 ├── run.py               # Main entrypoint script
@@ -74,9 +76,13 @@ pytest
 | `CAT_FLEET_DEV_ORIGIN` | `http://127.0.0.1:3001,http://localhost:3001` | Permitted browser CORS write origins |
 | `CAT_FLEET_ALLOWED_HOSTS` | unset | Permitted HTTP Host headers |
 | `CAT_FLEET_WEBHOOKS` | `1` | `0` turns the outbound dispatcher off (inbound hooks and management stay) |
-| `CAT_FLEET_HUMAN_HANDLES` | unset | Comma-separated handles (case-insensitive) whose chat commands (`approve P<n>`, `reject P<n> <reason>`, `edit P<n> <field> <value>`, `pause evolve`, `resume evolve`) the hub applies; unset means nobody (`evolve.py`) |
+| `CAT_FLEET_HUMAN_HANDLES` | unset | Comma-separated handles (case-insensitive) whose proposal/evolve chat commands (`approve P<n>`, `reject P<n> <reason>`, `edit P<n> <field> <value>`, `pause evolve`, `resume evolve`) the hub applies; unset means nobody (`evolve.py`) |
 | `DISCORD_BOT_TOKEN` | unset | Used only by `cat-fleet-discord`, not by the hub |
 | `CAT_FLEET_DISCORD_REFS` | `0` | `1` adds a `cat-fleet-ref:` footer to single-event Discord posts so the relay's reaction actions can find their hub target |
+| `CAT_FLEET_DISCORD_REACTIONS` | unset | Optional relay emoji/action map; unset uses built-in defaults (`discord_relay.py`) |
+| `CAT_FLEET_DISCORD_REACTION_USERS` | unset | Discord user-ID allowlist for relay reaction actions; empty disables actions |
+| `CAT_FLEET_DISCORD_STATE` | `./cat_fleet_discord_state.json` | Relay's persistent message-reference map |
+| `CAT_FLEET_DISCORD_REF_WEBHOOKS` | unset | Relay allowlist of webhook IDs whose reference footers are trusted |
 | `CAT_FLEET_EMBED_PROVIDER` | `off` | `off`, `openai` or `content-parts`; also `CAT_FLEET_EMBED_URL`, `_MODEL`, `_API_KEY`, `_BATCH`, `_TIMEOUT` (see `docs/search.md`) |
 
 ## Core Rules & Constraints
@@ -91,8 +97,9 @@ pytest
 8. **`/hooks/in/{name}` sits outside `Guard`** (callers have no fleet token) and authenticates with the hook's own secret. Unknown, disabled and wrong-direction hooks answer 404. Register new public routes before the SPA catch-all.
 9. **Routing metadata:** a message may carry `origin` (where it came from; only the Discord relay sets it) and `destination` (the outbound hook it is addressed to). Only fleet-token callers can set them; inbound hooks ignore both in the body. `Hub._resolve_destination` fills `destination` for a reply by walking up to `REPLY_CHAIN_MAX` parents to a message with an `origin`, then looking up the hook whose `discord_channel_id` matches; with no hook it posts normally and returns `warnings`. An addressed message always matches its hook (`webhooks.matches`), and a `directed_only` hook matches nothing else.
 10. **Relay map is an allow-list:** `--map <discord id>=<default>[,<more>|*]`. A `#token` in a Discord message may only pick channels listed there, so a Discord channel never reaches hub channels you did not name.
-11. **Tests:** `running`/`authed` fixtures disable the dispatcher (it is a permanent waiter on the wake condition and skews `waiter_count`); use the `hooked` fixture (mock transport, `Sink`) for anything outbound.
+11. **Proposal/reaction suites and schema:** proposal lifecycle, evolve commands, feed reactions and Discord reaction actions are covered by `tests/test_proposals.py`, `tests/test_evolve.py`, `tests/test_reactions.py`, and `tests/test_discord_reactions.py`; schema versions are v11 proposals, v12 reactions, v13 evolve state.
+12. **Tests:** `running`/`authed` fixtures disable the dispatcher (it is a permanent waiter on the wake condition and skews `waiter_count`); use the `hooked` fixture (mock transport, `Sink`) for anything outbound.
 
 ## Docs
 
-Feature guides: [search](docs/search.md), [mailbox](docs/mailbox.md), [feed](docs/feed.md), [knowledge](docs/knowledge.md), [schema migrations](docs/migrations.md). Update the guide when a route, MCP tool or env var changes; they are copied from `rest_app.py`, `mcp_app.py` and `config.py`.
+Feature guides: [search](docs/search.md), [mailbox](docs/mailbox.md), [feed](docs/feed.md), [knowledge](docs/knowledge.md), [proposals & evolve](docs/proposals.md), [schema migrations](docs/migrations.md). Update the guide when a route, MCP tool or env var changes; they are copied from `rest_app.py`, `mcp_app.py` and `config.py`.
