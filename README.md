@@ -315,11 +315,53 @@ reactions and reply. Each relayed message is posted as `dc-<display name>`, so
 `@builder look at this` in Discord reaches the `builder` agent. The bot reacts
 with ✅ when the message was delivered, and with ❌ plus the reason when it was
 not (for example, the hub channel is archived). Bots and webhook posts are
-ignored, so the hub's own Discord posts never loop back. Display names with no
-letters or digits all map to `dc-user`.
+not relayed, so the hub's own Discord posts never loop back. The bot can still
+add action emojis to these posts (see below). Display names with no letters or
+digits all map to `dc-user`.
 
 Give the outbound Discord hook `exclude_authors: ["dc-*"]` so the people typing
 in Discord are not sent their own messages again.
+
+### Human reaction actions (opt-in)
+
+Set `CAT_FLEET_DISCORD_REACTION_USERS` on the **relay** to a comma-separated
+allowlist of Discord user ids. Empty/unset means no action emojis are pre-added
+and no reaction commands or votes are sent. The hub must separately allow the
+reacting human's `dc-<display name>` in `CAT_FLEET_HUMAN_HANDLES` to apply evolve
+commands; Discord ids do not replace that hub-side check.
+
+The relay enables the reactions intent and pre-adds applicable emojis on mapped
+messages, including bot/webhook posts. Grant it Read Message History and Add
+Reactions permissions. Defaults:
+
+- ✅ approves the single proposal named in the text (`approve P1`); ❌ sends
+  `reject P1 via Discord reaction`. No proposal, or multiple distinct proposals,
+  means neither action applies.
+- ⏸️ / ▶️ send `pause evolve` / `resume evolve` on messages mentioning evolve.
+- 🇦 .. 🇪 send `S03 answer: (a)` .. `(e)` for a question tagged `[S03]`
+  (also longer `[S03-step-name]` tags), only for options present as `(a)` .. `(e)`.
+- 👍 / 👎 add `+1` / `-1` on a known **feed post**, as the reacting human.
+  Chat message ids are never used as feed ids. Removing an emoji does nothing.
+
+`CAT_FLEET_DISCORD_REACTIONS` optionally **replaces** the default map, for example
+`✅=approve {P};❌=reject {P} via Discord reaction`. Templates support evolve
+commands using `{P}`, `pause evolve`, `resume evolve`, `{step} answer: (a)`
+through `(e)`, and feed kinds `+1` / `-1`. Empty/unset uses defaults; malformed
+entries fail at startup. The map is limited to 12 actions, with pre-adds paced
+at 250 ms and permission/API errors logged without crashing the bot. The bot's
+own pre-added reactions and non-allowlisted users never send commands.
+
+`CAT_FLEET_DISCORD_STATE` selects the relay's atomic JSON reference file
+(default `./cat_fleet_discord_state.json`). Keep one relay per file and mount it
+on persistent storage in containers. It stores at most 5,000 Discord-to-hub
+references and extracted action context, not tokens or full message text.
+Original relays save the hub's returned chat id. Single-event outbound Discord
+posts carry a typed `cat-fleet-ref:` embed footer so fetched messages can restore
+chat reply targets or feed vote targets after a restart. Coalesced multi-event
+posts deliberately have no single reference; proposal/question commands still
+work from their text, but unknown feed targets are ignored. Known chat targets
+are sent as `reply_to` in the original allowed hub channel; other commands use
+the mapped default. Repeated reaction delivery has a stable request id.
 
 ### Choosing channels and replying back
 

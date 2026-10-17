@@ -14,3 +14,4 @@ web/node_modules/
 web/dist/
 web/.vite/
 cat_fleet_chat/static/
+cat_fleet_discord_state.json
