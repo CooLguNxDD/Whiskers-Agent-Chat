@@ -47,6 +47,11 @@ class Settings:
     # Handles allowed to steer proposals and the evolve pause flag with chat
     # commands (evolve.py), lower-cased. Empty means nobody may command.
     human_handles: frozenset[str] = frozenset()
+    # CAT_FLEET_DISCORD_REFS=1: single-event Discord posts carry a visible
+    # ``cat-fleet-ref:`` footer so the relay (cat-fleet-discord, configured by
+    # CAT_FLEET_DISCORD_REACTIONS / CAT_FLEET_DISCORD_REACTION_USERS) can map a
+    # reaction back to its hub message or feed post after a restart.
+    discord_refs: bool = False
 
     @property
     def loopback_bind(self) -> bool:
@@ -115,6 +120,7 @@ def load_settings() -> Settings:
         embed_batch=embed_batch,
         embed_timeout=embed_timeout,
         human_handles=human_handles(os.environ.get("CAT_FLEET_HUMAN_HANDLES", "")),
+        discord_refs=_env_str("CAT_FLEET_DISCORD_REFS", "0").lower() in {"1", "true", "yes", "on"},
     )
 
 
