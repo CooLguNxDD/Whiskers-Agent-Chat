@@ -33,6 +33,16 @@ describe("event refresh bookkeeping", () => {
     expect(keys).toEqual(["channels"])
   })
 
+  it("refreshes the proposals board on proposal, reaction and evolve events", () => {
+    for (const kind of ["proposal_created", "proposal_updated", "reaction_added", "reaction_removed", "evolve_paused", "evolve_resumed"]) {
+      const refresh = new EventRefresh()
+      refresh.accept({ id: "1", event: kind, data: "{}" })
+      const keys: string[] = []
+      refresh.flush((key) => keys.push(key))
+      expect(keys).toEqual(["proposals"])
+    }
+  })
+
   it("replays all query families across disconnect and preserves later events", () => {
     const refresh = new EventRefresh()
     refresh.accept({ id: "5", event: "message.created", data: "{}" })

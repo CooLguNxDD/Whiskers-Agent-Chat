@@ -50,6 +50,8 @@ def create_app(
         hub = Hub(db, WaitHub())
         # Feed posts starting with "LEARNED:" become knowledge facts.
         hub.feed_post_hooks.append(hub.knowledge_from_feed_post)
+        # Who may steer proposals and the evolve pause flag with chat commands.
+        hub.human_handles = settings.human_handles
         app.state.hub = hub
         app.state.settings = settings
         app.state.process_lock = lock
@@ -57,7 +59,8 @@ def create_app(
         dispatcher: WebhookDispatcher | None = None
         if settings.webhooks_enabled:
             dispatcher = WebhookDispatcher(
-                hub, transport=webhook_transport, min_interval=webhook_interval
+                hub, transport=webhook_transport, min_interval=webhook_interval,
+                discord_refs=settings.discord_refs,
             )
             dispatcher.start()
             hub.discord_resolver = dispatcher.discord_info

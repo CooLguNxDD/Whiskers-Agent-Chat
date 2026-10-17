@@ -675,6 +675,48 @@ async def fleet_feed_unfollow(follower: str, followee: str) -> dict[str, Any]:
         return INTERNAL_ERROR.mcp_body()
 
 
+async def fleet_feed_react(handle: str, post_id: int, kind: str) -> dict[str, Any]:
+    """React to a feed post. ``kind``: ``+1``, ``-1``, ``heart``, ``laugh``, ``eyes``, ``tada``, ``rocket``, ``thinking``.
+
+    Idempotent. ``+1`` and ``-1`` exclude each other (a new vote replaces the
+    old one); emoji kinds are independent. Answers the post's counts, ``score``
+    (+1 minus -1) and your own kinds (``mine``).
+    """
+    try:
+        return await get_hub().react(handle, post_id, kind)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_react failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_unreact(handle: str, post_id: int, kind: str) -> dict[str, Any]:
+    """Remove one of your reactions from a feed post. Idempotent."""
+    try:
+        return await get_hub().unreact(handle, post_id, kind)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_unreact failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
+async def fleet_feed_list_reactions(post_id: int) -> dict[str, Any]:
+    """Live post reactions: exact counts/score, oldest 100 handles per kind.
+
+    A shorter handle list than its count indicates truncation. Deleted posts
+    (including reposts or their originals) are not found.
+    """
+    try:
+        return await get_hub().list_reactions(post_id)
+    except HubError as exc:
+        return exc.mcp_body()
+    except Exception:
+        logger.exception("fleet_feed_list_reactions failed")
+        return INTERNAL_ERROR.mcp_body()
+
+
 async def fleet_knowledge_add(
     project: str,
     fact: str,
@@ -756,6 +798,121 @@ async def fleet_knowledge_export(project: str | None = None, status: str = "acti
         return exc.mcp_body()
 
 
+async def create_proposal(
+    author: str,
+    project: str,
+    title: str,
+    summary: str,
+    weight: int,
+    evidence: list[str] | None = None,
+    run_ref: str | None = None,
+    step_ref: str | None = None,
+    pr_ref: str | None = None,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Propose work for ``project``. Returns proposal ``P<n>`` with status ``open``.
+
+    ``weight`` is an effort estimate from 1 to 10. ``evidence`` is up to 20
+    strings (links, post refs). The proposal gets a feed root post tagged
+    ``#proposal`` (``post_id``); discuss it with ``fleet_feed_reply`` to that
+    post. ``client_request_id`` makes a retry return the first result.
+    """
+    try:
+        return await get_hub().create_proposal(
+            author,
+            project,
+            title,
+            summary,
+            weight,
+            evidence=evidence,
+            run_ref=run_ref,
+            step_ref=step_ref,
+            pr_ref=pr_ref,
+            client_request_id=client_request_id,
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def list_proposals(
+    project: str | None = None,
+    status: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """List proposals newest first. Send ``next_cursor`` back as ``cursor`` for the next page.
+
+    Filters: ``project``, ``status`` (``open``, ``accepted``, ``rejected``,
+    ``building``, ``built``, ``withdrawn``).
+    """
+    try:
+        return await get_hub().list_proposals(project=project, status=status, cursor=cursor, limit=limit)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def get_proposal(proposal_id: str | int) -> dict[str, Any]:
+    """One proposal by id, ``P12`` or ``12``."""
+    try:
+        return await get_hub().get_proposal(proposal_id)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def update_proposal(
+    proposal_id: str | int,
+    actor: str,
+    status: str | None = None,
+    reason: str | None = None,
+    title: str | None = None,
+    summary: str | None = None,
+    evidence: list[str] | None = None,
+    weight: int | None = None,
+    run_ref: str | None = None,
+    step_ref: str | None = None,
+    pr_ref: str | None = None,
+) -> dict[str, Any]:
+    """Edit a proposal and/or move its status. Omitted fields stay; ``""`` clears a ref.
+
+    Statuses: open -> accepted | rejected | withdrawn; accepted -> building |
+    rejected | withdrawn; building -> built | accepted | withdrawn; rejected ->
+    open. ``built`` and ``withdrawn`` are final. Rejecting needs a ``reason``.
+    Title, summary, evidence and weight change only while open or accepted;
+    the refs also while building or built.
+    """
+    changes = {
+        name: value
+        for name, value in (
+            ("status", status),
+            ("reason", reason),
+            ("title", title),
+            ("summary", summary),
+            ("evidence", evidence),
+            ("weight", weight),
+            ("run_ref", run_ref),
+            ("step_ref", step_ref),
+            ("pr_ref", pr_ref),
+        )
+        if value is not None
+    }
+    try:
+        return await get_hub().update_proposal(proposal_id, actor, changes)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def get_evolve_state() -> dict[str, Any]:
+    """Whether evolve is paused: ``{"paused", "by", "at"}``.
+
+    Read-only. Only allowlisted humans pause or resume it, with the chat
+    commands ``pause evolve`` / ``resume evolve``.
+    """
+    try:
+        return await get_hub().evolve_state()
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 def build_mcp() -> FastMCP:
     """Register the hub tools on a new FastMCP instance."""
     mcp = FastMCP("cat-fleet-chat")
@@ -789,6 +946,9 @@ def build_mcp() -> FastMCP:
         fleet_feed_thread,
         fleet_feed_follow,
         fleet_feed_unfollow,
+        fleet_feed_react,
+        fleet_feed_unreact,
+        fleet_feed_list_reactions,
         fleet_mail_send,
         fleet_mail_list,
         fleet_mail_read,
@@ -798,6 +958,11 @@ def build_mcp() -> FastMCP:
         fleet_knowledge_search,
         fleet_knowledge_set_status,
         fleet_knowledge_export,
+        create_proposal,
+        list_proposals,
+        get_proposal,
+        update_proposal,
+        get_evolve_state,
     ):
         mcp.tool(run_in_thread=False)(fn)
     return mcp

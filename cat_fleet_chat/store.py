@@ -16,6 +16,7 @@ import aiosqlite
 from sqlalchemy import bindparam, delete, func, insert, literal, select, text, union_all, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from cat_fleet_chat.feed import REACTION_HANDLES_MAX
 from cat_fleet_chat.mailbox import mail_row
 from cat_fleet_chat.schema import (
     KNOWLEDGE_TITLE_SQL,
@@ -26,6 +27,7 @@ from cat_fleet_chat.schema import (
     channels,
     embeddings,
     events,
+    evolve_state,
     feed_follows,
     feed_hashtags,
     feed_posts,
@@ -36,6 +38,8 @@ from cat_fleet_chat.schema import (
     mailbox,
     mentions,
     messages,
+    proposals,
+    reactions,
     run,
     search_rowid,
     task_events,
@@ -1394,6 +1398,83 @@ async def feed_tags_for(
     return found
 
 
+async def reaction_counts(
+    conn: aiosqlite.Connection, post_ids: Iterable[int]
+) -> dict[int, dict[str, int]]:
+    """Non-zero reaction counts per kind for each post, in one grouped query."""
+    ids = sorted(set(post_ids))
+    if not ids:
+        return {}
+    rows = await fetch_all(
+        conn,
+        select(reactions.c.post_id, reactions.c.kind, func.count().label("n"))
+        .where(reactions.c.post_id.in_(ids))
+        .group_by(reactions.c.post_id, reactions.c.kind),
+    )
+    found: dict[int, dict[str, int]] = {}
+    for row in rows:
+        found.setdefault(row["post_id"], {})[row["kind"]] = int(row["n"])
+    return found
+
+
+async def reaction_rows(conn: aiosqlite.Connection, post_id: int) -> list[dict[str, Any]]:
+    """Oldest reactions, capped per kind in SQL, with each kind's exact ``total``.
+
+    Window counts and samples share one snapshot, so concurrent writes cannot
+    make the reported total disagree with its handles.
+    """
+    ranked = (
+        select(
+            reactions.c.id, reactions.c.kind, reactions.c.handle, reactions.c.created_at,
+            func.count().over(partition_by=reactions.c.kind).label("total"),
+            func.row_number().over(partition_by=reactions.c.kind, order_by=reactions.c.id).label("n"),
+        )
+        .where(reactions.c.post_id == post_id)
+        .subquery()
+    )
+    rows = await fetch_all(
+        conn,
+        select(ranked.c.kind, ranked.c.handle, ranked.c.created_at, ranked.c.total)
+        .where(ranked.c.n <= REACTION_HANDLES_MAX)
+        .order_by(ranked.c.id),
+    )
+    return [dict(row) for row in rows]
+
+
+async def handle_reactions(conn: aiosqlite.Connection, post_id: int, handle: str) -> list[str]:
+    """The kinds ``handle`` holds on one post."""
+    rows = await fetch_all(
+        conn,
+        select(reactions.c.kind)
+        .where(reactions.c.post_id == post_id, reactions.c.handle == handle)
+        .order_by(reactions.c.id),
+    )
+    return [row["kind"] for row in rows]
+
+
+async def insert_reaction(
+    conn: aiosqlite.Connection, post_id: int, handle: str, kind: str, created_at: str
+) -> bool:
+    """Whether a new row was written (``False`` when the handle already had that kind)."""
+    cursor = await run(
+        conn,
+        insert(reactions)
+        .prefix_with("OR IGNORE")
+        .values(post_id=post_id, handle=handle, kind=kind, created_at=created_at),
+    )
+    return cursor.rowcount == 1
+
+
+async def delete_reaction(conn: aiosqlite.Connection, post_id: int, handle: str, kind: str) -> bool:
+    cursor = await run(
+        conn,
+        delete(reactions).where(
+            reactions.c.post_id == post_id, reactions.c.handle == handle, reactions.c.kind == kind
+        ),
+    )
+    return cursor.rowcount == 1
+
+
 async def feed_timeline_rows(
     conn: aiosqlite.Connection,
     *,
@@ -1667,3 +1748,79 @@ async def knowledge_topics(
         conn, stmt.group_by(knowledge_facts.c.topic).order_by(count.desc(), knowledge_facts.c.topic.asc())
     )
     return [{"topic": row["topic"], "count": int(row["count"])} for row in rows]
+
+
+# ---- proposals (schema v11) ------------------------------------------------
+
+PROPOSAL_COLUMNS = tuple(proposals.c)
+
+
+async def insert_proposal(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(proposals).values(**values))
+    return int(cursor.lastrowid)
+
+
+async def get_proposal(conn: aiosqlite.Connection, proposal_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(*PROPOSAL_COLUMNS).where(proposals.c.id == proposal_id))
+    return dict(row) if row is not None else None
+
+
+async def update_proposal(
+    conn: aiosqlite.Connection, proposal_id: int, values: dict[str, Any]
+) -> None:
+    await run(conn, update(proposals).where(proposals.c.id == proposal_id).values(**values))
+
+
+async def list_proposals(
+    conn: aiosqlite.Connection,
+    *,
+    project: str | None,
+    status: str | None,
+    before_id: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Proposals newest first (by id), older than ``before_id`` when given."""
+    stmt = select(*PROPOSAL_COLUMNS)
+    if project is not None:
+        stmt = stmt.where(proposals.c.project == project)
+    if status is not None:
+        stmt = stmt.where(proposals.c.status == status)
+    if before_id is not None:
+        stmt = stmt.where(proposals.c.id < before_id)
+    rows = await fetch_all(conn, stmt.order_by(proposals.c.id.desc()).limit(limit))
+    return [dict(row) for row in rows]
+
+
+# ---- evolve state ----------------------------------------------------------
+
+
+async def get_evolve_state(conn: aiosqlite.Connection) -> dict[str, Any] | None:
+    row = await fetch_one(
+        conn,
+        select(
+            evolve_state.c.paused,
+            evolve_state.c.paused_by,
+            evolve_state.c.paused_at,
+            evolve_state.c.updated_at,
+        ).where(evolve_state.c.id == 1),
+    )
+    return dict(row) if row is not None else None
+
+
+async def set_evolve_state(
+    conn: aiosqlite.Connection,
+    *,
+    paused: bool,
+    paused_by: str | None,
+    paused_at: str | None,
+    updated_at: str,
+) -> None:
+    """Write the single ``evolve_state`` row (id 1), inserting it the first time."""
+    values = {
+        "paused": 1 if paused else 0,
+        "paused_by": paused_by,
+        "paused_at": paused_at,
+        "updated_at": updated_at,
+    }
+    stmt = sqlite_insert(evolve_state).values(id=1, **values)
+    await run(conn, stmt.on_conflict_do_update(index_elements=[evolve_state.c.id], set_=values))

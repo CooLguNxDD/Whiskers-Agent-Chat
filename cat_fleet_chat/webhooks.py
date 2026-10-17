@@ -51,8 +51,12 @@ def event_actor(event: dict[str, Any]) -> str | None:
         return history[-1].get("actor") if history else None
     if kind in {"feed_post", "feed_repost", "knowledge_fact"}:
         return payload.get("author")
+    if kind in {"proposal_created", "proposal_updated"}:
+        return payload.get("actor") or payload.get("author")
     if kind == "feed_follow":
         return payload.get("follower")
+    if kind in {"reaction_added", "reaction_removed"}:
+        return payload.get("handle")
     if kind == "mail":
         return payload.get("sender")
     return payload.get("actor")
@@ -167,6 +171,16 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
     if kind == "feed_follow":
         verb = "followed" if payload.get("following") else "unfollowed"
         return f"👀 `{payload.get('follower', '?')}` {verb} `{payload.get('followee', '?')}`"
+    if kind in {"reaction_added", "reaction_removed"}:
+        verb = "reacted" if kind == "reaction_added" else "removed"
+        icon = {
+            "+1": "👍", "-1": "👎", "heart": "❤️", "laugh": "😄",
+            "eyes": "👀", "tada": "🎉", "rocket": "🚀", "thinking": "🤔",
+        }.get(payload.get("kind"), "💬")
+        return (
+            f"{icon} `{payload.get('handle', '?')}` {verb} {payload.get('kind', '?')} on "
+            f"`{payload.get('post_author', '?')}`'s post {payload.get('post_id')}"
+        )
     if kind == "mail":
         # The event never carries the body; neither does the notice.
         subject = _clip(str(payload.get("subject") or ""), 120)
@@ -176,6 +190,21 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
         where = f"{payload.get('project', '?')}/{payload.get('topic', '?')}"
         fact = _clip(" ".join(str(payload.get("fact", "")).split()), QUOTE_CLIP)
         return f"💡 `{payload.get('author', '?')}` learned ({where}): {fact}"
+    if kind in {"proposal_created", "proposal_updated"}:
+        title = _clip(" ".join(str(payload.get("title", "")).split()), QUOTE_CLIP)
+        head = f"🗳️ {payload.get('id', '?')} ({payload.get('project', '?')}) \"{title}\""
+        if kind == "proposal_created":
+            return f"{head} proposed by `{payload.get('author', '?')}`, weight {payload.get('weight')}"
+        if payload.get("previous_status"):
+            line = f"{head}: {payload['previous_status']} → {payload.get('status')} by `{payload.get('actor', '?')}`"
+            if payload.get("reason"):
+                line += f" — {_clip(str(payload['reason']), 200)}"
+            return line
+        changed = ", ".join(payload.get("changed") or [])
+        return f"{head} edited by `{payload.get('actor', '?')}`" + (f" ({changed})" if changed else "")
+    if kind in {"evolve_paused", "evolve_resumed"}:
+        icon, verb = ("⏸️", "paused") if kind == "evolve_paused" else ("▶️", "resumed")
+        return f"{icon} evolve {verb} by `{payload.get('actor', '?')}`"
     if kind == "webhook.ping":
         return f"🔔 Cat Fleet webhook **{payload.get('name')}** is connected"
     return f"{kind} #{event.get('id')}"
@@ -185,8 +214,15 @@ def chat_payloads(
     events: list[dict[str, Any]],
     fmt: str,
     parents: dict[int, dict[str, Any]] | None = None,
+    *,
+    refs: bool = False,
 ) -> list[dict[str, Any]]:
-    """Discord or Slack bodies for ``events``. Lines are coalesced up to the 2000-char limit."""
+    """Discord or Slack bodies for ``events``. Lines are coalesced up to the 2000-char limit.
+
+    ``refs`` (``CAT_FLEET_DISCORD_REFS``) adds a ``cat-fleet-ref:`` footer to
+    single-event Discord posts for the relay's reaction actions; off by default
+    because the footer is visible in Discord.
+    """
     lines = [event_line(event, parents) for event in events]
     if fmt == "slack":
         # Slack bold is *x*; defang <!channel>, <!here> and <@user> so message
@@ -196,22 +232,40 @@ def chat_payloads(
             for line in lines
         ]
     chunks: list[str] = []
+    chunk_events: list[list[dict[str, Any]]] = []
+    current_events: list[dict[str, Any]] = []
     current = ""
-    for line in lines:
+    for line, event in zip(lines, events):
         line = _clip(line, CHAT_LIMIT)
         if current and len(current) + 1 + len(line) > CHAT_LIMIT:
             chunks.append(current)
-            current = line
+            chunk_events.append(current_events)
+            current, current_events = line, [event]
         else:
             current = f"{current}\n{line}" if current else line
+            current_events.append(event)
     if current:
         chunks.append(current)
+        chunk_events.append(current_events)
     if fmt == "discord":
         # parse=[] turns every @everyone/@here/<@id> in agent text into plain text.
-        return [
-            {"content": chunk, "username": "Cat Fleet", "allowed_mentions": {"parse": []}}
-            for chunk in chunks
-        ]
+        payloads = []
+        for chunk, grouped in zip(chunks, chunk_events):
+            body: dict[str, Any] = {
+                "content": chunk, "username": "Cat Fleet", "allowed_mentions": {"parse": []},
+            }
+            # A typed reference lets the relay recover a reply/vote target after
+            # restart. Never assign one id to a coalesced multi-event message.
+            if refs and len(grouped) == 1 and grouped[0]["kind"] in {"message.created", "feed_post"}:
+                event = grouped[0]
+                post_id = (event.get("payload") or {}).get("id", event.get("entity_id"))
+                if type(post_id) is int and post_id > 0:
+                    ref = {"kind": "feed" if event["kind"] == "feed_post" else "message", "id": post_id}
+                    if ref["kind"] == "message":
+                        ref["channel"] = event.get("channel")
+                    body["embeds"] = [{"footer": {"text": "cat-fleet-ref:" + json.dumps(ref, separators=(",", ":"))}}]
+            payloads.append(body)
+        return payloads
     return [{"text": chunk} for chunk in chunks]
 
 
@@ -287,9 +341,11 @@ class WebhookDispatcher:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         min_interval: float = 2.0,
+        discord_refs: bool = False,
     ) -> None:
         self.hub = hub
         self.min_interval = min_interval
+        self.discord_refs = discord_refs
         self._client = httpx.AsyncClient(
             timeout=10.0, transport=transport, headers={"User-Agent": USER_AGENT}
         )
@@ -392,7 +448,7 @@ class WebhookDispatcher:
     ) -> list[_Request]:
         if hook["format"] == "generic":
             return [_Request(generic_request(hook, event), int(event["id"])) for event in chosen]
-        payloads = chat_payloads(chosen, hook["format"], parents)
+        payloads = chat_payloads(chosen, hook["format"], parents, refs=self.discord_refs)
         last = int(chosen[-1]["id"])
         # Only the final chunk moves the cursor to the end of the batch.
         return [

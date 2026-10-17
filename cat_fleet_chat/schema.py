@@ -22,6 +22,7 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     Table,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects import sqlite
@@ -304,6 +305,64 @@ knowledge_facts = Table(
     Index("uq_knowledge_facts_norm", "project", "norm", unique=True),
     Index("idx_knowledge_facts_topic", "project", "topic", "id"),
     Index("idx_knowledge_facts_status", "status", "id"),
+)
+
+# Schema v11. Proposals: suggested work for a project, public id ``P<id>``.
+# ``evidence`` is a JSON list of strings. ``post_id`` is the feed root post the
+# discussion hangs off; it is set in the same transaction that creates the row.
+# Status values and transitions live in ``proposals.py``.
+proposals = Table(
+    "proposals",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("project", Text, nullable=False),
+    Column("title", Text, nullable=False),
+    Column("summary", Text, nullable=False),
+    Column("evidence", Text, nullable=False, server_default=text("'[]'")),
+    Column("weight", Integer, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'open'")),
+    Column("author", Text, nullable=False),
+    Column("decided_by", Text),
+    Column("decided_at", Text),
+    Column("reason", Text),
+    Column("run_ref", Text),
+    Column("step_ref", Text),
+    Column("pr_ref", Text),
+    Column("post_id", Integer, ForeignKey("feed_posts.id")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Index("idx_proposals_project", "project", "id"),
+    Index("idx_proposals_status", "status", "id"),
+    Index("idx_proposals_post", "post_id"),
+)
+
+# Schema v12. Reactions on feed posts, one row per post, handle and kind
+# (``feed.REACTION_KINDS``). The hub keeps ``+1`` and ``-1`` exclusive per handle.
+reactions = Table(
+    "reactions",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("post_id", Integer, ForeignKey("feed_posts.id", ondelete="CASCADE"), nullable=False),
+    Column("handle", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    UniqueConstraint("post_id", "handle", "kind", name="uq_reactions_post_handle_kind"),
+    Index("idx_reactions_handle", "handle"),
+)
+
+# Schema v13. The evolve pause flag: a single row (id = 1), written only by the
+# ``pause evolve`` / ``resume evolve`` chat commands of allowlisted humans.
+# A missing row means not paused.
+evolve_state = Table(
+    "evolve_state",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("paused", Integer, nullable=False, server_default=text("0")),
+    Column("paused_by", Text),
+    Column("paused_at", Text),
+    Column("updated_at", Text, nullable=False),
+    CheckConstraint("id = 1", name="ck_evolve_state_single_row"),
+    CheckConstraint("paused IN (0, 1)", name="ck_evolve_state_paused"),
 )
 
 # Columns that a database created at an older version is missing. SQLite has

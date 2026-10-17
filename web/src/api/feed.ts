@@ -1,5 +1,5 @@
 import { api, queryString } from "./client"
-import type { FeedPost, FollowResult, ThreadPage, TimelinePage } from "./types"
+import type { FeedPost, FollowResult, PostReactions, ReactionState, ThreadPage, TimelinePage } from "./types"
 
 export type TimelineScope =
   | { scope: "global" }
@@ -83,5 +83,26 @@ export function listFollowing(handle: string) {
 export function trendingTags(limit?: number) {
   return api<{ since: string; tags: { tag: string; count: number }[] }>(
     `/api/v1/feed/tags/trending${queryString({ limit })}`,
+  )
+}
+
+/** Exact reaction counts for a post, plus the oldest reacting handles per kind. */
+export function listReactions(postId: number, handle?: string, signal?: AbortSignal) {
+  return api<PostReactions>(`/api/v1/feed/posts/${postId}/reactions${queryString({ handle })}`, { signal })
+}
+
+/** React. `+1` and `-1` exclude each other: voting one replaces the other. */
+export function react(postId: number, kind: string, handle: string) {
+  return api<ReactionState>(`/api/v1/feed/posts/${postId}/reactions/${encodeURIComponent(kind)}`, {
+    method: "PUT",
+    body: JSON.stringify({ handle }),
+  })
+}
+
+/** Remove one reaction. The hub reads the handle from the query string (no body). */
+export function unreact(postId: number, kind: string, handle: string) {
+  return api<ReactionState>(
+    `/api/v1/feed/posts/${postId}/reactions/${encodeURIComponent(kind)}${queryString({ handle })}`,
+    { method: "DELETE" },
   )
 }

@@ -11,7 +11,7 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import embed, feed, knowledge, mailbox, store, validate
+from cat_fleet_chat import embed, evolve, feed, knowledge, mailbox, proposals, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -121,6 +121,9 @@ class Hub:
         # Index entries touched by the running write transaction. They go to
         # the embed queue only after the commit, so it never reads stale text.
         self._reindexed: list[tuple[str, int]] = []
+        # Handles whose chat commands (evolve.py) steer proposals and the evolve
+        # pause flag. The app sets it from CAT_FLEET_HUMAN_HANDLES; empty means nobody.
+        self.human_handles: frozenset[str] = frozenset()
 
     async def _write(self, fn):
         result = await self.db.write(fn)
@@ -426,8 +429,10 @@ class Hub:
         if clean_origin:
             payload["origin"] = clean_origin
         digest = fingerprint("message", payload) if key else None
+        replayed = False
 
         async def op(conn):
+            nonlocal replayed
             if key and digest is not None:
                 prior = await store.get_idempotency(conn, key)
                 if prior is not None:
@@ -438,6 +443,7 @@ class Hub:
                             409,
                             {"client_request_id": key},
                         )
+                    replayed = True
                     return prior["result"]
             found = await store.get_channel_by_name(conn, clean_channel)
             if found is None:
@@ -485,7 +491,11 @@ class Hub:
                 await store.insert_idempotency(conn, key, "message", digest, result, created_at)
             return result
 
-        return await self._txn(op)
+        result = await self._txn(op)
+        # A retried post already ran its command the first time.
+        if not replayed:
+            await self._run_command(result["message"])
+        return result
 
     @staticmethod
     async def _resolve_destination(
@@ -1336,6 +1346,7 @@ class Hub:
         ids = [row["id"] for row in rows] + list(originals)
         counts = await store.feed_counts(conn, ids)
         tags = await store.feed_tags_for(conn, ids)
+        reacted = await store.reaction_counts(conn, ids)
         inline: dict[int, dict[str, Any]] = {}
         for target in targets:
             found = originals.get(target)
@@ -1343,7 +1354,10 @@ class Hub:
                 inline[target] = feed.tombstone_original(target)
             else:
                 inline[target] = feed.shape_post(
-                    found, counts=counts.get(target), hashtags=tags.get(target)
+                    found,
+                    counts=counts.get(target),
+                    hashtags=tags.get(target),
+                    reactions=reacted.get(target),
                 )
         return [
             feed.shape_post(
@@ -1351,6 +1365,7 @@ class Hub:
                 counts=counts.get(row["id"]),
                 hashtags=tags.get(row["id"]),
                 original=inline.get(row.get("repost_of") or row.get("quote_of")),
+                reactions=reacted.get(row["id"]),
             )
             for row in rows
         ]
@@ -1371,6 +1386,53 @@ class Hub:
         if found["deleted_at"] is not None:
             raise HubError("post_deleted", f"post {found['id']} was deleted", 409, {"field": field})
         return found
+
+    async def _feed_insert(
+        self,
+        conn,
+        *,
+        author: str,
+        body: str,
+        parent_id: int | None,
+        root_id: int | None,
+        quote_of: int | None,
+        depth: int,
+        created_at: str,
+    ) -> dict[str, Any]:
+        """Insert one validated post with its hashtags and ``feed_post`` event, in the caller's transaction."""
+        tags = feed.extract_hashtags(body)
+        post_id = await store.insert_feed_post(
+            conn,
+            author=author,
+            body=body,
+            parent_id=parent_id,
+            root_id=root_id,
+            repost_of=None,
+            quote_of=quote_of,
+            depth=depth,
+            created_at=created_at,
+            tags=tags,
+        )
+        post = await self._feed_post_shape(conn, post_id)
+        await store.insert_event(
+            conn,
+            "feed_post",
+            None,
+            post_id,
+            {
+                "id": post_id,
+                "kind": post["kind"],
+                "author": author,
+                "parent_id": parent_id,
+                "root_id": post["root_id"],
+                "quote_of": quote_of,
+                "depth": depth,
+                "hashtags": tags,
+                "body": feed.event_snippet(body),
+            },
+            created_at,
+        )
+        return post
 
     async def feed_post(
         self,
@@ -1398,7 +1460,6 @@ class Hub:
         key = client_request_id_fn(client_request_id)
         payload = {"author": clean_author, "body": clean_body, "parent_id": parent, "quote_of": quoted}
         digest = fingerprint("feed_post", payload) if key else None
-        tags = feed.extract_hashtags(clean_body)
 
         async def op(conn):
             if key and digest is not None:
@@ -1435,36 +1496,15 @@ class Hub:
             if quoted is not None:
                 quote_target = (await self._live_original(conn, quoted, "quote_of"))["id"]
             created_at = utc_now()
-            post_id = await store.insert_feed_post(
+            post = await self._feed_insert(
                 conn,
                 author=clean_author,
                 body=clean_body,
                 parent_id=parent,
                 root_id=root_id,
-                repost_of=None,
                 quote_of=quote_target,
                 depth=depth,
                 created_at=created_at,
-                tags=tags,
-            )
-            post = await self._feed_post_shape(conn, post_id)
-            await store.insert_event(
-                conn,
-                "feed_post",
-                None,
-                post_id,
-                {
-                    "id": post_id,
-                    "kind": post["kind"],
-                    "author": clean_author,
-                    "parent_id": parent,
-                    "root_id": post["root_id"],
-                    "quote_of": quote_target,
-                    "depth": depth,
-                    "hashtags": tags,
-                    "body": feed.event_snippet(clean_body),
-                },
-                created_at,
             )
             result = {"post": post}
             if key and digest is not None:
@@ -1753,6 +1793,141 @@ class Hub:
 
         return {"since": clean_since, "tags": await self.db.read(op)}
 
+    # ---- reactions ------------------------------------------------------
+
+    @staticmethod
+    async def _reaction_target(conn, post_id: int, *, live: bool) -> dict[str, Any]:
+        """The post a reaction lands on. A plain repost resolves to what it reposted.
+
+        ``live`` also refuses a deleted post (the repost itself or what it reposted),
+        with the same not-found error as a missing one.
+        """
+        missing = HubError("not_found", f"post {post_id} not found", 404, {"field": "post_id"})
+        found = await store.get_feed_row(conn, post_id)
+        if found is not None and live and found["deleted_at"] is not None:
+            raise missing
+        if found is not None and found["repost_of"] is not None:
+            found = await store.get_feed_row(conn, found["repost_of"])
+        if found is None or (live and found["deleted_at"] is not None):
+            raise missing
+        return found
+
+    @staticmethod
+    async def _reaction_state(conn, post_id: int, who: str) -> dict[str, Any]:
+        counts = (await store.reaction_counts(conn, [post_id])).get(post_id, {})
+        return {
+            "post_id": post_id,
+            "handle": who,
+            "reactions": counts,
+            "score": feed.reaction_score(counts),
+            "mine": await store.handle_reactions(conn, post_id, who),
+        }
+
+    @staticmethod
+    async def _reaction_event(
+        conn, kind: str, post: dict[str, Any], who: str, reaction: str, created_at: str
+    ) -> None:
+        await store.insert_event(
+            conn,
+            kind,
+            None,
+            int(post["id"]),
+            {"post_id": int(post["id"]), "handle": who, "kind": reaction, "post_author": post["author"]},
+            created_at,
+        )
+
+    async def react(self, handle_value: Any, post_id: Any, kind: Any) -> dict[str, Any]:
+        """``handle`` reacts to a post with ``kind`` (``feed.REACTION_KINDS``).
+
+        Repeating a reaction is a no-op. ``+1`` and ``-1`` exclude each other:
+        voting one removes the other (``replaced`` names it). Emoji kinds are
+        independent. A missing or deleted post is not found.
+        """
+        who = handle(handle_value, "handle")
+        target = require_id(post_id, "post_id")
+        clean_kind = feed.reaction_kind(kind)
+
+        async def op(conn):
+            post = await self._reaction_target(conn, target, live=True)
+            created_at = utc_now()
+            replaced: list[str] = []
+            if clean_kind in feed.VOTE_KINDS:
+                for other in feed.VOTE_KINDS:
+                    if other != clean_kind and await store.delete_reaction(conn, post["id"], who, other):
+                        replaced.append(other)
+                        await self._reaction_event(conn, "reaction_removed", post, who, other, created_at)
+            added = await store.insert_reaction(conn, post["id"], who, clean_kind, created_at)
+            if added:
+                await self._reaction_event(conn, "reaction_added", post, who, clean_kind, created_at)
+            state = await self._reaction_state(conn, int(post["id"]), who)
+            return {**state, "kind": clean_kind, "replaced": replaced, "idempotent": not added}
+
+        return await self._txn(op)
+
+    async def unreact(self, handle_value: Any, post_id: Any, kind: Any) -> dict[str, Any]:
+        """Remove one of ``handle``'s reactions. Removing one it does not hold is a no-op."""
+        who = handle(handle_value, "handle")
+        target = require_id(post_id, "post_id")
+        clean_kind = feed.reaction_kind(kind)
+
+        async def op(conn):
+            post = await self._reaction_target(conn, target, live=False)
+            removed = await store.delete_reaction(conn, post["id"], who, clean_kind)
+            if removed:
+                await self._reaction_event(conn, "reaction_removed", post, who, clean_kind, utc_now())
+            state = await self._reaction_state(conn, int(post["id"]), who)
+            return {**state, "kind": clean_kind, "idempotent": not removed}
+
+        return await self._txn(op)
+
+    async def list_reactions(self, post_id: Any, handle_value: Any = None) -> dict[str, Any]:
+        """Exact counts/score for a live post; oldest 100 reacting handles per kind.
+
+        With ``handle_value`` the answer also carries ``mine``: the kinds that
+        handle holds, exact even when it is outside the sample.
+        """
+        target = require_id(post_id, "post_id")
+        who = optional_handle(handle_value, "handle")
+
+        async def op(conn):
+            post = await self._reaction_target(conn, target, live=True)
+            found = int(post["id"])
+            mine = await store.handle_reactions(conn, found, who) if who else None
+            return found, await store.reaction_rows(conn, found), mine
+
+        found_id, rows, mine = await self.db.read(op)
+        by_kind: dict[str, list[str]] = {}
+        totals: dict[str, int] = {}
+        for row in rows:
+            by_kind.setdefault(row["kind"], []).append(row["handle"])
+            totals[row["kind"]] = int(row["total"])
+        counts = {kind: totals[kind] for kind in feed.REACTION_KINDS if kind in totals}
+        listed = {
+            "post_id": found_id,
+            "reactions": counts,
+            "handles": {kind: by_kind[kind] for kind in counts},
+            "score": feed.reaction_score(counts),
+        }
+        if mine is not None:
+            listed["mine"] = mine
+        return listed
+
+    async def reaction_counts(self, post_ids: Any) -> dict[int, dict[str, Any]]:
+        """``{post_id: {"reactions": {kind: n}, "score": n}}`` for many posts in one query.
+
+        Every requested id is in the answer, with empty counts when nothing reacted.
+        """
+        ids = sorted({require_id(value, "post_ids") for value in (post_ids or [])})
+
+        async def op(conn):
+            return await store.reaction_counts(conn, ids)
+
+        found = await self.db.read(op) if ids else {}
+        return {
+            post_id: {"reactions": found.get(post_id, {}), "score": feed.reaction_score(found.get(post_id, {}))}
+            for post_id in ids
+        }
+
     # ---- webhooks -------------------------------------------------------
 
     # ---- knowledge facts --------------------------------------------------
@@ -2016,6 +2191,308 @@ class Hub:
                 exc.message,
             )
             result["knowledge_error"] = exc.message
+
+    # ---- proposals --------------------------------------------------------
+
+    async def create_proposal(
+        self,
+        author: Any,
+        project: Any,
+        title: Any,
+        summary: Any,
+        weight: Any,
+        evidence: Any = None,
+        run_ref: Any = None,
+        step_ref: Any = None,
+        pr_ref: Any = None,
+        client_request_id: Any = None,
+    ) -> dict[str, Any]:
+        """Open a proposal ``P<n>`` and its ``#proposal`` feed root post, in one transaction.
+
+        Discussion is replies to ``post_id``. ``client_request_id`` makes a retry
+        return the first result. Feed post hooks (LEARNED facts) do not run for
+        the root post.
+        """
+        clean = {
+            "author": handle(author, "author"),
+            "project": proposals.project_slug(project),
+            "title": proposals.title_text(title),
+            "summary": proposals.summary_text(summary),
+            "weight": proposals.weight_value(weight),
+            "evidence": proposals.evidence_list(evidence),
+        }
+        for name, value in (("run_ref", run_ref), ("step_ref", step_ref), ("pr_ref", pr_ref)):
+            ref = proposals.ref_text(value, name)
+            if ref is not None:
+                clean[name] = ref
+        key = client_request_id_fn(client_request_id)
+        digest = fingerprint("proposal", clean) if key else None
+
+        async def op(conn):
+            if key and digest is not None:
+                prior = await store.get_idempotency(conn, key)
+                if prior is not None:
+                    if prior["fingerprint"] != digest or prior["kind"] != "proposal":
+                        raise HubError(
+                            "idempotency_conflict",
+                            "client_request_id was already used with a different payload",
+                            409,
+                            {"client_request_id": key},
+                        )
+                    return prior["result"]
+            now = utc_now()
+            number = await store.insert_proposal(
+                conn,
+                {
+                    **clean,
+                    "evidence": proposals.evidence_json(clean["evidence"]),
+                    "status": "open",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            post = await self._feed_insert(
+                conn,
+                author=clean["author"],
+                body=proposals.post_body(number, clean["title"], clean["summary"]),
+                parent_id=None,
+                root_id=None,
+                quote_of=None,
+                depth=0,
+                created_at=now,
+            )
+            await store.update_proposal(conn, number, {"post_id": post["id"]})
+            row = await store.get_proposal(conn, number)
+            assert row is not None
+            shaped = proposals.shape_proposal(row)
+            await store.insert_event(
+                conn,
+                "proposal_created",
+                None,
+                number,
+                proposals.event_payload(shaped, actor=clean["author"]),
+                now,
+            )
+            result = {"proposal": shaped}
+            if key and digest is not None:
+                await store.insert_idempotency(conn, key, "proposal", digest, result, now)
+            return result
+
+        return await self._txn(op)
+
+    async def get_proposal(self, proposal_id: Any) -> dict[str, Any]:
+        """One proposal by ``P<n>`` or ``n``."""
+        number = proposals.proposal_number(proposal_id)
+
+        async def op(conn):
+            return await store.get_proposal(conn, number)
+
+        row = await self.db.read(op)
+        if row is None:
+            raise HubError("not_found", f"proposal {proposals.public_id(number)} not found", 404)
+        return {"proposal": proposals.shape_proposal(row)}
+
+    async def list_proposals(
+        self,
+        project: Any = None,
+        status: Any = None,
+        cursor: Any = None,
+        limit: Any = None,
+    ) -> dict[str, Any]:
+        """Proposals newest first with opaque ``cursor`` paging. Filters are exact matches."""
+        clean_project = proposals.optional_project(project)
+        clean_status = proposals.optional_status(status)
+        before = feed.decode_cursor(cursor)
+        clean_limit = page_limit(limit)
+
+        async def op(conn):
+            return await store.list_proposals(
+                conn, project=clean_project, status=clean_status, before_id=before, limit=clean_limit + 1
+            )
+
+        rows = await self.db.read(op)
+        has_more = len(rows) > clean_limit
+        found = [proposals.shape_proposal(row) for row in rows[:clean_limit]]
+        return {
+            "proposals": found,
+            "next_cursor": feed.encode_cursor(found[-1]["number"]) if has_more and found else None,
+            "has_more": has_more,
+        }
+
+    async def update_proposal(self, proposal_id: Any, actor: Any, changes: Any) -> dict[str, Any]:
+        """Edit fields and/or change status. ``changes`` keys: ``proposals.EDITABLE_FIELDS``,
+        ``status`` and ``reason``.
+
+        Fields are editable while the proposal is ``open`` or ``accepted``;
+        ``building`` / ``built`` take only the refs. A status change follows
+        ``proposals.TRANSITIONS``. Moving to accepted, rejected or withdrawn
+        records ``decided_by``, ``decided_at`` and ``reason`` (required to
+        reject); reopening clears them. A change that alters nothing returns
+        ``idempotent: true`` and emits no event.
+        """
+        number = proposals.proposal_number(proposal_id)
+        clean_actor = handle(actor, "actor")
+        fields, target, reason = proposals.clean_changes(changes)
+        if target in proposals.REASON_REQUIRED and reason is None:
+            raise HubError(
+                "validation_error", f"a reason is required to mark a proposal {target}", 400, {"field": "reason"}
+            )
+
+        async def op(conn):
+            row = await store.get_proposal(conn, number)
+            if row is None:
+                raise HubError("not_found", f"proposal {proposals.public_id(number)} not found", 404)
+            current = proposals.shape_proposal(row)
+            previous = current["status"]
+            if target is not None:
+                proposals.check_transition(previous, target)
+            try:
+                proposals.check_editable(previous, fields)
+            except HubError:
+                # A reopen (or other move) may carry edits the new status allows.
+                if target is None:
+                    raise
+                proposals.check_editable(target, fields)
+            changed = [name for name, value in fields.items() if current[name] != value]
+            if not changed and target is None:
+                return {"proposal": current, "previous_status": previous, "idempotent": True}
+            now = utc_now()
+            values: dict[str, Any] = {name: fields[name] for name in changed}
+            if "evidence" in values:
+                values["evidence"] = proposals.evidence_json(values["evidence"])
+            if target is not None:
+                values["status"] = target
+                if target in proposals.DECISION_STATUSES:
+                    values.update(decided_by=clean_actor, decided_at=now, reason=reason)
+                elif target == "open":
+                    values.update(decided_by=None, decided_at=None, reason=None)
+            values["updated_at"] = now
+            await store.update_proposal(conn, number, values)
+            fresh = await store.get_proposal(conn, number)
+            assert fresh is not None
+            shaped = proposals.shape_proposal(fresh)
+            await store.insert_event(
+                conn,
+                "proposal_updated",
+                None,
+                number,
+                proposals.event_payload(
+                    shaped,
+                    actor=clean_actor,
+                    previous_status=previous if target is not None else None,
+                    changed=changed,
+                ),
+                now,
+            )
+            return {"proposal": shaped, "previous_status": previous, "idempotent": False}
+
+        return await self._txn(op)
+
+    # ---- evolve commands --------------------------------------------------
+
+    def is_human(self, author: Any) -> bool:
+        """Whether ``author`` is on the human allowlist (case-insensitive)."""
+        if not isinstance(author, str) or not self.human_handles:
+            return False
+        return author.lower() in {name.lower() for name in self.human_handles}
+
+    async def _run_command(self, message: dict[str, Any]) -> None:
+        """Apply the evolve command in a stored message and ack it in the same channel.
+
+        Only allowlisted humans command. Other senders' messages stay ordinary
+        messages: no error and no ack. The ack is posted as ``evolve.ACK_AUTHOR``,
+        whose messages are never parsed, so acks cannot loop. A failure here never
+        reaches the sender: their message is already stored.
+        """
+        author = message.get("author")
+        if author == evolve.ACK_AUTHOR or not self.is_human(author):
+            return
+        command = evolve.parse_command(message.get("text"))
+        if command is None:
+            return
+        try:
+            outcome = await self.apply_command(command, author)
+            await self.post_message(
+                message["channel"], evolve.ACK_AUTHOR, outcome["text"], reply_to=message["id"]
+            )
+        except Exception:  # noqa: BLE001 — the command message itself is committed
+            logger.exception("evolve command in message %s failed", message.get("id"))
+
+    async def apply_command(self, command: evolve.Command, handle_value: Any) -> dict[str, Any]:
+        """Apply one parsed command for ``handle_value`` and describe the outcome.
+
+        Returns ``ok``, ``command`` and ``text`` (the ack), plus ``proposal`` or
+        ``evolve`` on success and ``error`` (a HubError code) on refusal. An
+        unknown proposal, an invalid transition or a bad value never raises.
+        The caller checks the allowlist.
+        """
+        base: dict[str, Any] = {"command": command.verb}
+        try:
+            if command.verb in ("pause", "resume"):
+                result = await self.set_evolve_paused(command.verb == "pause", handle_value)
+                return {**base, "ok": True, "evolve": result["evolve"], "text": evolve.ack_text(command, result)}
+            if command.verb == "approve":
+                changes: dict[str, Any] = {"status": "accepted"}
+            elif command.verb == "reject":
+                changes = {"status": "rejected", "reason": command.reason}
+            elif command.verb == "edit" and command.field is not None:
+                changes = {command.field: command.value}
+            else:
+                raise HubError("validation_error", f"unknown command {command.verb}", 400)
+            result = await self.update_proposal(command.number, handle_value, changes)
+            return {**base, "ok": True, "proposal": result["proposal"], "text": evolve.ack_text(command, result)}
+        except HubError as exc:
+            return {
+                **base,
+                "ok": False,
+                "error": exc.code,
+                "text": evolve.error_text(command, exc.code, exc.message),
+            }
+
+    @staticmethod
+    def _shape_evolve(row: dict[str, Any] | None) -> dict[str, Any]:
+        if row is None:
+            return {"paused": False, "by": None, "at": None}
+        return {"paused": bool(row["paused"]), "by": row["paused_by"], "at": row["paused_at"]}
+
+    async def evolve_state(self) -> dict[str, Any]:
+        """The evolve pause flag: ``{"paused", "by", "at"}``. ``by``/``at`` say who paused and when."""
+        return self._shape_evolve(await self.db.read(store.get_evolve_state))
+
+    async def set_evolve_paused(self, paused: Any, handle_value: Any) -> dict[str, Any]:
+        """Pause or resume evolve. Setting the current value returns ``idempotent: true``.
+
+        Only the ``pause evolve`` / ``resume evolve`` chat commands of allowlisted
+        humans call this; there is no REST or MCP write. Emits ``evolve_paused``
+        or ``evolve_resumed`` with no channel.
+        """
+        target = _flag(paused)
+        actor = handle(handle_value, "actor")
+
+        async def op(conn):
+            current = self._shape_evolve(await store.get_evolve_state(conn))
+            if current["paused"] == target:
+                return {"evolve": current, "idempotent": True}
+            now = utc_now()
+            await store.set_evolve_state(
+                conn,
+                paused=target,
+                paused_by=actor if target else None,
+                paused_at=now if target else None,
+                updated_at=now,
+            )
+            fresh = self._shape_evolve(await store.get_evolve_state(conn))
+            await store.insert_event(
+                conn,
+                "evolve_paused" if target else "evolve_resumed",
+                None,
+                1,
+                {**fresh, "actor": actor},
+                now,
+            )
+            return {"evolve": fresh, "idempotent": False}
+
+        return await self._txn(op)
 
     @staticmethod
     def _hook_ident(value: Any) -> int | str:

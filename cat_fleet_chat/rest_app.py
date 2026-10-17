@@ -622,12 +622,103 @@ async def feed_followers(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+async def feed_reaction(request: Request) -> JSONResponse:
+    """``PUT`` reacts, ``DELETE`` unreacts (query-string handle, no body)."""
+    try:
+        hub = _hub(request)
+        post_id = request.path_params["post_id"]
+        kind = request.path_params["kind"]
+        if request.method.upper() == "DELETE":
+            return JSONResponse(await hub.unreact(_caller(request, {}, "handle"), post_id, kind))
+        body = await _body(request)
+        result = await hub.react(_caller(request, body, "handle"), post_id, kind)
+        return JSONResponse(result, status_code=200 if result.get("idempotent") else 201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def feed_reactions(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(
+            await _hub(request).list_reactions(request.path_params["post_id"], request.query_params.get("handle"))
+        )
+    except HubError as exc:
+        return _json_error(exc)
+
+
 async def feed_trending(request: Request) -> JSONResponse:
     try:
         params = request.query_params
         return JSONResponse(
             await _hub(request).feed_trending_tags(params.get("limit"), params.get("since"))
         )
+    except HubError as exc:
+        return _json_error(exc)
+
+
+# ---- proposals ---------------------------------------------------------
+
+# Body keys that name the caller rather than a change.
+_CALLER_KEYS = ("actor", "agent_name")
+
+
+async def create_proposal(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).create_proposal(
+            _caller(request, body, "author"),
+            body.get("project"),
+            body.get("title"),
+            body.get("summary"),
+            body.get("weight"),
+            evidence=body.get("evidence"),
+            run_ref=body.get("run_ref"),
+            step_ref=body.get("step_ref"),
+            pr_ref=body.get("pr_ref"),
+            client_request_id=body.get("client_request_id"),
+        )
+        return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def list_proposals(request: Request) -> JSONResponse:
+    try:
+        params = request.query_params
+        result = await _hub(request).list_proposals(
+            project=params.get("project"),
+            status=params.get("status"),
+            cursor=params.get("cursor"),
+            limit=params.get("limit"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def get_proposal(request: Request) -> JSONResponse:
+    try:
+        return JSONResponse(await _hub(request).get_proposal(request.path_params["proposal_id"]))
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def update_proposal(request: Request) -> JSONResponse:
+    """``PATCH /api/v1/proposals/{id}``: editable fields, ``status`` and ``reason``; ``actor`` names the caller."""
+    try:
+        body = await _body(request)
+        actor = _caller(request, body, "actor")
+        changes = {key: value for key, value in body.items() if key not in _CALLER_KEYS}
+        result = await _hub(request).update_proposal(request.path_params["proposal_id"], actor, changes)
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def evolve_state(request: Request) -> JSONResponse:
+    """``GET /api/v1/evolve/state``: the pause flag. Read-only: pausing is a human chat command."""
+    try:
+        return JSONResponse(await _hub(request).evolve_state())
     except HubError as exc:
         return _json_error(exc)
 
@@ -896,11 +987,18 @@ def api_routes() -> list[Route]:
         Route("/api/v1/feed/posts/{post_id:int}", feed_get_post, methods=["GET"]),
         Route("/api/v1/feed/posts/{post_id:int}", feed_delete_post, methods=["DELETE"]),
         Route("/api/v1/feed/posts/{post_id:int}/repost", feed_repost, methods=["POST"]),
+        Route("/api/v1/feed/posts/{post_id:int}/reactions", feed_reactions, methods=["GET"]),
+        Route("/api/v1/feed/posts/{post_id:int}/reactions/{kind}", feed_reaction, methods=["PUT", "DELETE"]),
         Route("/api/v1/feed/timeline", feed_timeline, methods=["GET"]),
         Route("/api/v1/feed/follows/{followee}", feed_follow, methods=["PUT", "DELETE"]),
         Route("/api/v1/feed/follows/{handle}", feed_following, methods=["GET"]),
         Route("/api/v1/feed/followers/{handle}", feed_followers, methods=["GET"]),
         Route("/api/v1/feed/tags/trending", feed_trending, methods=["GET"]),
+        Route("/api/v1/proposals", create_proposal, methods=["POST"]),
+        Route("/api/v1/proposals", list_proposals, methods=["GET"]),
+        Route("/api/v1/proposals/{proposal_id}", get_proposal, methods=["GET"]),
+        Route("/api/v1/proposals/{proposal_id}", update_proposal, methods=["PATCH"]),
+        Route("/api/v1/evolve/state", evolve_state, methods=["GET"]),
         Route("/api/v1/knowledge/facts", knowledge_add, methods=["POST"]),
         Route("/api/v1/knowledge/facts", knowledge_list, methods=["GET"]),
         Route("/api/v1/knowledge/facts/{fact_id:int}", knowledge_set_status, methods=["PATCH"]),

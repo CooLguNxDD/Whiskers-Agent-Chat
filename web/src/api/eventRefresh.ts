@@ -1,8 +1,8 @@
 import type { SseEvent } from "./stream"
 
-export type RefreshKey = "messages" | "channels" | "tasks" | "agents" | "mail" | "feed" | "knowledge"
+export type RefreshKey = "messages" | "channels" | "tasks" | "agents" | "mail" | "feed" | "knowledge" | "proposals"
 
-export const REFRESH_KEYS: readonly RefreshKey[] = ["messages", "channels", "tasks", "agents", "mail", "feed", "knowledge"]
+export const REFRESH_KEYS: readonly RefreshKey[] = ["messages", "channels", "tasks", "agents", "mail", "feed", "knowledge", "proposals"]
 
 /** Bounded event bookkeeping: only query families, never message payloads. */
 export class EventRefresh {
@@ -42,6 +42,16 @@ export class EventRefresh {
       this.dirty.add("feed")
     } else if (event.event === "knowledge_fact") {
       this.dirty.add("knowledge")
+    } else if (
+      event.event === "proposal_created" ||
+      event.event === "proposal_updated" ||
+      event.event === "reaction_added" ||
+      event.event === "reaction_removed" ||
+      event.event === "evolve_paused" ||
+      event.event === "evolve_resumed"
+    ) {
+      // The proposals board: cards, vote counts and the paused banner.
+      this.dirty.add("proposals")
     }
     this.cursor = id
   }
