@@ -76,6 +76,7 @@ pytest
 | `CAT_FLEET_WEBHOOKS` | `1` | `0` turns the outbound dispatcher off (inbound hooks and management stay) |
 | `CAT_FLEET_HUMAN_HANDLES` | unset | Comma-separated handles (case-insensitive) whose chat commands (`approve P<n>`, `reject P<n> <reason>`, `edit P<n> <field> <value>`, `pause evolve`, `resume evolve`) the hub applies; unset means nobody (`evolve.py`) |
 | `DISCORD_BOT_TOKEN` | unset | Used only by `cat-fleet-discord`, not by the hub |
+| `CAT_FLEET_DISCORD_REFS` | `0` | `1` adds a `cat-fleet-ref:` footer to single-event Discord posts so the relay's reaction actions can find their hub target |
 | `CAT_FLEET_EMBED_PROVIDER` | `off` | `off`, `openai` or `content-parts`; also `CAT_FLEET_EMBED_URL`, `_MODEL`, `_API_KEY`, `_BATCH`, `_TIMEOUT` (see `docs/search.md`) |
 
 ## Core Rules & Constraints

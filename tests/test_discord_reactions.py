@@ -62,7 +62,7 @@ def setup(tmp_path):
         votes.append((post_id, kind, handle))
         return True, ""
 
-    refs = relay.MessageRefs(tmp_path / "state.json")
+    refs = relay.MessageRefs(tmp_path / "state.json", ref_webhooks=frozenset({55}))
     actions = relay.ReactionActions(
         {222: relay.MapEntry("fleet", frozenset({"fleet", "ops"}))},
         forward, refs, users=frozenset({111}), react=react, pace=0,
@@ -255,7 +255,7 @@ async def test_feed_reaction_rest_call_uses_human_handle_and_auth():
 async def test_outbound_discord_metadata_recovers_typed_reference(setup):
     actions, refs, _, votes = setup
     message = Message("P1")
-    [payload] = chat_payloads([{"kind": "feed_post", "payload": {"id": 73, "author": "builder", "body": "P1"}}], "discord")
+    [payload] = chat_payloads([{"kind": "feed_post", "payload": {"id": 73, "author": "builder", "body": "P1"}}], "discord", refs=True)
     message.webhook_id = 55
     message.embeds = [NS(footer=NS(text=payload["embeds"][0]["footer"]["text"]))]
     await actions.observe(message)
@@ -271,8 +271,102 @@ async def test_outbound_discord_metadata_recovers_typed_reference(setup):
 
 def test_coalesced_outbound_messages_do_not_claim_a_single_ref():
     events = [{"kind": "feed_post", "payload": {"id": n, "body": "P1"}} for n in (1, 2)]
-    [payload] = chat_payloads(events, "discord")
+    [payload] = chat_payloads(events, "discord", refs=True)
     assert "embeds" not in payload
+
+
+def test_ref_footer_is_off_unless_the_hub_opts_in():
+    event = {"kind": "feed_post", "payload": {"id": 73, "author": "builder", "body": "P1"}}
+    [payload] = chat_payloads([event], "discord")
+    assert "embeds" not in payload
+    [payload] = chat_payloads([event], "discord", refs=True)
+    assert payload["embeds"][0]["footer"]["text"].startswith("cat-fleet-ref:")
+
+
+def test_hub_ref_footer_setting(monkeypatch):
+    from cat_fleet_chat.config import load_settings
+
+    monkeypatch.delenv("CAT_FLEET_DISCORD_REFS", raising=False)
+    assert load_settings().discord_refs is False
+    monkeypatch.setenv("CAT_FLEET_DISCORD_REFS", "1")
+    assert load_settings().discord_refs is True
+
+
+async def test_dispatcher_passes_ref_setting(tmp_path):
+    from cat_fleet_chat.webhooks import WebhookDispatcher
+
+    event = {"id": 5, "kind": "feed_post", "payload": {"id": 73, "author": "builder", "body": "P1"}}
+    hook = {"format": "discord"}
+    for enabled in (False, True):
+        dispatcher = WebhookDispatcher(None, discord_refs=enabled)
+        [request] = dispatcher._requests(hook, [event])
+        assert ("embeds" in request.kwargs["json"]) is enabled
+        await dispatcher._client.aclose()
+
+
+async def test_ref_footer_only_trusted_from_the_hubs_own_webhooks(setup):
+    actions, refs, _, votes = setup
+    [payload] = chat_payloads(
+        [{"kind": "feed_post", "payload": {"id": 73, "author": "builder", "body": "hi"}}], "discord", refs=True)
+    message = Message("hi", webhook_id=66, bot=True)
+    message.embeds = [NS(footer=NS(text=payload["embeds"][0]["footer"]["text"]))]
+    await actions.observe(message)
+    assert refs.get(900).feed_post_id is None and message.reactions == []
+    await actions.on_raw_reaction_add(event("👍"), Discord(message))
+    assert votes == []
+    assert relay.parse_ref_webhooks(" 55,66 ") == frozenset({55, 66})
+    assert relay.parse_ref_webhooks(None) == frozenset()
+    with pytest.raises(ValueError, match="CAT_FLEET_DISCORD_REF_WEBHOOKS"):
+        relay.parse_ref_webhooks("hook")
+
+
+def test_delivery_marks_never_collide_with_actions():
+    defaults = relay.parse_reactions(None)
+    # Inert feature: the relay keeps its usual marks.
+    assert relay.status_reactions(defaults, frozenset()) == ("✅", "❌")
+    assert relay.status_reactions(defaults, frozenset({111})) == ("📨", "⚠️")
+    assert relay.status_reactions({"⏸️": "pause evolve"}, frozenset({111})) == ("✅", "❌")
+    assert relay.status_reactions({"✅": "approve {P}"}, frozenset({111})) == ("📨", "❌")
+    for raw in ("📨=pause evolve", "⚠️=pause evolve", "⚠=resume evolve"):
+        with pytest.raises(ValueError, match="CAT_FLEET_DISCORD_REACTIONS"):
+            relay.parse_reactions(raw)
+
+
+async def test_delivery_mark_is_not_an_action(setup):
+    actions, _, sent, _ = setup
+    ok, fail = relay.status_reactions(actions.reactions, actions.users)
+    for mark in (ok, fail):
+        assert await actions.on_raw_reaction_add(event(mark), Discord(Message())) == "ignored"
+    assert sent == []
+
+    async def forward(payload):
+        return True, ""
+
+    message = Message()
+    await relay.handle_message(message, actions.mapping, forward, ok_reaction=ok, fail_reaction=fail)
+    await actions.observe(message)
+    assert message.reactions == ["📨", "✅", "❌"]
+
+
+async def test_state_writes_run_off_the_event_loop_and_coalesce(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    refs = relay.MessageRefs(path)
+    threads = []
+    real = relay.asyncio.to_thread
+
+    async def to_thread(func, *args):
+        threads.append(func)
+        return await real(func, *args)
+
+    monkeypatch.setattr(relay.asyncio, "to_thread", to_thread)
+    for message_id in (900, 901, 902):
+        message = Message("P1")
+        message.id = message_id
+        refs.remember(message)
+    assert not path.exists()  # nothing written synchronously on the loop
+    await refs.flush()
+    assert threads == [refs._write]
+    assert len(relay.MessageRefs(path)) == 3
 
 
 async def test_webhook_chat_metadata_restores_reply_channel(setup):
@@ -280,7 +374,7 @@ async def test_webhook_chat_metadata_restores_reply_channel(setup):
     [body] = chat_payloads([{
         "kind": "message.created", "channel": "ops", "entity_id": 42,
         "payload": {"id": 42, "text": "P1", "author": "builder"},
-    }], "discord")
+    }], "discord", refs=True)
     message = Message(webhook_id=55, bot=True)
     message.embeds = [NS(footer=NS(text=body["embeds"][0]["footer"]["text"]))]
     await actions.on_raw_reaction_add(event(), Discord(message))
@@ -370,6 +464,7 @@ async def test_state_write_error_does_not_prevent_command(setup, monkeypatch, ca
     monkeypatch.setattr(relay.os, "replace", denied)
     assert await actions.on_raw_reaction_add(event(), Discord(Message())) == "sent"
     assert sent[0]["text"] == "approve P1"
+    await actions.refs.flush()
     assert "could not save" in capsys.readouterr().err
 
 
@@ -421,8 +516,11 @@ def test_main_wires_raw_handlers_intents_and_environment(tmp_path, monkeypatch):
 
                 self.forward = forward
                 self.actions.observe = observe
-                await self.on_message(Message())
+                message = Message()
+                await self.on_message(message)
                 assert order == ["forward", "observe"]
+                # ✅ is an action here, so delivery shows the reserved mark.
+                assert message.reactions == ["📨"]
                 await self.on_raw_reaction_remove(event())
                 await self.close()
 

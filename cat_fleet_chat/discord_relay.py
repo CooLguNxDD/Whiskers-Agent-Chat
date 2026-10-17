@@ -49,6 +49,10 @@ DEFAULT_URL = "http://127.0.0.1:8787"
 DEFAULT_PREFIX = "dc-"
 OK_REACTION = "✅"
 FAIL_REACTION = "❌"
+# Delivery marks used instead when ✅/❌ are reaction actions, so a delivered
+# message never reads as both approved and rejected. Reserved: never actions.
+ALT_OK_REACTION = "📨"
+ALT_FAIL_REACTION = "⚠️"
 ATTEMPTS = 3
 RETRY_DELAY = 2.0
 
@@ -238,12 +242,16 @@ async def handle_message(
     forward: Forward,
     prefix: str = DEFAULT_PREFIX,
     channels: ChannelList | None = None,
+    *,
+    ok_reaction: str = OK_REACTION,
+    fail_reaction: str = FAIL_REACTION,
 ) -> str:
     """Relay one Discord message. Returns ``ignored``, ``sent`` or ``failed``.
 
     Bots and webhook posts are ignored, which stops the hub's own outbound
     webhook (a Discord webhook post) from looping back in. A ``#hub-channel``
-    token picks the hub channel, within what the map allows.
+    token picks the hub channel, within what the map allows. The delivery
+    marks come from ``status_reactions`` when reaction actions are on.
     """
     if message.author.bot or message.webhook_id is not None:
         return "ignored"
@@ -261,11 +269,11 @@ async def handle_message(
     ok, reason = await forward(payload)
     try:
         if ok:
-            await message.add_reaction(OK_REACTION)
+            await message.add_reaction(ok_reaction)
             if note:
                 await message.reply(f"Sent to #{hub_channel} instead: {note}", mention_author=False)
         else:
-            await message.add_reaction(FAIL_REACTION)
+            await message.add_reaction(fail_reaction)
             await message.reply(f"Not delivered to the fleet: {reason}", mention_author=False)
     except Exception as exc:  # Discord permissions are the operator's; never crash the relay
         sys.stderr.write(f"cat-fleet-discord: could not react or reply: {exc!r}\n")
@@ -295,6 +303,7 @@ def parse_reactions(raw: str | None) -> dict[str, str]:
     ``{step} answer: (a)`` .. ``(e)``, or feed kinds ``+1`` / ``-1``.
     Literal proposal ids, unknown placeholders, duplicates and empty entries
     are errors. Unicode emoji keys may be remapped; at most 12 actions.
+    ``📨`` and ``⚠️`` are reserved for delivery status (``status_reactions``).
     """
     if raw is None or not raw.strip():
         return dict(DEFAULT_REACTIONS)
@@ -315,7 +324,8 @@ def parse_reactions(raw: str | None) -> dict[str, str]:
         remainder = template.replace("{P}", "").replace("{step}", "")
         if (not sep or not emoji or len(emoji) > 16 or not any(ord(c) > 0x2000 for c in emoji)
                 or any(c.isspace() for c in emoji)
-                or any(key.replace("\ufe0f", "") == emoji.replace("\ufe0f", "") for key in result)
+                or _bare(emoji) in {_bare(ALT_OK_REACTION), _bare(ALT_FAIL_REACTION)}
+                or any(_bare(key) == _bare(emoji) for key in result)
                 or not valid or "{" in remainder or "}" in remainder
                 or "\n" in template or "\r" in template):
             raise ValueError(f"CAT_FLEET_DISCORD_REACTIONS: invalid entry {item!r}")
@@ -325,14 +335,45 @@ def parse_reactions(raw: str | None) -> dict[str, str]:
     return result
 
 
-def parse_reaction_users(raw: str | None) -> frozenset[int]:
-    """CAT_FLEET_DISCORD_REACTION_USERS: Discord user ids; nobody by default."""
+def _bare(emoji: str) -> str:
+    """Discord may omit the optional variation selector (pause/play, warning)."""
+    return emoji.replace("\ufe0f", "")
+
+
+def status_reactions(reactions: dict[str, str], users: frozenset[int]) -> tuple[str, str]:
+    """Delivery marks ``(ok, fail)`` for ``handle_message``.
+
+    ✅/❌ as before, unless reaction actions are on (``users`` non-empty) and
+    use that emoji: then 📨/⚠️, so a status mark is never also a command.
+    """
+    actions = {_bare(key) for key in reactions} if users else set()
+    ok = ALT_OK_REACTION if _bare(OK_REACTION) in actions else OK_REACTION
+    fail = ALT_FAIL_REACTION if _bare(FAIL_REACTION) in actions else FAIL_REACTION
+    return ok, fail
+
+
+def _parse_ids(name: str, raw: str | None) -> frozenset[int]:
     if raw is None or not raw.strip():
         return frozenset()
     parts = [part.strip() for part in raw.split(",")]
     if not all(re.fullmatch(r"[1-9][0-9]{0,19}", part) for part in parts):
-        raise ValueError("CAT_FLEET_DISCORD_REACTION_USERS must be comma-separated Discord user ids")
+        raise ValueError(f"{name} must be comma-separated Discord ids")
     return frozenset(int(part) for part in parts)
+
+
+def parse_reaction_users(raw: str | None) -> frozenset[int]:
+    """CAT_FLEET_DISCORD_REACTION_USERS: Discord user ids; nobody by default."""
+    return _parse_ids("CAT_FLEET_DISCORD_REACTION_USERS", raw)
+
+
+def parse_ref_webhooks(raw: str | None) -> frozenset[int]:
+    """CAT_FLEET_DISCORD_REF_WEBHOOKS: ids of the hub's own Discord webhooks.
+
+    The id is the number after ``/api/webhooks/`` in the hook URL. Only posts
+    from these webhooks may set a target through a ``cat-fleet-ref:`` footer;
+    empty means no footer is trusted.
+    """
+    return _parse_ids("CAT_FLEET_DISCORD_REF_WEBHOOKS", raw)
 
 
 @dataclass(frozen=True)
@@ -360,12 +401,18 @@ class MessageRefs:
     delivered message or crashes the Discord event handler.
     """
 
-    def __init__(self, path: str | Path, limit: int = 5000):
+    def __init__(
+        self, path: str | Path, limit: int = 5000, *, ref_webhooks: frozenset[int] = frozenset(),
+    ):
         if limit < 1:
             raise ValueError("message reference limit must be positive")
         self.path = Path(path)
         self.limit = limit
+        # Webhooks whose ref footers are trusted (the hub's outbound hooks).
+        self.ref_webhooks = ref_webhooks
         self._refs: dict[int, MessageRef] = {}
+        self._dirty = False
+        self._flush_task: asyncio.Task | None = None
         try:
             rows = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(rows, list):
@@ -419,13 +466,15 @@ class MessageRefs:
             self._refs[message_id] = ref
             while len(self._refs) > self.limit:
                 del self._refs[next(iter(self._refs))]
-            self._save()
+            self._changed()
         return ref
 
     def remember(self, message: Any, **known: Any) -> MessageRef:
         # Single-entity webhook payloads carry typed metadata. Coalesced posts
         # intentionally have no reference: choosing one would target the wrong id.
-        if getattr(message, "webhook_id", None) is not None:
+        # Only the hub's own webhooks are trusted; another integration in a
+        # mapped channel must not aim a human's vote or reply at any hub id.
+        if getattr(message, "webhook_id", None) in self.ref_webhooks:
             for embed in getattr(message, "embeds", []):
                 footer = getattr(getattr(embed, "footer", None), "text", None)
                 if not isinstance(footer, str) or not footer.startswith(REF_PREFIX):
@@ -444,7 +493,33 @@ class MessageRefs:
                     continue
         return self.remember_text(message.id, message_text(message), **known)
 
-    def _save(self) -> None:
+    def _changed(self) -> None:
+        """Persist a change. Inside the event loop the write runs in a thread,
+        one at a time and coalesced, so disk I/O never blocks the Discord client."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._write(self._snapshot())
+            return
+        self._dirty = True
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = loop.create_task(self._flush_loop())
+
+    async def _flush_loop(self) -> None:
+        while self._dirty:
+            self._dirty = False
+            await asyncio.to_thread(self._write, self._snapshot())
+
+    async def flush(self) -> None:
+        """Wait for pending background writes (shutdown, tests)."""
+        while self._flush_task is not None and not self._flush_task.done():
+            await self._flush_task
+
+    def _snapshot(self) -> str:
+        # Serialised on the loop: the writer thread never iterates the live dict.
+        return json.dumps([[key, asdict(ref)] for key, ref in self._refs.items()])
+
+    def _write(self, data: str) -> None:
         temporary: str | None = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -452,7 +527,7 @@ class MessageRefs:
                 mode="w", encoding="utf-8", dir=self.path.parent, suffix=".tmp", delete=False,
             ) as stream:
                 temporary = stream.name
-                json.dump([[key, asdict(ref)] for key, ref in self._refs.items()], stream)
+                stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
@@ -547,11 +622,10 @@ class ReactionActions:
         if payload.user_id not in self.users or payload.user_id == getattr(client.user, "id", None):
             return "ignored"
         emoji = str(payload.emoji)
-        # Discord may omit the optional variation selector for pause/play.
         template = self.reactions.get(emoji)
         if template is None:
             template = next((value for key, value in self.reactions.items()
-                             if key.replace("\ufe0f", "") == emoji.replace("\ufe0f", "")), None)
+                             if _bare(key) == _bare(emoji)), None)
         if template is None:
             return "ignored"
         try:
@@ -643,6 +717,7 @@ def main(argv: list[str] | None = None) -> None:
         mapping = parse_map(args.map)
         reactions = parse_reactions(os.environ.get("CAT_FLEET_DISCORD_REACTIONS"))
         reaction_users = parse_reaction_users(os.environ.get("CAT_FLEET_DISCORD_REACTION_USERS"))
+        ref_webhooks = parse_ref_webhooks(os.environ.get("CAT_FLEET_DISCORD_REF_WEBHOOKS"))
     except ValueError as exc:
         parser.error(str(exc))
     if not args.discord_token:
@@ -659,7 +734,11 @@ def main(argv: list[str] | None = None) -> None:
     intents = discord.Intents.default()
     intents.message_content = True
     intents.reactions = True
-    refs = MessageRefs(os.environ.get("CAT_FLEET_DISCORD_STATE", "cat_fleet_discord_state.json"))
+    refs = MessageRefs(
+        os.environ.get("CAT_FLEET_DISCORD_STATE", "cat_fleet_discord_state.json"),
+        ref_webhooks=ref_webhooks,
+    )
+    ok_reaction, fail_reaction = status_reactions(reactions, reaction_users)
 
     class Relay(discord.Client):
         async def setup_hook(self) -> None:
@@ -679,7 +758,10 @@ def main(argv: list[str] | None = None) -> None:
         async def on_message(self, message: Any) -> None:
             # Establish the chat ref before exposing actions to a fast-clicking
             # human. Webhook/bot text is ignored by handle_message, but observed.
-            await handle_message(message, mapping, self.forward, args.prefix, self.channels)
+            await handle_message(
+                message, mapping, self.forward, args.prefix, self.channels,
+                ok_reaction=ok_reaction, fail_reaction=fail_reaction,
+            )
             await self.actions.observe(message)
 
         async def on_raw_reaction_add(self, payload: Any) -> None:
@@ -691,6 +773,7 @@ def main(argv: list[str] | None = None) -> None:
         async def close(self) -> None:
             await super().close()
             await self.http_client.aclose()
+            await refs.flush()
 
     try:
         Relay(intents=intents).run(args.discord_token)

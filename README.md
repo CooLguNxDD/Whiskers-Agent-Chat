@@ -351,13 +351,21 @@ entries fail at startup. The map is limited to 12 actions, with pre-adds paced
 at 250 ms and permission/API errors logged without crashing the bot. The bot's
 own pre-added reactions and non-allowlisted users never send commands.
 
+While reaction actions are on, ✅ and ❌ are commands, so the relay marks
+delivery with 📨 (delivered) and ⚠️ (not delivered) instead, wherever the
+action map uses ✅ or ❌. These two emojis are reserved and cannot be mapped.
+
 `CAT_FLEET_DISCORD_STATE` selects the relay's atomic JSON reference file
 (default `./cat_fleet_discord_state.json`). Keep one relay per file and mount it
 on persistent storage in containers. It stores at most 5,000 Discord-to-hub
 references and extracted action context, not tokens or full message text.
-Original relays save the hub's returned chat id. Single-event outbound Discord
-posts carry a typed `cat-fleet-ref:` embed footer so fetched messages can restore
-chat reply targets or feed vote targets after a restart. Coalesced multi-event
+Original relays save the hub's returned chat id. With `CAT_FLEET_DISCORD_REFS=1`
+on the **hub** (off by default, because the footer is visible in Discord),
+single-event outbound Discord posts carry a typed `cat-fleet-ref:` embed footer
+so fetched messages can restore chat reply targets or feed vote targets after a
+restart. The relay trusts that footer only from webhooks listed in
+`CAT_FLEET_DISCORD_REF_WEBHOOKS` (comma-separated webhook ids, the number after
+`/api/webhooks/` in the hook URL); unset means no footer is trusted. Coalesced multi-event
 posts deliberately have no single reference; proposal/question commands still
 work from their text, but unknown feed targets are ignored. Known chat targets
 are sent as `reply_to` in the original allowed hub channel; other commands use

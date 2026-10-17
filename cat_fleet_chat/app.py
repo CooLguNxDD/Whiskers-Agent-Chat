@@ -59,7 +59,8 @@ def create_app(
         dispatcher: WebhookDispatcher | None = None
         if settings.webhooks_enabled:
             dispatcher = WebhookDispatcher(
-                hub, transport=webhook_transport, min_interval=webhook_interval
+                hub, transport=webhook_transport, min_interval=webhook_interval,
+                discord_refs=settings.discord_refs,
             )
             dispatcher.start()
             hub.discord_resolver = dispatcher.discord_info

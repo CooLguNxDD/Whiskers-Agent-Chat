@@ -214,8 +214,15 @@ def chat_payloads(
     events: list[dict[str, Any]],
     fmt: str,
     parents: dict[int, dict[str, Any]] | None = None,
+    *,
+    refs: bool = False,
 ) -> list[dict[str, Any]]:
-    """Discord or Slack bodies for ``events``. Lines are coalesced up to the 2000-char limit."""
+    """Discord or Slack bodies for ``events``. Lines are coalesced up to the 2000-char limit.
+
+    ``refs`` (``CAT_FLEET_DISCORD_REFS``) adds a ``cat-fleet-ref:`` footer to
+    single-event Discord posts for the relay's reaction actions; off by default
+    because the footer is visible in Discord.
+    """
     lines = [event_line(event, parents) for event in events]
     if fmt == "slack":
         # Slack bold is *x*; defang <!channel>, <!here> and <@user> so message
@@ -249,7 +256,7 @@ def chat_payloads(
             }
             # A typed reference lets the relay recover a reply/vote target after
             # restart. Never assign one id to a coalesced multi-event message.
-            if len(grouped) == 1 and grouped[0]["kind"] in {"message.created", "feed_post"}:
+            if refs and len(grouped) == 1 and grouped[0]["kind"] in {"message.created", "feed_post"}:
                 event = grouped[0]
                 post_id = (event.get("payload") or {}).get("id", event.get("entity_id"))
                 if type(post_id) is int and post_id > 0:
@@ -334,9 +341,11 @@ class WebhookDispatcher:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         min_interval: float = 2.0,
+        discord_refs: bool = False,
     ) -> None:
         self.hub = hub
         self.min_interval = min_interval
+        self.discord_refs = discord_refs
         self._client = httpx.AsyncClient(
             timeout=10.0, transport=transport, headers={"User-Agent": USER_AGENT}
         )
@@ -439,7 +448,7 @@ class WebhookDispatcher:
     ) -> list[_Request]:
         if hook["format"] == "generic":
             return [_Request(generic_request(hook, event), int(event["id"])) for event in chosen]
-        payloads = chat_payloads(chosen, hook["format"], parents)
+        payloads = chat_payloads(chosen, hook["format"], parents, refs=self.discord_refs)
         last = int(chosen[-1]["id"])
         # Only the final chunk moves the cursor to the end of the batch.
         return [
