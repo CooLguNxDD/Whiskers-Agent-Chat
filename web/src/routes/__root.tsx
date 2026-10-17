@@ -35,6 +35,7 @@ export function RootLayout(props: ParentProps) {
             <A href="/feed" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Feed</A>
             <A href="/inbox" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Inbox<InboxBadge /></A>
             <A href="/knowledge" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Knowledge</A>
+            <A href="/proposals" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Proposals</A>
             <A href="/search" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Search</A>
             <A href="/webhooks" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Webhooks</A>
           </nav>

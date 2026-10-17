@@ -359,3 +359,79 @@ export interface TopicCount {
   topic: string
   count: number
 }
+
+// ---- proposals (/api/v1/proposals, /api/v1/evolve/state) ---------------
+
+export const PROPOSAL_STATUSES = ["open", "accepted", "rejected", "building", "built", "withdrawn"] as const
+export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number]
+
+/** A suggested piece of work. `id` is the public `P<n>`; `post_id` is its feed root post. */
+export interface Proposal {
+  id: string
+  number: number
+  project: string
+  title: string
+  summary: string
+  /** Links or post refs; only http(s) items may be rendered as links. */
+  evidence: string[]
+  weight: number
+  status: ProposalStatus
+  author: string
+  decided_by: string | null
+  decided_at: string | null
+  reason: string | null
+  run_ref: string | null
+  step_ref: string | null
+  pr_ref: string | null
+  post_id: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ProposalPage {
+  proposals: Proposal[]
+  next_cursor: string | null
+  has_more: boolean
+}
+
+/** Fields `PATCH /api/v1/proposals/{id}` accepts besides the acting handle. */
+export interface ProposalChanges {
+  title?: string
+  summary?: string
+  evidence?: string[]
+  weight?: number
+  run_ref?: string | null
+  step_ref?: string | null
+  pr_ref?: string | null
+  status?: ProposalStatus
+  reason?: string
+}
+
+/** The evolve pause flag. Read-only in the portal: pausing is a human chat command. */
+export interface EvolveState {
+  paused: boolean
+  by: string | null
+  at: string | null
+}
+
+export type VoteKind = "+1" | "-1"
+
+/** Exact counts per kind; `handles` is the oldest 100 reacting handles per kind. */
+export interface PostReactions {
+  post_id: number
+  reactions: Record<string, number>
+  handles: Record<string, string[]>
+  score: number
+}
+
+/** `PUT`/`DELETE` reaction answer: the post's counts and the caller's kinds. */
+export interface ReactionState {
+  post_id: number
+  handle: string
+  kind: string
+  reactions: Record<string, number>
+  score: number
+  mine: string[]
+  replaced?: string[]
+  idempotent: boolean
+}
