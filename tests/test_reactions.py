@@ -277,6 +277,8 @@ async def test_rest_react_unreact_list(running):
     listed = (await client.get(f"/api/v1/feed/posts/{post}/reactions")).json()
     assert listed["reactions"] == {"+1": 1, "-1": 1, "heart": 1} and listed["score"] == 0
     assert listed["handles"] == {"+1": ["bob"], "-1": ["cy"], "heart": ["cy"]}
+    mine = (await client.get(f"/api/v1/feed/posts/{post}/reactions", params={"handle": "cy"})).json()
+    assert mine["mine"] == ["-1", "heart"] and mine["reactions"] == listed["reactions"]
     shaped = (await client.get(f"/api/v1/feed/posts/{post}")).json()["post"]
     assert shaped["reactions"] == {"+1": 1, "-1": 1, "heart": 1} and shaped["score"] == 0
     timeline = (await client.get("/api/v1/feed/timeline")).json()["posts"]

@@ -1880,27 +1880,37 @@ class Hub:
 
         return await self._txn(op)
 
-    async def list_reactions(self, post_id: Any) -> dict[str, Any]:
-        """Exact counts/score for a live post; oldest 100 reacting handles per kind."""
+    async def list_reactions(self, post_id: Any, handle_value: Any = None) -> dict[str, Any]:
+        """Exact counts/score for a live post; oldest 100 reacting handles per kind.
+
+        With ``handle_value`` the answer also carries ``mine``: the kinds that
+        handle holds, exact even when it is outside the sample.
+        """
         target = require_id(post_id, "post_id")
+        who = optional_handle(handle_value, "handle")
 
         async def op(conn):
             post = await self._reaction_target(conn, target, live=True)
-            return int(post["id"]), await store.reaction_rows(conn, int(post["id"]))
+            found = int(post["id"])
+            mine = await store.handle_reactions(conn, found, who) if who else None
+            return found, await store.reaction_rows(conn, found), mine
 
-        found_id, rows = await self.db.read(op)
+        found_id, rows, mine = await self.db.read(op)
         by_kind: dict[str, list[str]] = {}
         totals: dict[str, int] = {}
         for row in rows:
             by_kind.setdefault(row["kind"], []).append(row["handle"])
             totals[row["kind"]] = int(row["total"])
         counts = {kind: totals[kind] for kind in feed.REACTION_KINDS if kind in totals}
-        return {
+        listed = {
             "post_id": found_id,
             "reactions": counts,
             "handles": {kind: by_kind[kind] for kind in counts},
             "score": feed.reaction_score(counts),
         }
+        if mine is not None:
+            listed["mine"] = mine
+        return listed
 
     async def reaction_counts(self, post_ids: Any) -> dict[int, dict[str, Any]]:
         """``{post_id: {"reactions": {kind: n}, "score": n}}`` for many posts in one query.

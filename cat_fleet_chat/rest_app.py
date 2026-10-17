@@ -639,7 +639,9 @@ async def feed_reaction(request: Request) -> JSONResponse:
 
 async def feed_reactions(request: Request) -> JSONResponse:
     try:
-        return JSONResponse(await _hub(request).list_reactions(request.path_params["post_id"]))
+        return JSONResponse(
+            await _hub(request).list_reactions(request.path_params["post_id"], request.query_params.get("handle"))
+        )
     except HubError as exc:
         return _json_error(exc)
 

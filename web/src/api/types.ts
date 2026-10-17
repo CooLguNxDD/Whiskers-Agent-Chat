@@ -416,12 +416,16 @@ export interface EvolveState {
 
 export type VoteKind = "+1" | "-1"
 
-/** Exact counts per kind; `handles` is the oldest 100 reacting handles per kind. */
+/**
+ * Exact counts per kind; `handles` is the oldest 100 reacting handles per kind.
+ * `mine` (the asked handle's kinds, exact) is present only when listed with a handle.
+ */
 export interface PostReactions {
   post_id: number
   reactions: Record<string, number>
   handles: Record<string, string[]>
   score: number
+  mine?: string[]
 }
 
 /** `PUT`/`DELETE` reaction answer: the post's counts and the caller's kinds. */

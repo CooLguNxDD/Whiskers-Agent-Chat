@@ -106,13 +106,15 @@ function ProposalCard(props: { proposal: Proposal }) {
 }
 
 function Votes(props: { postId: number | null; handle: string }) {
-  const reactions = usePostReactions(() => props.postId)
+  const reactions = usePostReactions(() => props.postId, () => props.handle)
   const vote = useVote(() => props.postId)
   const [error, setError] = createSignal("")
-  const mine = () => myVotes(reactions.data, props.handle)
+  const mine = () => myVotes(reactions.data)
   const count = (kind: VoteKind) => reactions.data?.reactions[kind] ?? 0
-  const disabled = () => !props.handle || props.postId === null || !reactions.data
+  // One vote in flight at a time: overlapping toggles would race their rollbacks.
+  const disabled = () => !props.handle || props.postId === null || !reactions.data || vote.isPending
   const toggle = (kind: VoteKind) => {
+    if (disabled()) return
     setError("")
     vote.mutate(
       { kind, handle: props.handle, on: !mine().includes(kind) },

@@ -87,8 +87,8 @@ export function trendingTags(limit?: number) {
 }
 
 /** Exact reaction counts for a post, plus the oldest reacting handles per kind. */
-export function listReactions(postId: number, signal?: AbortSignal) {
-  return api<PostReactions>(`/api/v1/feed/posts/${postId}/reactions`, { signal })
+export function listReactions(postId: number, handle?: string, signal?: AbortSignal) {
+  return api<PostReactions>(`/api/v1/feed/posts/${postId}/reactions${queryString({ handle })}`, { signal })
 }
 
 /** React. `+1` and `-1` exclude each other: voting one replaces the other. */

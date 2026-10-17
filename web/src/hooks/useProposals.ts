@@ -21,43 +21,44 @@ export function useEvolveState() {
   }))
 }
 
-export const reactionsKey = (postId: number | null) => ["proposals", "reactions", postId] as const
+export const reactionsKey = (postId: number | null, handle: string) => ["proposals", "reactions", postId, handle] as const
 
-/** Exact vote counts for one proposal's feed post. */
-export function usePostReactions(postId: () => number | null) {
+/** Exact vote counts for one proposal's feed post, plus `handle`'s own kinds (`mine`). */
+export function usePostReactions(postId: () => number | null, handle: () => string) {
   return createQuery(() => ({
-    queryKey: reactionsKey(postId()),
-    queryFn: ({ signal }) => listReactions(postId()!, signal),
+    queryKey: reactionsKey(postId(), handle()),
+    queryFn: ({ signal }) => listReactions(postId()!, handle() || undefined, signal),
     enabled: postId() !== null,
   }))
 }
 
-/** The kinds `handle` holds, from the reaction sample (oldest 100 per kind). */
-export function myVotes(state: PostReactions | undefined, handle: string): VoteKind[] {
-  if (!state || !handle) return []
-  const lower = handle.toLowerCase()
-  return (["+1", "-1"] as const).filter((kind) => (state.handles[kind] ?? []).some((name) => name.toLowerCase() === lower))
+/**
+ * The vote kinds the listed handle holds. Read from the hub's exact `mine`,
+ * never from the `handles` sample, which stops at the oldest 100 per kind.
+ */
+export function myVotes(state: PostReactions | undefined): VoteKind[] {
+  const mine = state?.mine ?? []
+  return (["+1", "-1"] as const).filter((kind) => mine.includes(kind))
 }
 
-/** `state` after `handle` toggles `kind`: votes exclude each other, as on the hub. */
-export function toggleVote(state: PostReactions, handle: string, kind: VoteKind): PostReactions {
+/** `state` after its handle toggles `kind`: votes exclude each other, as on the hub. */
+export function toggleVote(state: PostReactions, kind: VoteKind): PostReactions {
   const reactions = { ...state.reactions }
-  const handles = { ...state.handles }
-  const holds = (name: string) => (handles[name] ?? []).some((item) => item.toLowerCase() === handle.toLowerCase())
+  let mine = [...(state.mine ?? [])]
   const drop = (name: string) => {
-    if (!holds(name)) return
+    if (!mine.includes(name)) return
     reactions[name] = Math.max(0, (reactions[name] ?? 0) - 1)
     if (reactions[name] === 0) delete reactions[name]
-    handles[name] = (handles[name] ?? []).filter((item) => item.toLowerCase() !== handle.toLowerCase())
+    mine = mine.filter((item) => item !== name)
   }
-  if (holds(kind)) {
+  if (mine.includes(kind)) {
     drop(kind)
   } else {
     drop(kind === "+1" ? "-1" : "+1")
     reactions[kind] = (reactions[kind] ?? 0) + 1
-    handles[kind] = [...(handles[kind] ?? []), handle]
+    mine = [...mine, kind]
   }
-  return { ...state, reactions, handles, score: (reactions["+1"] ?? 0) - (reactions["-1"] ?? 0) }
+  return { ...state, reactions, mine, score: (reactions["+1"] ?? 0) - (reactions["-1"] ?? 0) }
 }
 
 export interface Vote {
@@ -67,37 +68,36 @@ export interface Vote {
   on: boolean
 }
 
-/** Toggle a vote with an optimistic count; the previous counts come back on error. */
+/**
+ * Toggle a vote with an optimistic count; the previous counts come back on error.
+ * The board keeps one vote in flight per post (buttons disabled while pending),
+ * so a rollback never overwrites a later vote.
+ */
 export function useVote(postId: () => number | null) {
   const queryClient = useQueryClient()
   return createMutation<ReactionState, Error, Vote, { previous?: PostReactions }>(() => ({
     mutationFn: ({ kind, handle, on }) =>
       on ? react(postId()!, kind, handle) : unreact(postId()!, kind, handle),
     onMutate: async ({ kind, handle }) => {
-      const key = reactionsKey(postId())
+      const key = reactionsKey(postId(), handle)
       await queryClient.cancelQueries({ queryKey: key })
       const previous = queryClient.getQueryData<PostReactions>(key)
-      if (previous) queryClient.setQueryData<PostReactions>(key, toggleVote(previous, handle, kind))
+      if (previous) queryClient.setQueryData<PostReactions>(key, toggleVote(previous, kind))
       return { previous }
     },
-    onError: (_error, _vars, context) => {
-      if (context?.previous) queryClient.setQueryData(reactionsKey(postId()), context.previous)
+    onError: (_error, { handle }, context) => {
+      if (context?.previous) queryClient.setQueryData(reactionsKey(postId(), handle), context.previous)
     },
     // The hub's answer carries exact counts and the caller's kinds.
     onSuccess: (result, { handle }) => {
-      const key = reactionsKey(postId())
+      const key = reactionsKey(postId(), handle)
       const current = queryClient.getQueryData<PostReactions>(key)
-      const lower = handle.toLowerCase()
-      const handles: Record<string, string[]> = {}
-      for (const [kind, names] of Object.entries(current?.handles ?? {})) {
-        handles[kind] = names.filter((name) => name.toLowerCase() !== lower)
-      }
-      for (const kind of result.mine) handles[kind] = [...(handles[kind] ?? []), handle]
       queryClient.setQueryData<PostReactions>(key, {
         post_id: result.post_id,
         reactions: result.reactions,
-        handles,
+        handles: current?.handles ?? {},
         score: result.score,
+        mine: result.mine,
       })
     },
   }))

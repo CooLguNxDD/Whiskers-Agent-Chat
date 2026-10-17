@@ -79,6 +79,10 @@ describe("proposals client", () => {
     expect(last().body).toBeUndefined()
     await listReactions(11)
     expect(last().url.pathname).toBe("/api/v1/feed/posts/11/reactions")
+    expect(last().url.search).toBe("")
+    await listReactions(11, "alice")
+    expect(last().url.pathname).toBe("/api/v1/feed/posts/11/reactions")
+    expect(last().url.searchParams.get("handle")).toBe("alice")
   })
 
   it("surfaces the hub's refusal text", async () => {

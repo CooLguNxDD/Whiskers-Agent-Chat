@@ -142,3 +142,23 @@ async def test_reaction_handle_index_is_added_to_existing_database_idempotently(
         assert conn.execute("SELECT handle, kind FROM reactions").fetchall() == [("bob", "+1")]
         plan = conn.execute("EXPLAIN QUERY PLAN SELECT * FROM reactions WHERE handle = 'bob'").fetchall()
         assert any("idx_reactions_handle" in row[3] for row in plan)
+
+
+async def test_list_mine_is_exact_for_a_caller_outside_the_sample(hub):
+    post = (await hub.feed_post("ada", "crowded"))["post"]["id"]
+
+    async def seed(conn):
+        await conn.executemany(
+            "INSERT INTO reactions(post_id, handle, kind, created_at) VALUES (?, ?, ?, ?)",
+            [(post, f"agent{i}", "+1", "t") for i in range(100)],
+        )
+
+    await hub._txn(seed)
+    await hub.react("late", post, "+1")
+    listed = await hub.list_reactions(post, "late")
+    assert "late" not in listed["handles"]["+1"]
+    assert listed["mine"] == ["+1"] and listed["reactions"] == {"+1": 101}
+    assert (await hub.list_reactions(post, "nobody"))["mine"] == []
+    assert "mine" not in await hub.list_reactions(post)
+    with pytest.raises(HubError):
+        await hub.list_reactions(post, "bad handle!")

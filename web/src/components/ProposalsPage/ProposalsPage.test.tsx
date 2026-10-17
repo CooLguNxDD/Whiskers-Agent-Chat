@@ -51,11 +51,19 @@ const board: Proposal[] = [
   proposal(5, { status: "built" }),
 ]
 
-const counts = (postId: number, plus: string[], minus: string[]): PostReactions => {
+/** Hub-like listing: `mine` comes from the full vote lists, `handles` is the sample. */
+const counts = (postId: number, plus: string[], minus: string[], handle?: string, sample = 100): PostReactions => {
   const reactions: Record<string, number> = {}
   if (plus.length) reactions["+1"] = plus.length
   if (minus.length) reactions["-1"] = minus.length
-  return { post_id: postId, reactions, handles: { "+1": plus, "-1": minus }, score: plus.length - minus.length }
+  const listed: PostReactions = {
+    post_id: postId,
+    reactions,
+    handles: { "+1": plus.slice(0, sample), "-1": minus.slice(0, sample) },
+    score: plus.length - minus.length,
+  }
+  if (handle) listed.mine = [...(plus.includes(handle) ? ["+1"] : []), ...(minus.includes(handle) ? ["-1"] : [])]
+  return listed
 }
 
 let container: HTMLDivElement
@@ -75,8 +83,8 @@ function mount() {
 beforeEach(() => {
   vi.mocked(listProposals).mockReset().mockResolvedValue({ proposals: board, next_cursor: null, has_more: false })
   vi.mocked(getEvolveState).mockReset().mockResolvedValue({ paused: false, by: null, at: null })
-  vi.mocked(listReactions).mockReset().mockImplementation(async (postId: number) =>
-    postId === 101 ? counts(101, ["bot-1"], ["alice-2"]) : counts(postId, [], []))
+  vi.mocked(listReactions).mockReset().mockImplementation(async (postId: number, handle?: string) =>
+    postId === 101 ? counts(101, ["bot-1"], ["alice-2"], handle) : counts(postId, [], [], handle))
   vi.mocked(react).mockReset()
   vi.mocked(unreact).mockReset()
   vi.mocked(updateProposal).mockReset()
@@ -170,6 +178,45 @@ describe("proposals board", () => {
     await settle()
     expect(vi.mocked(unreact)).toHaveBeenCalledWith(101, "+1", "bot-1")
     expect(count("P1", "+1")).toBe("0")
+  })
+
+  it("asks the hub for the caller's own votes and trusts them over the handle sample", async () => {
+    // alice voted +1 after 100 others: she is outside the sampled handles.
+    const crowd = Array.from({ length: 100 }, (_, index) => `agent${index}`)
+    vi.mocked(listReactions).mockImplementation(async (postId: number, handle?: string) =>
+      counts(postId, postId === 102 ? [...crowd, "alice"] : [], [], handle))
+    vi.mocked(unreact).mockResolvedValue({ post_id: 102, handle: "alice", kind: "+1", reactions: { "+1": 100 }, score: 100, mine: [], idempotent: false })
+    mount()
+    await settle()
+    expect(vi.mocked(listReactions)).toHaveBeenCalledWith(102, "alice", expect.anything())
+    expect(count("P2", "+1")).toBe("101")
+    expect(button(card("P2"), "Vote +1").getAttribute("aria-pressed")).toBe("true")
+    button(card("P2"), "Vote +1").click()
+    await settle()
+    expect(vi.mocked(unreact)).toHaveBeenCalledWith(102, "+1", "alice")
+    expect(vi.mocked(react)).not.toHaveBeenCalled()
+    expect(count("P2", "+1")).toBe("100")
+    expect(button(card("P2"), "Vote +1").getAttribute("aria-pressed")).toBe("false")
+  })
+
+  it("keeps one vote in flight: buttons are disabled until the hub answers", async () => {
+    let finish: (value: ReactionState) => void = () => {}
+    vi.mocked(react).mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+    mount()
+    await settle()
+    button(card("P2"), "Vote +1").click()
+    await settle()
+    expect(button(card("P2"), "Vote +1").disabled).toBe(true)
+    expect(button(card("P2"), "Vote -1").disabled).toBe(true)
+    button(card("P2"), "Vote -1").click()
+    button(card("P2"), "Vote +1").click()
+    await settle()
+    expect(vi.mocked(react)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(unreact)).not.toHaveBeenCalled()
+    finish({ post_id: 102, handle: "alice", kind: "+1", reactions: { "+1": 1 }, score: 1, mine: ["+1"], replaced: [], idempotent: false })
+    await settle()
+    expect(button(card("P2"), "Vote +1").disabled).toBe(false)
+    expect(count("P2", "+1")).toBe("1")
   })
 
   it("disables votes with a hint when there is no handle", async () => {

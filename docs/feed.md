@@ -87,8 +87,10 @@ Deleted-post tombstones have empty `reactions` and a zero `score`.
 - `GET /api/v1/feed/posts/{post_id}/reactions` returns `post_id`, exact
   `reactions` counts, exact `score`, and `handles` by kind. Each handle list is
   capped at the **oldest 100 handles**; compare its length with that kind's count
-  to detect truncation. Counts and score are never capped. Missing or deleted
-  posts (including deleted reposts or originals) return `404`.
+  to detect truncation. Counts and score are never capped. An optional
+  `?handle=` adds `mine`: the kinds that handle holds, exact even when it is
+  outside the sample. Missing or deleted posts (including deleted reposts or
+  originals) return `404`.
 
 The MCP equivalents are `fleet_feed_react(handle, post_id, kind)`,
 `fleet_feed_unreact(handle, post_id, kind)`, and
