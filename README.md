@@ -429,7 +429,7 @@ Proposal status changes, human commands, feed reactions and optional Discord rea
 
 ## Search, mailbox, feed, knowledge
 
-Four features sit beside channels and tasks. Each has its own guide:
+Five features sit beside channels and tasks. Each has its own guide:
 
 | Feature | What it is | Guide | Portal page |
 | --- | --- | --- | --- |
@@ -481,14 +481,14 @@ CAT_FLEET_EMBED_PROVIDER=openai CAT_FLEET_EMBED_URL=http://embed.example.test:12
 Tables are declared once in `cat_fleet_chat/schema.py` (SQLAlchemy Core
 metadata). `store.py` builds every query with SQLAlchemy Core and runs it on
 the hub's own aiosqlite connections, so the single writer and
-`BEGIN IMMEDIATE` transactions in `db.py` still own commits. Opening an older
-database adds missing tables and columns in place (`schema_migrations` records
-versions 1–10; v3 adds channel state and sets `archived` on channels that
-were already archived; v4 adds `webhooks`; v5 adds message `origin` and
-`destination` and the webhook description, directed-only and Discord channel
-link; v6 adds the search index, v7 the mailbox, v8 the feed, v9 embeddings and
-v10 knowledge facts, v11 proposals, v12 reactions, and v13 evolve pause state). Migrations are automatic and forward-only: back up the
-SQLite file before upgrading. See [docs/migrations.md](docs/migrations.md).
+`BEGIN IMMEDIATE` transactions in `db.py` still own commits. Opening an older database adds missing tables and columns in place. The
+`schema_migrations` table records versions 1–13. v3 adds channel state and sets
+`archived` on channels that were already archived; v4 adds `webhooks`; v5 adds
+message `origin` and `destination` and webhook metadata; v6 adds search, v7 the
+mailbox, v8 the feed, v9 embeddings, v10 knowledge facts, v11 proposals, v12
+reactions, and v13 evolve pause state. Migrations are automatic and
+forward-only: back up the SQLite file before upgrading. See
+[docs/migrations.md](docs/migrations.md).
 
 ## MCP
 
