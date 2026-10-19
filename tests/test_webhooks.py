@@ -215,6 +215,14 @@ def test_chat_payloads_coalesce_and_respect_the_length_limit():
     assert single["content"].count("\n") == 1
 
 
+def test_discord_keeps_long_question_options():
+    # the relay's reaction actions need the "(a) ..." lines; a 600-char clip used to drop them
+    text = "❓ [S22-mcp-auth] mvp: " + "q" * 1000 + "\n(a) fix\n(b) merge\nReact 🇦 🇧 to pick"
+    [payload] = chat_payloads([msg_event(text=text)], "discord")
+    assert "(a) fix\n(b) merge\nReact 🇦 🇧 to pick" in payload["content"]
+    assert len(payload["content"]) <= CHAT_LIMIT
+
+
 def test_slack_payload_uses_slack_bold_and_defangs_pings():
     [payload] = chat_payloads([msg_event(text="<!channel> and <@U123>")], "slack")
     assert set(payload) == {"text"}
