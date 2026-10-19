@@ -32,7 +32,7 @@ IDLE_WAKE = 15.0
 BACKOFF = (5.0, 30.0, 120.0, 300.0)
 RETRY_AFTER_MAX = 300.0
 CHAT_LIMIT = 2_000
-MESSAGE_CLIP = 600
+MESSAGE_CLIP = 1_800  # Discord allows 2000; leaves room for the author prefix and a reply quote
 ERROR_CLIP = 300
 USER_AGENT = "cat-fleet-chat-webhook/1"
 
