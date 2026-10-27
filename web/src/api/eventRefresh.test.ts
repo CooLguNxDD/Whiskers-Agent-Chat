@@ -43,6 +43,16 @@ describe("event refresh bookkeeping", () => {
     }
   })
 
+  it("refreshes the pub/sub page on publish and subscription events", () => {
+    for (const kind of ["topic.published", "topic.subscribed", "topic.unsubscribed"]) {
+      const refresh = new EventRefresh()
+      refresh.accept({ id: "1", event: kind, data: "{}" })
+      const keys: string[] = []
+      refresh.flush((key) => keys.push(key))
+      expect(keys).toEqual(["pubsub"])
+    }
+  })
+
   it("replays all query families across disconnect and preserves later events", () => {
     const refresh = new EventRefresh()
     refresh.accept({ id: "5", event: "message.created", data: "{}" })

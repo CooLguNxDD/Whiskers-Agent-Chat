@@ -365,6 +365,31 @@ evolve_state = Table(
     CheckConstraint("paused IN (0, 1)", name="ck_evolve_state_paused"),
 )
 
+# Schema v14. Topic pub/sub (``pubsub.py``). ``publications`` is the durable
+# history of every publish; ``data_json`` is any JSON value. A subscription is
+# one handle and one pattern (``build.*.done``, ``build.>``); it decides which
+# ``topic.published`` events are relevant to that handle.
+publications = Table(
+    "publications",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("topic", Text, nullable=False),
+    Column("publisher", Text, nullable=False),
+    Column("data_json", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Index("idx_publications_topic", "topic", "id"),
+)
+
+topic_subscriptions = Table(
+    "topic_subscriptions",
+    metadata,
+    Column("subscriber", Text, nullable=False),
+    Column("pattern", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    PrimaryKeyConstraint("subscriber", "pattern"),
+    Index("idx_topic_subscriptions_pattern", "pattern"),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (

@@ -337,6 +337,68 @@ async def mail_counts(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+async def publish(request: Request) -> JSONResponse:
+    """POST /topics/{topic}/publish: publish ``data`` to a topic. 201 with the publication."""
+    try:
+        body = await _body(request)
+        result = await _hub(request).publish(
+            _author(body, "publisher"),
+            request.path_params["topic"],
+            body.get("data"),
+            client_request_id=body.get("client_request_id"),
+        )
+        return JSONResponse(result, status_code=201)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def list_publications(request: Request) -> JSONResponse:
+    """GET /publications: history by ``pattern``, ``order`` asc (``since_id``) or desc (``before_id``)."""
+    try:
+        params = request.query_params
+        result = await _hub(request).list_publications(
+            params.get("pattern"),
+            since_id=params.get("since_id"),
+            limit=params.get("limit"),
+            order=params.get("order"),
+            before_id=params.get("before_id"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def list_subscriptions(request: Request) -> JSONResponse:
+    """GET /subscriptions: all, one ``agent``'s, or those matching a ``topic``."""
+    try:
+        params = request.query_params
+        result = await _hub(request).list_subscriptions(params.get("agent"), params.get("topic"))
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def subscribe(request: Request) -> JSONResponse:
+    """POST /subscriptions/{agent}: add a pattern. 201 when new, 200 when it already existed."""
+    try:
+        body = await _body(request)
+        result = await _hub(request).subscribe(request.path_params["agent"], body.get("pattern"))
+        return JSONResponse(result, status_code=201 if result["created"] else 200)
+    except HubError as exc:
+        return _json_error(exc)
+
+
+async def unsubscribe(request: Request) -> JSONResponse:
+    """DELETE /subscriptions/{agent}: drop a pattern given in the body or ``?pattern=``."""
+    try:
+        body = await _body(request)
+        pattern = body.get("pattern") or request.query_params.get("pattern")
+        result = await _hub(request).unsubscribe(request.path_params["agent"], pattern)
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
 async def list_tasks(request: Request) -> JSONResponse:
     try:
         params = request.query_params
@@ -919,9 +981,11 @@ async def events(request: Request) -> StreamingResponse:
                 batch = await hub.events_after(
                     cursor, channel=channel, limit=SSE_BATCH, kinds=kinds
                 )
+                # Per batch, so a subscription made mid-stream takes effect.
+                patterns = await hub.subscription_patterns(agent)
                 for event in batch:
                     # Filtered-out events still advance the cursor.
-                    if agent_relevant(event, agent):
+                    if agent_relevant(event, agent, patterns):
                         yield _frame(event)
                     cursor = int(event["id"])
                 if len(batch) >= SSE_BATCH:
@@ -967,6 +1031,11 @@ def api_routes() -> list[Route]:
         Route("/api/v1/mailbox/{agent}/read", mark_mail_read, methods=["POST"]),
         Route("/api/v1/mailbox/{agent}/ack", ack_mail, methods=["POST"]),
         Route("/api/v1/mailbox/{agent}/counts", mail_counts, methods=["GET"]),
+        Route("/api/v1/topics/{topic}/publish", publish, methods=["POST"]),
+        Route("/api/v1/publications", list_publications, methods=["GET"]),
+        Route("/api/v1/subscriptions", list_subscriptions, methods=["GET"]),
+        Route("/api/v1/subscriptions/{agent}", subscribe, methods=["POST"]),
+        Route("/api/v1/subscriptions/{agent}", unsubscribe, methods=["DELETE"]),
         Route("/api/v1/tasks", list_tasks, methods=["GET"]),
         Route("/api/v1/tasks", create_task, methods=["POST"]),
         Route("/api/v1/tasks/{task_id:int}/claim", claim_task, methods=["POST"]),

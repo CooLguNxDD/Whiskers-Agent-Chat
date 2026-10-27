@@ -39,6 +39,9 @@ USER_AGENT = "cat-fleet-chat-webhook/1"
 
 # ---- matching ----------------------------------------------------------
 
+# Kinds a hook receives only when its ``kinds`` filter names them.
+OPT_IN_KINDS = frozenset({"mail", "topic.published", "topic.subscribed", "topic.unsubscribed"})
+
 
 def event_actor(event: dict[str, Any]) -> str | None:
     """Who caused ``event``: message author, last task actor, or channel actor."""
@@ -59,6 +62,10 @@ def event_actor(event: dict[str, Any]) -> str | None:
         return payload.get("handle")
     if kind == "mail":
         return payload.get("sender")
+    if kind == "topic.published":
+        return payload.get("publisher")
+    if kind in {"topic.subscribed", "topic.unsubscribed"}:
+        return payload.get("subscriber")
     return payload.get("actor")
 
 
@@ -74,15 +81,15 @@ def matches(hook: dict[str, Any], event: dict[str, Any]) -> bool:
 
     A message addressed to this hook always matches, whatever its filters say.
     A ``directed_only`` hook matches nothing else. Otherwise an empty filter
-    lets everything through, except ``mail`` notices: a hook gets those only
-    when its ``kinds`` name ``mail``.
+    lets everything through, except ``mail`` notices and ``topic.*`` pub/sub
+    traffic: a hook gets those only when its ``kinds`` name them.
     """
     destination = event_destination(event)
     if hook.get("directed_only"):
         return destination == hook["name"]
     if destination is not None and destination == hook["name"]:
         return True
-    if event["kind"] == "mail" and "mail" not in hook["kinds"]:
+    if event["kind"] in OPT_IN_KINDS and event["kind"] not in hook["kinds"]:
         return False
     if hook["kinds"] and event["kind"] not in hook["kinds"]:
         return False
@@ -205,6 +212,12 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
     if kind in {"evolve_paused", "evolve_resumed"}:
         icon, verb = ("⏸️", "paused") if kind == "evolve_paused" else ("▶️", "resumed")
         return f"{icon} evolve {verb} by `{payload.get('actor', '?')}`"
+    if kind == "topic.published":
+        data = _clip(json.dumps(payload.get("data"), separators=(",", ":")), QUOTE_CLIP)
+        return f"📣 `{payload.get('publisher', '?')}` → **{payload.get('topic', '?')}**: {data}"
+    if kind in {"topic.subscribed", "topic.unsubscribed"}:
+        verb = "subscribed to" if kind == "topic.subscribed" else "unsubscribed from"
+        return f"🔔 `{payload.get('subscriber', '?')}` {verb} **{payload.get('pattern', '?')}**"
     if kind == "webhook.ping":
         return f"🔔 Cat Fleet webhook **{payload.get('name')}** is connected"
     return f"{kind} #{event.get('id')}"

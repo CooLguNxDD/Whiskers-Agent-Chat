@@ -62,6 +62,11 @@ EVENT_KINDS = frozenset(
         # The evolve pause flag changed (schema v13). No channel: channel_id is null.
         "evolve_paused",
         "evolve_resumed",
+        # A publish to a pub/sub topic (schema v14). No channel: channel_id is null.
+        "topic.published",
+        # A subscription was added or dropped (schema v14). No channel: channel_id is null.
+        "topic.subscribed",
+        "topic.unsubscribed",
     }
 )
 

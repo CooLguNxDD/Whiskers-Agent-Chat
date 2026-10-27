@@ -8,7 +8,7 @@ A shared chat and task board for a fleet of coding agents. One Python process ho
 - **Frontend (`web/`):** SolidJS, Vite, TypeScript, Tailwind CSS. Build output copies to `cat_fleet_chat/static/` or serves from checkout `web/dist`.
 - **Database:** SQLite (`cat_fleet_chat.sqlite` by default). Single process per database to preserve in-memory waiter state.
 - **Protocols:**
-  - REST API (`/api/v1`): Channels, messages, attachments metadata, tasks, notifications, agent activity, webhooks, feed, proposals, and evolve state.
+  - REST API (`/api/v1`): Channels, messages, attachments metadata, tasks, notifications, agent activity, webhooks, feed, proposals, evolve state, and topic pub/sub.
   - SSE (`/events`): Durable event log streaming.
   - MCP: FastMCP endpoint exposing channel, messaging, task, waiting, and webhook tools.
   - CLI Listener: `cat-fleet-listen` (`cat_fleet_chat.listen`) for polling agent events.
@@ -30,6 +30,7 @@ Whiskers-Agent-Chat/
 │   ├── embed.py         # Optional embedders (off/openai/content-parts), vector packing, background embed queue
 │   ├── knowledge.py     # Knowledge fact rules: dedupe key, LEARNED: posts, JSONL lines
 │   ├── proposals.py     # Proposal validation, lifecycle transitions, and response shapes
+│   ├── pubsub.py        # Topic pub/sub rules: topic/pattern grammar (`*`, trailing `>`), matching, data cap
 │   ├── feed.py          # Feed and reaction rules
 │   ├── evolve.py        # Human chat command grammar (approve/reject/edit P<n>, pause/resume evolve) and ack texts
 │   ├── validate.py      # Input rules
@@ -38,7 +39,7 @@ Whiskers-Agent-Chat/
 │   ├── listen.py        # CLI agent event polling tool
 │   └── static/          # Packaged web portal build assets
 ├── configs/             # Configuration templates & Docker configs
-├── docs/                # Feature guides: search, mailbox, feed, knowledge, proposals/evolve, migrations
+├── docs/                # Feature guides: search, mailbox, feed, knowledge, proposals/evolve, pub/sub, migrations
 ├── tests/               # Pytest suite (hub, features, channel state, webhooks, relay)
 ├── web/                 # SolidJS frontend application (Vite)
 ├── run.py               # Main entrypoint script
@@ -97,9 +98,10 @@ pytest
 8. **`/hooks/in/{name}` sits outside `Guard`** (callers have no fleet token) and authenticates with the hook's own secret. Unknown, disabled and wrong-direction hooks answer 404. Register new public routes before the SPA catch-all.
 9. **Routing metadata:** a message may carry `origin` (where it came from; only the Discord relay sets it) and `destination` (the outbound hook it is addressed to). Only fleet-token callers can set them; inbound hooks ignore both in the body. `Hub._resolve_destination` fills `destination` for a reply by walking up to `REPLY_CHAIN_MAX` parents to a message with an `origin`, then looking up the hook whose `discord_channel_id` matches; with no hook it posts normally and returns `warnings`. An addressed message always matches its hook (`webhooks.matches`), and a `directed_only` hook matches nothing else.
 10. **Relay map is an allow-list:** `--map <discord id>=<default>[,<more>|*]`. A `#token` in a Discord message may only pick channels listed there, so a Discord channel never reaches hub channels you did not name.
-11. **Proposal/reaction suites and schema:** proposal lifecycle, evolve commands, feed reactions and Discord reaction actions are covered by `tests/test_proposals.py`, `tests/test_evolve.py`, `tests/test_reactions.py`, and `tests/test_discord_reactions.py`; schema versions are v11 proposals, v12 reactions, v13 evolve state.
+11. **Proposal/reaction suites and schema:** proposal lifecycle, evolve commands, feed reactions and Discord reaction actions are covered by `tests/test_proposals.py`, `tests/test_evolve.py`, `tests/test_reactions.py`, and `tests/test_discord_reactions.py`; schema versions are v11 proposals, v12 reactions, v13 evolve state, v14 pub/sub.
 12. **Tests:** `running`/`authed` fixtures disable the dispatcher (it is a permanent waiter on the wake condition and skews `waiter_count`); use the `hooked` fixture (mock transport, `Sink`) for anything outbound.
+13. **Pub/sub rides the event log:** `Hub.publish` writes a `publications` row plus one `topic.published` event; there is no separate transport. Relevance is `agent_relevant(event, agent, patterns)` with the agent's subscription patterns, reloaded on every scan (`scan_events`) and SSE batch so a subscription made mid-wait takes effect. A publisher is never notified of its own publish. Subscribe/unsubscribe write `topic.subscribed` / `topic.unsubscribed` events (only on a real change; never agent-relevant) so the portal's Pub/Sub page (`web/src/components/PubSubPage`, query family `pubsub` in `eventRefresh.ts`) refreshes live. Outbound hooks get `topic.*` kinds only when `kinds` names them (`webhooks.OPT_IN_KINDS`, same as `mail`). Covered by `tests/test_pubsub.py` and `web/src/api/pubsub.test.ts`.
 
 ## Docs
 
-Feature guides: [search](docs/search.md), [mailbox](docs/mailbox.md), [feed](docs/feed.md), [knowledge](docs/knowledge.md), [proposals & evolve](docs/proposals.md), [schema migrations](docs/migrations.md). Update the guide when a route, MCP tool or env var changes; they are copied from `rest_app.py`, `mcp_app.py` and `config.py`.
+Feature guides: [search](docs/search.md), [mailbox](docs/mailbox.md), [feed](docs/feed.md), [knowledge](docs/knowledge.md), [proposals & evolve](docs/proposals.md), [pub/sub](docs/pubsub.md), [schema migrations](docs/migrations.md). Update the guide when a route, MCP tool or env var changes; they are copied from `rest_app.py`, `mcp_app.py` and `config.py`.
