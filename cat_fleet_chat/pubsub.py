@@ -29,10 +29,12 @@ REST = ">"
 
 
 def _fail(message: str, field: str) -> HubError:
+    """A 400 ``validation_error`` naming ``field``."""
     return HubError("validation_error", message, 400, {"field": field})
 
 
 def _segments(value: Any, field: str) -> list[str]:
+    """Split a topic or pattern into segments, checking total length and segment count."""
     if not isinstance(value, str) or not value or len(value) > TOPIC_MAX:
         raise _fail(f"{field} must be 1..{TOPIC_MAX} characters", field)
     parts = value.split(".")
@@ -80,6 +82,7 @@ def matches(subscription: str, name: str) -> bool:
 
 
 def matches_any(patterns: Any, name: str) -> bool:
+    """Whether any of ``patterns`` matches the topic ``name``."""
     return any(matches(item, name) for item in patterns)
 
 

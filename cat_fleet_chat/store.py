@@ -568,6 +568,7 @@ async def list_mail(
 
 
 def _publication_row(row: aiosqlite.Row) -> dict[str, Any]:
+    """A publication row with ``data`` decoded from JSON."""
     return {
         "id": int(row["id"]),
         "topic": row["topic"],
@@ -580,6 +581,7 @@ def _publication_row(row: aiosqlite.Row) -> dict[str, Any]:
 async def insert_publication(
     conn: aiosqlite.Connection, *, topic: str, publisher: str, data: Any, created_at: str
 ) -> dict[str, Any]:
+    """Insert a publication and return the stored row."""
     cursor = await run(
         conn,
         insert(publications).values(
@@ -639,6 +641,7 @@ async def insert_subscription(
 
 
 async def delete_subscription(conn: aiosqlite.Connection, subscriber: str, pattern: str) -> bool:
+    """Remove ``(subscriber, pattern)``. False when it did not exist."""
     cursor = await run(
         conn,
         delete(topic_subscriptions).where(
@@ -652,6 +655,7 @@ async def delete_subscription(conn: aiosqlite.Connection, subscriber: str, patte
 async def list_subscriptions(
     conn: aiosqlite.Connection, subscriber: str | None = None
 ) -> list[dict[str, Any]]:
+    """Subscriptions ordered by subscriber then pattern, optionally for one subscriber."""
     stmt = select(topic_subscriptions)
     if subscriber is not None:
         stmt = stmt.where(topic_subscriptions.c.subscriber == subscriber)
@@ -659,14 +663,6 @@ async def list_subscriptions(
         conn, stmt.order_by(topic_subscriptions.c.subscriber, topic_subscriptions.c.pattern)
     )
     return [dict(row) for row in rows]
-
-
-async def count_subscriptions(conn: aiosqlite.Connection, subscriber: str) -> int:
-    row = await fetch_one(
-        conn,
-        select(func.count().label("n")).where(topic_subscriptions.c.subscriber == subscriber),
-    )
-    return int(row["n"])
 
 
 async def max_mail_id(conn: aiosqlite.Connection, recipient: str) -> int:

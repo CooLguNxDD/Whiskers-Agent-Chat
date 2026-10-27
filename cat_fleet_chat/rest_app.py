@@ -338,6 +338,7 @@ async def mail_counts(request: Request) -> JSONResponse:
 
 
 async def publish(request: Request) -> JSONResponse:
+    """POST /topics/{topic}/publish: publish ``data`` to a topic. 201 with the publication."""
     try:
         body = await _body(request)
         result = await _hub(request).publish(
@@ -352,6 +353,7 @@ async def publish(request: Request) -> JSONResponse:
 
 
 async def list_publications(request: Request) -> JSONResponse:
+    """GET /publications: history by ``pattern``, ``order`` asc (``since_id``) or desc (``before_id``)."""
     try:
         params = request.query_params
         result = await _hub(request).list_publications(
@@ -367,6 +369,7 @@ async def list_publications(request: Request) -> JSONResponse:
 
 
 async def list_subscriptions(request: Request) -> JSONResponse:
+    """GET /subscriptions: all, one ``agent``'s, or those matching a ``topic``."""
     try:
         params = request.query_params
         result = await _hub(request).list_subscriptions(params.get("agent"), params.get("topic"))
@@ -376,6 +379,7 @@ async def list_subscriptions(request: Request) -> JSONResponse:
 
 
 async def subscribe(request: Request) -> JSONResponse:
+    """POST /subscriptions/{agent}: add a pattern. 201 when new, 200 when it already existed."""
     try:
         body = await _body(request)
         result = await _hub(request).subscribe(request.path_params["agent"], body.get("pattern"))
@@ -385,6 +389,7 @@ async def subscribe(request: Request) -> JSONResponse:
 
 
 async def unsubscribe(request: Request) -> JSONResponse:
+    """DELETE /subscriptions/{agent}: drop a pattern given in the body or ``?pattern=``."""
     try:
         body = await _body(request)
         pattern = body.get("pattern") or request.query_params.get("pattern")

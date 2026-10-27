@@ -1136,6 +1136,7 @@ class Hub:
     def _publication_page(
         found: list[dict[str, Any]], cursor: int | None, more: bool, pattern: str | None
     ) -> dict[str, Any]:
+        """The ``list_publications`` response shape."""
         return {"publications": found, "cursor": cursor, "has_more": more, "pattern": pattern}
 
     async def create_task(
