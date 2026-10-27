@@ -205,6 +205,77 @@ async def fleet_mail_ack(agent: str, ids: list[int]) -> dict[str, Any]:
         return exc.mcp_body()
 
 
+async def fleet_publish(
+    publisher: str,
+    topic: str,
+    data: Any = None,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Publish ``data`` (any JSON value, up to 16000 characters as JSON) to a topic.
+
+    Topics are dot-separated lowercase segments, e.g. ``build.whiskers.done``,
+    and need no setup. Every handle subscribed to a matching pattern is woken
+    (``wait_for_events`` with its ``agent``); ``subscribers`` lists them.
+    History is kept: see ``fleet_list_publications``. ``client_request_id``
+    makes a retry return the original publication.
+    """
+    try:
+        return await get_hub().publish(
+            publisher, topic, data, client_request_id=client_request_id
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_subscribe(agent: str, pattern: str) -> dict[str, Any]:
+    """Subscribe ``agent`` to a topic ``pattern``. Safe to repeat.
+
+    ``*`` matches exactly one segment and a trailing ``>`` one or more, so
+    ``build.*.done`` and ``build.>`` both match ``build.whiskers.done``.
+    Matching publishes then arrive as ``topic.published`` events in
+    ``wait_for_events(agent=...)``, carrying ``topic``, ``publisher`` and ``data``.
+    Your own publishes never notify you.
+    """
+    try:
+        return await get_hub().subscribe(agent, pattern)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_unsubscribe(agent: str, pattern: str) -> dict[str, Any]:
+    """Drop one of ``agent``'s subscriptions (the exact pattern). Safe to repeat."""
+    try:
+        return await get_hub().unsubscribe(agent, pattern)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_list_subscriptions(
+    agent: str | None = None, topic: str | None = None
+) -> dict[str, Any]:
+    """List subscriptions: all, one ``agent``'s, or only those that match a concrete ``topic``."""
+    try:
+        return await get_hub().list_subscriptions(agent, topic)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_list_publications(
+    pattern: str | None = None,
+    since_id: int | None = 0,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Replay publication history after ``since_id``, oldest first, optionally by ``pattern``.
+
+    Page forward by sending the returned ``cursor`` as ``since_id`` while
+    ``has_more`` is true.
+    """
+    try:
+        return await get_hub().list_publications(pattern, since_id=since_id, limit=limit)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 async def list_channels(
     include_archived: bool = False,
     state: list[str] | None = None,
@@ -287,7 +358,8 @@ async def wait_for_events(
     """Park until an event relevant to ``agent`` lands after ``after_event_id``.
 
     Relevant means: a message that mentions the agent (not its own), a task
-    assigned to it that someone else changed, mail addressed to it, or any
+    assigned to it that someone else changed, mail addressed to it, a publish
+    to a topic it subscribed to (``fleet_subscribe``; not its own), or any
     channel lifecycle event (created, archived, unarchived). Omit ``agent``
     for every event. With ``agent``, ``mail`` holds the full mail behind
     its ``mail`` events.
@@ -953,6 +1025,11 @@ def build_mcp() -> FastMCP:
         fleet_mail_list,
         fleet_mail_read,
         fleet_mail_ack,
+        fleet_publish,
+        fleet_subscribe,
+        fleet_unsubscribe,
+        fleet_list_subscriptions,
+        fleet_list_publications,
         fleet_knowledge_add,
         fleet_knowledge_list,
         fleet_knowledge_search,

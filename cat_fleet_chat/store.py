@@ -39,10 +39,12 @@ from cat_fleet_chat.schema import (
     mentions,
     messages,
     proposals,
+    publications,
     reactions,
     run,
     search_rowid,
     task_events,
+    topic_subscriptions,
     tasks,
     webhooks,
 )
@@ -560,6 +562,95 @@ async def list_mail(
         stmt = stmt.where(mailbox.c.read_at.is_not(None))
     rows = await fetch_all(conn, stmt.order_by(mailbox.c.id.asc()).limit(limit + 1))
     return [mail_row(row) for row in rows[:limit]], len(rows) > limit
+
+
+# ---- topic pub/sub (schema v14) --------------------------------------------
+
+
+def _publication_row(row: aiosqlite.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "topic": row["topic"],
+        "publisher": row["publisher"],
+        "data": json.loads(row["data_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+async def insert_publication(
+    conn: aiosqlite.Connection, *, topic: str, publisher: str, data: Any, created_at: str
+) -> dict[str, Any]:
+    cursor = await run(
+        conn,
+        insert(publications).values(
+            topic=topic,
+            publisher=publisher,
+            data_json=json.dumps(data, separators=(",", ":")),
+            created_at=created_at,
+        ),
+    )
+    row = await fetch_one(
+        conn, select(publications).where(publications.c.id == int(cursor.lastrowid))
+    )
+    return _publication_row(row)
+
+
+async def publications_after(
+    conn: aiosqlite.Connection, since_id: int, *, prefix: str, limit: int
+) -> list[dict[str, Any]]:
+    """Publications after ``since_id``, ascending. ``prefix`` (dotted segments) narrows by topic."""
+    stmt = select(publications).where(publications.c.id > since_id)
+    if prefix:
+        stmt = stmt.where(
+            (publications.c.topic == prefix)
+            | (func.substr(publications.c.topic, 1, len(prefix) + 1) == prefix + ".")
+        )
+    rows = await fetch_all(conn, stmt.order_by(publications.c.id.asc()).limit(limit))
+    return [_publication_row(row) for row in rows]
+
+
+async def insert_subscription(
+    conn: aiosqlite.Connection, subscriber: str, pattern: str, created_at: str
+) -> bool:
+    """Add ``(subscriber, pattern)``. False when it already existed."""
+    cursor = await run(
+        conn,
+        sqlite_insert(topic_subscriptions)
+        .values(subscriber=subscriber, pattern=pattern, created_at=created_at)
+        .on_conflict_do_nothing(),
+    )
+    return cursor.rowcount > 0
+
+
+async def delete_subscription(conn: aiosqlite.Connection, subscriber: str, pattern: str) -> bool:
+    cursor = await run(
+        conn,
+        delete(topic_subscriptions).where(
+            topic_subscriptions.c.subscriber == subscriber,
+            topic_subscriptions.c.pattern == pattern,
+        ),
+    )
+    return cursor.rowcount > 0
+
+
+async def list_subscriptions(
+    conn: aiosqlite.Connection, subscriber: str | None = None
+) -> list[dict[str, Any]]:
+    stmt = select(topic_subscriptions)
+    if subscriber is not None:
+        stmt = stmt.where(topic_subscriptions.c.subscriber == subscriber)
+    rows = await fetch_all(
+        conn, stmt.order_by(topic_subscriptions.c.subscriber, topic_subscriptions.c.pattern)
+    )
+    return [dict(row) for row in rows]
+
+
+async def count_subscriptions(conn: aiosqlite.Connection, subscriber: str) -> int:
+    row = await fetch_one(
+        conn,
+        select(func.count().label("n")).where(topic_subscriptions.c.subscriber == subscriber),
+    )
+    return int(row["n"])
 
 
 async def max_mail_id(conn: aiosqlite.Connection, recipient: str) -> int:

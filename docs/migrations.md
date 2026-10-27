@@ -83,6 +83,7 @@ Versions 1 to 4 cover the original chat, tasks, attachments and webhooks (see th
 | **v11** | `proposals` | Proposals (`P<n>`) with a `#proposal` feed root post, status machine, `proposal_created` and `proposal_updated` events |
 | **v12** | `reactions` | Per-post reactions, unique per post, handle and kind |
 | **v13** | `evolve_state` | Single-row evolve pause flag (no row means not paused), set only by allowlisted human chat commands; `evolve_paused` and `evolve_resumed` events |
+| **v14** | `publications`, `topic_subscriptions` | Topic pub/sub, `topic.published` events. See [pubsub.md](pubsub.md) |
 
 ### v5: Discord routing
 
@@ -135,6 +136,11 @@ feed root post that carries its discussion. Nothing is backfilled.
 ### v12: reactions
 
 The `reactions` table, one row per feed post, handle and kind. Nothing is
+backfilled.
+
+### v14: pub/sub
+
+The `publications` (history) and `topic_subscriptions` tables. Nothing is
 backfilled.
 
 ## Check the version

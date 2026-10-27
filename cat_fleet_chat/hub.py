@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import embed, evolve, feed, knowledge, mailbox, proposals, store, validate
+from cat_fleet_chat import embed, evolve, feed, knowledge, mailbox, proposals, pubsub, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -81,12 +81,15 @@ def _require_writable(channel: dict[str, Any]) -> None:
         )
 
 
-def agent_relevant(event: dict[str, Any], agent: str | None) -> bool:
+def agent_relevant(
+    event: dict[str, Any], agent: str | None, patterns: Iterable[str] = ()
+) -> bool:
     """Whether ``event`` should notify ``agent``. No agent means every event.
 
     Mentions and task assignments go to that agent, never for its own action.
     Mail goes to its recipient, including mail an agent sent itself.
-    Channel lifecycle events are broadcast.
+    A topic publish goes to an agent whose subscription ``patterns`` match
+    it, never to its own publisher. Channel lifecycle events are broadcast.
     """
     if agent is None:
         return True
@@ -94,6 +97,10 @@ def agent_relevant(event: dict[str, Any], agent: str | None) -> bool:
     payload = event.get("payload") or {}
     if kind == "mail":
         return payload.get("recipient") == agent
+    if kind == "topic.published":
+        return payload.get("publisher") != agent and pubsub.matches_any(
+            patterns, str(payload.get("topic", ""))
+        )
     if kind == "message.created":
         return agent in (payload.get("mentions") or []) and payload.get("author") != agent
     if kind == "task.updated":
@@ -900,6 +907,193 @@ class Hub:
             return {"agent": clean_agent, "updated": changed, **counts}
 
         return await self._txn(op)
+
+    # ---- topic pub/sub ------------------------------------------------------
+
+    async def publish(
+        self,
+        publisher: Any,
+        topic: Any,
+        data: Any = None,
+        client_request_id: Any = None,
+    ) -> dict[str, Any]:
+        """Publish ``data`` (any JSON value) to ``topic``.
+
+        Writes a durable publication and a ``topic.published`` event, which
+        wakes every subscriber whose pattern matches. ``subscribers`` lists
+        those handles (the publisher excluded). A topic needs no setup, and
+        publishing with no subscribers still records history.
+        ``client_request_id`` makes a retry return the original publication.
+        """
+        clean_publisher = handle(publisher, "publisher")
+        clean_topic = pubsub.topic(topic)
+        clean_data = pubsub.data(data)
+        key = validate.client_request_id(client_request_id)
+        digest = (
+            fingerprint(
+                "publish", {"publisher": clean_publisher, "topic": clean_topic, "data": clean_data}
+            )
+            if key
+            else None
+        )
+
+        async def op(conn):
+            if key and digest is not None:
+                prior = await store.get_idempotency(conn, key)
+                if prior is not None:
+                    if prior["fingerprint"] != digest or prior["kind"] != "publish":
+                        raise HubError(
+                            "idempotency_conflict",
+                            "client_request_id was already used with a different payload",
+                            409,
+                            {"client_request_id": key},
+                        )
+                    return prior["result"]
+            created_at = utc_now()
+            publication = await store.insert_publication(
+                conn,
+                topic=clean_topic,
+                publisher=clean_publisher,
+                data=clean_data,
+                created_at=created_at,
+            )
+            event_id = await store.insert_event(
+                conn,
+                "topic.published",
+                None,
+                publication["id"],
+                pubsub.event_payload(publication),
+                created_at,
+            )
+            subscribers = sorted(
+                {
+                    row["subscriber"]
+                    for row in await store.list_subscriptions(conn)
+                    if row["subscriber"] != clean_publisher
+                    and pubsub.matches(row["pattern"], clean_topic)
+                }
+            )
+            result = {"publication": publication, "event_id": event_id, "subscribers": subscribers}
+            if key and digest is not None:
+                await store.insert_idempotency(conn, key, "publish", digest, result, created_at)
+            return result
+
+        return await self._txn(op)
+
+    async def subscribe(self, agent: Any, pattern: Any) -> dict[str, Any]:
+        """Subscribe ``agent`` to ``pattern``. Repeating is a no-op (``created`` false).
+
+        From then on matching ``topic.published`` events are relevant to the
+        agent: they wake its ``wait_for_events``, notifications and SSE.
+        Delivery starts at the agent's own event cursor; use
+        :meth:`list_publications` to replay older history.
+        """
+        clean_agent = handle(agent, "agent")
+        clean_pattern = pubsub.pattern(pattern)
+
+        async def op(conn):
+            existing = await store.list_subscriptions(conn, clean_agent)
+            if not any(row["pattern"] == clean_pattern for row in existing) and (
+                len(existing) >= pubsub.SUBSCRIPTIONS_MAX
+            ):
+                raise HubError(
+                    "limit_exceeded",
+                    f"a handle may hold at most {pubsub.SUBSCRIPTIONS_MAX} subscriptions",
+                    409,
+                    {"agent": clean_agent, "max": pubsub.SUBSCRIPTIONS_MAX},
+                )
+            created = await store.insert_subscription(conn, clean_agent, clean_pattern, utc_now())
+            return {
+                "agent": clean_agent,
+                "pattern": clean_pattern,
+                "created": created,
+                "subscriptions": [
+                    row["pattern"] for row in await store.list_subscriptions(conn, clean_agent)
+                ],
+            }
+
+        return await self._txn(op)
+
+    async def unsubscribe(self, agent: Any, pattern: Any) -> dict[str, Any]:
+        """Drop one subscription. Removing one that does not exist is a no-op (``removed`` false)."""
+        clean_agent = handle(agent, "agent")
+        clean_pattern = pubsub.pattern(pattern)
+
+        async def op(conn):
+            removed = await store.delete_subscription(conn, clean_agent, clean_pattern)
+            return {
+                "agent": clean_agent,
+                "pattern": clean_pattern,
+                "removed": removed,
+                "subscriptions": [
+                    row["pattern"] for row in await store.list_subscriptions(conn, clean_agent)
+                ],
+            }
+
+        return await self._txn(op)
+
+    async def list_subscriptions(self, agent: Any = None, topic: Any = None) -> dict[str, Any]:
+        """Subscriptions, optionally for one ``agent`` and/or only those matching ``topic``."""
+        clean_agent = handle(agent, "agent") if agent not in (None, "") else None
+        clean_topic = pubsub.topic(topic) if topic not in (None, "") else None
+
+        async def op(conn):
+            return await store.list_subscriptions(conn, clean_agent)
+
+        rows = await self.db.read(op)
+        if clean_topic is not None:
+            rows = [row for row in rows if pubsub.matches(row["pattern"], clean_topic)]
+        return {"subscriptions": rows, "agent": clean_agent, "topic": clean_topic}
+
+    async def subscription_patterns(self, agent: str | None) -> list[str]:
+        """``agent``'s patterns, for :func:`agent_relevant`. Empty without an agent."""
+        if agent is None:
+            return []
+
+        async def op(conn):
+            return await store.list_subscriptions(conn, agent)
+
+        return [row["pattern"] for row in await self.db.read(op)]
+
+    async def list_publications(
+        self, pattern: Any = None, since_id: Any = 0, limit: Any = None
+    ) -> dict[str, Any]:
+        """Publication history after ``since_id``, oldest first, optionally filtered by ``pattern``.
+
+        Page with the returned ``cursor`` while ``has_more``. A wildcard
+        pattern scans at most ``SCAN_MAX`` rows per call; the cursor still
+        advances past what it skipped.
+        """
+        clean_pattern = pubsub.pattern(pattern) if pattern not in (None, "") else None
+        since = optional_id(since_id, "since_id") or 0
+        clean_limit = page_limit(limit)
+        prefix = pubsub.literal_prefix(clean_pattern) if clean_pattern else ""
+        cursor = since
+        found: list[dict[str, Any]] = []
+        scanned = 0
+        while True:
+
+            async def op(conn, after=cursor):
+                return await store.publications_after(conn, after, prefix=prefix, limit=SSE_BATCH)
+
+            batch = await self.db.read(op)
+            for row in batch:
+                cursor = row["id"]
+                scanned += 1
+                if clean_pattern is None or pubsub.matches(clean_pattern, row["topic"]):
+                    found.append(row)
+                    if len(found) >= clean_limit:
+                        return self._publication_page(found, cursor, True, clean_pattern)
+            if len(batch) < SSE_BATCH:
+                return self._publication_page(found, cursor, False, clean_pattern)
+            if scanned >= SCAN_MAX:
+                return self._publication_page(found, cursor, True, clean_pattern)
+
+    @staticmethod
+    def _publication_page(
+        found: list[dict[str, Any]], cursor: int, more: bool, pattern: str | None
+    ) -> dict[str, Any]:
+        return {"publications": found, "cursor": cursor, "has_more": more, "pattern": pattern}
 
     async def create_task(
         self,
@@ -2872,12 +3066,14 @@ class Hub:
         cursor = after_event_id
         found: list[dict[str, Any]] = []
         scanned = 0
+        # Reloaded on every scan, so a wait sees a subscription made while it was parked.
+        patterns = await self.subscription_patterns(agent)
         while True:
             batch = await self.events_after(cursor, channel=channel, kinds=kinds)
             for event in batch:
                 cursor = int(event["id"])
                 scanned += 1
-                if agent_relevant(event, agent):
+                if agent_relevant(event, agent, patterns):
                     found.append(event)
                     if len(found) >= limit:
                         return found, cursor, True

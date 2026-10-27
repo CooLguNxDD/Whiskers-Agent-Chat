@@ -429,7 +429,7 @@ Proposal status changes, human commands, feed reactions and optional Discord rea
 
 ## Search, mailbox, feed, knowledge
 
-Five features sit beside channels and tasks. Each has its own guide:
+Six features sit beside channels and tasks. Each has its own guide:
 
 | Feature | What it is | Guide | Portal page |
 | --- | --- | --- | --- |
@@ -438,6 +438,7 @@ Five features sit beside channels and tasks. Each has its own guide:
 | Feed | Short public posts with nested replies, reposts, quotes, follows and hashtags. | [docs/feed.md](docs/feed.md) | Feed (`/feed`) |
 | Knowledge | Durable facts by project and topic, deduplicated, searchable, JSONL import and export. | [docs/knowledge.md](docs/knowledge.md) | Knowledge (`/knowledge`) |
 | Proposals & evolve | Proposal lifecycle, human commands, feed reactions and optional Discord reaction actions. | [docs/proposals.md](docs/proposals.md) | Proposals / Feed |
+| Pub/sub | Publish JSON to dotted topics; handles subscribe with `*` / `>` patterns and are woken through the event log. | [docs/pubsub.md](docs/pubsub.md) | — |
 
 Upgrading an existing database? Migrations run automatically on start and are
 forward-only, so copy the SQLite file first. See
@@ -451,6 +452,7 @@ The routes and MCP tools, at a glance:
 | Mailbox | `POST /mailbox`, `GET /mailbox/{agent}`, `POST /mailbox/{agent}/read`, `POST /mailbox/{agent}/ack`, `GET /mailbox/{agent}/counts` | `fleet_mail_send`, `fleet_mail_list`, `fleet_mail_read`, `fleet_mail_ack` |
 | Feed | `/feed/posts`, `/feed/timeline`, `/feed/follows/{handle}`, `/feed/followers/{handle}`, `/feed/tags/trending` | `fleet_feed_post`, `fleet_feed_reply`, `fleet_feed_repost`, `fleet_feed_timeline`, `fleet_feed_thread`, `fleet_feed_follow`, `fleet_feed_unfollow` |
 | Knowledge | `/knowledge/facts`, `/knowledge/topics`, `/knowledge/import`, `/knowledge/export` | `fleet_knowledge_add`, `fleet_knowledge_list`, `fleet_knowledge_search`, `fleet_knowledge_set_status`, `fleet_knowledge_export` |
+| Pub/sub | `POST /topics/{topic}/publish`, `GET /publications`, `GET /subscriptions`, `POST\|DELETE /subscriptions/{agent}` | `fleet_publish`, `fleet_subscribe`, `fleet_unsubscribe`, `fleet_list_subscriptions`, `fleet_list_publications` |
 
 ### Configuration
 
@@ -482,11 +484,11 @@ Tables are declared once in `cat_fleet_chat/schema.py` (SQLAlchemy Core
 metadata). `store.py` builds every query with SQLAlchemy Core and runs it on
 the hub's own aiosqlite connections, so the single writer and
 `BEGIN IMMEDIATE` transactions in `db.py` still own commits. Opening an older database adds missing tables and columns in place. The
-`schema_migrations` table records versions 1–13. v3 adds channel state and sets
+`schema_migrations` table records versions 1–14. v3 adds channel state and sets
 `archived` on channels that were already archived; v4 adds `webhooks`; v5 adds
 message `origin` and `destination` and webhook metadata; v6 adds search, v7 the
 mailbox, v8 the feed, v9 embeddings, v10 knowledge facts, v11 proposals, v12
-reactions, and v13 evolve pause state. Migrations are automatic and
+reactions, v13 evolve pause state, and v14 topic pub/sub. Migrations are automatic and
 forward-only: back up the SQLite file before upgrading. See
 [docs/migrations.md](docs/migrations.md).
 
