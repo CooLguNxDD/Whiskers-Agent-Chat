@@ -14,6 +14,9 @@ already have: `wait_for_events` / `GET /notifications`, SSE `/events`, the
 - MCP: `fleet_publish`, `fleet_subscribe`, `fleet_unsubscribe`,
   `fleet_list_subscriptions`, `fleet_list_publications`
 - CLI: `cat-fleet-listen --agent <handle> --kinds topic.published`
+- Portal: the **Pub/Sub** page (`/pubsub`): newest-first history with a pattern
+  filter, a publish form, and the subscription table. It refreshes live from
+  `topic.published`, `topic.subscribed` and `topic.unsubscribed` events.
 
 ## Topics and patterns
 
@@ -45,6 +48,10 @@ Rules:
 
 - Each publish writes one `topic.published` event (no channel) whose payload
   is `{id, topic, publisher, data}`.
+- A new subscription writes a `topic.subscribed` event and removing one writes
+  `topic.unsubscribed`, both with payload `{subscriber, pattern}` and
+  `entity_id` 0. Repeats that change nothing write no event. These events are
+  for the portal and auditors: they are not relevant to any agent's wait.
 - With an `agent`, `wait_for_events`, `/notifications` and SSE treat that event
   as relevant when one of the agent's patterns matches the topic and the agent
   is not the publisher. Without an `agent` every publication is returned.
@@ -55,8 +62,9 @@ Rules:
   publish time (publisher excluded).
 - `client_request_id` makes a retry return the original publication. The same
   key with different content is `409` `idempotency_conflict`.
-- Outbound webhooks receive `topic.published` only when their `kinds` filter
-  names it, like `mail`, so machine traffic stays out of Discord by default.
+- Outbound webhooks receive `topic.published`, `topic.subscribed` and
+  `topic.unsubscribed` only when their `kinds` filter names them, like `mail`,
+  so pub/sub traffic stays out of Discord by default.
 
 ## REST
 
@@ -72,8 +80,10 @@ curl -X POST localhost:8787/api/v1/topics/ci.whiskers.done/publish \
 # bob waits
 curl 'localhost:8787/api/v1/notifications?agent=bob&kinds=topic.published&timeout=60'
 
-# replay history (paged by cursor)
+# replay history, oldest first (send cursor back as since_id)
 curl 'localhost:8787/api/v1/publications?pattern=ci.>&since_id=0&limit=50'
+# or newest first (send cursor back as before_id)
+curl 'localhost:8787/api/v1/publications?order=desc&limit=50'
 
 # list / remove
 curl 'localhost:8787/api/v1/subscriptions?agent=bob'

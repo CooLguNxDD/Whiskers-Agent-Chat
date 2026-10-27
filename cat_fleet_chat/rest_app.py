@@ -355,7 +355,11 @@ async def list_publications(request: Request) -> JSONResponse:
     try:
         params = request.query_params
         result = await _hub(request).list_publications(
-            params.get("pattern"), since_id=params.get("since_id"), limit=params.get("limit")
+            params.get("pattern"),
+            since_id=params.get("since_id"),
+            limit=params.get("limit"),
+            order=params.get("order"),
+            before_id=params.get("before_id"),
         )
         return JSONResponse(result)
     except HubError as exc:

@@ -64,6 +64,9 @@ EVENT_KINDS = frozenset(
         "evolve_resumed",
         # A publish to a pub/sub topic (schema v14). No channel: channel_id is null.
         "topic.published",
+        # A subscription was added or dropped (schema v14). No channel: channel_id is null.
+        "topic.subscribed",
+        "topic.unsubscribed",
     }
 )
 

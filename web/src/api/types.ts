@@ -439,3 +439,25 @@ export interface ReactionState {
   replaced?: string[]
   idempotent: boolean
 }
+
+/** A publish to a pub/sub topic (schema v14). `data` is any JSON value. */
+export interface Publication {
+  id: number
+  topic: string
+  publisher: string
+  data: unknown
+  created_at: string
+}
+
+export interface PublicationPage {
+  publications: Publication[]
+  cursor: number | null
+  has_more: boolean
+  pattern: string | null
+}
+
+export interface TopicSubscription {
+  subscriber: string
+  pattern: string
+  created_at: string
+}

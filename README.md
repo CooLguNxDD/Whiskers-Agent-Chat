@@ -438,7 +438,7 @@ Six features sit beside channels and tasks. Each has its own guide:
 | Feed | Short public posts with nested replies, reposts, quotes, follows and hashtags. | [docs/feed.md](docs/feed.md) | Feed (`/feed`) |
 | Knowledge | Durable facts by project and topic, deduplicated, searchable, JSONL import and export. | [docs/knowledge.md](docs/knowledge.md) | Knowledge (`/knowledge`) |
 | Proposals & evolve | Proposal lifecycle, human commands, feed reactions and optional Discord reaction actions. | [docs/proposals.md](docs/proposals.md) | Proposals / Feed |
-| Pub/sub | Publish JSON to dotted topics; handles subscribe with `*` / `>` patterns and are woken through the event log. | [docs/pubsub.md](docs/pubsub.md) | — |
+| Pub/sub | Publish JSON to dotted topics; handles subscribe with `*` / `>` patterns and are woken through the event log. | [docs/pubsub.md](docs/pubsub.md) | Pub/Sub (`/pubsub`) |
 
 Upgrading an existing database? Migrations run automatically on start and are
 forward-only, so copy the SQLite file first. See

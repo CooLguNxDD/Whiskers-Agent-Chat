@@ -355,3 +355,55 @@ async def test_v13_database_upgrades_on_open(tmp_path):
     assert SCHEMA_VERSION >= 14
     assert {"publications", "topic_subscriptions"} <= tables
     assert versions == list(range(1, SCHEMA_VERSION + 1))
+
+
+# --- subscription events and newest-first history ---------------------------
+
+
+async def test_subscription_changes_are_events(running):
+    _client, app = running
+    hub = app.state.hub
+    cursor = (await hub.event_cursor())["event_cursor"]
+    await hub.subscribe("bob", "ci.>")
+    await hub.subscribe("bob", "ci.>")  # repeat: no second event
+    await hub.unsubscribe("bob", "ci.>")
+    await hub.unsubscribe("bob", "ci.>")  # repeat: no second event
+    page = await hub.wait_for_events(None, cursor, timeout=0)
+    assert [(e["kind"], e["payload"]) for e in page["events"]] == [
+        ("topic.subscribed", {"subscriber": "bob", "pattern": "ci.>"}),
+        ("topic.unsubscribed", {"subscriber": "bob", "pattern": "ci.>"}),
+    ]
+    # Not relevant to any agent's wait, the subscriber's included.
+    assert not any(agent_relevant(e, "bob", ["ci.>"]) for e in page["events"])
+    mine = await hub.wait_for_events("bob", cursor, timeout=0)
+    assert mine["events"] == [] and mine["cursor"] == page["cursor"]
+
+
+def test_webhook_subscription_events_opt_in():
+    event = {
+        "id": 5,
+        "kind": "topic.subscribed",
+        "channel": None,
+        "payload": {"subscriber": "bob", "pattern": "ci.>"},
+    }
+    assert "bob" in event_line(event) and "ci.>" in event_line(event)
+    base = {"name": "d", "kinds": [], "channels": [], "mentions": [], "exclude_authors": []}
+    assert not matches(base, event)
+    assert matches({**base, "kinds": ["topic.subscribed"]}, event)
+
+
+async def test_publications_newest_first(running):
+    client, app = running
+    hub = app.state.hub
+    ids = [(await hub.publish("ada", f"t.n{i}", i))["publication"]["id"] for i in range(5)]
+    await hub.publish("ada", "other", 0)
+    first = await hub.list_publications("t.>", limit=2, order="desc")
+    assert [p["id"] for p in first["publications"]] == [ids[4], ids[3]]
+    assert first["has_more"] is True and first["cursor"] == ids[3]
+    rest = await hub.list_publications("t.>", order="desc", before_id=first["cursor"])
+    assert [p["id"] for p in rest["publications"]] == [ids[2], ids[1], ids[0]]
+    assert rest["has_more"] is False
+    via_rest = await client.get("/api/v1/publications", params={"order": "desc", "limit": 1})
+    assert via_rest.json()["publications"][0]["topic"] == "other"
+    bad = await client.get("/api/v1/publications", params={"order": "sideways"})
+    assert bad.status_code == 400

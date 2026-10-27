@@ -264,14 +264,19 @@ async def fleet_list_publications(
     pattern: str | None = None,
     since_id: int | None = 0,
     limit: int | None = None,
+    order: str = "asc",
+    before_id: int | None = None,
 ) -> dict[str, Any]:
-    """Replay publication history after ``since_id``, oldest first, optionally by ``pattern``.
+    """Replay publication history, optionally by ``pattern``.
 
-    Page forward by sending the returned ``cursor`` as ``since_id`` while
-    ``has_more`` is true.
+    Default ``order="asc"``: oldest first after ``since_id``; send the
+    returned ``cursor`` as ``since_id`` while ``has_more``. ``order="desc"``:
+    newest first; send ``cursor`` back as ``before_id``.
     """
     try:
-        return await get_hub().list_publications(pattern, since_id=since_id, limit=limit)
+        return await get_hub().list_publications(
+            pattern, since_id=since_id, limit=limit, order=order, before_id=before_id
+        )
     except HubError as exc:
         return exc.mcp_body()
 

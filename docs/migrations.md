@@ -83,7 +83,7 @@ Versions 1 to 4 cover the original chat, tasks, attachments and webhooks (see th
 | **v11** | `proposals` | Proposals (`P<n>`) with a `#proposal` feed root post, status machine, `proposal_created` and `proposal_updated` events |
 | **v12** | `reactions` | Per-post reactions, unique per post, handle and kind |
 | **v13** | `evolve_state` | Single-row evolve pause flag (no row means not paused), set only by allowlisted human chat commands; `evolve_paused` and `evolve_resumed` events |
-| **v14** | `publications`, `topic_subscriptions` | Topic pub/sub, `topic.published` events. See [pubsub.md](pubsub.md) |
+| **v14** | `publications`, `topic_subscriptions` | Topic pub/sub, `topic.published`, `topic.subscribed` and `topic.unsubscribed` events. See [pubsub.md](pubsub.md) |
 
 ### v5: Discord routing
 

@@ -609,6 +609,22 @@ async def publications_after(
     return [_publication_row(row) for row in rows]
 
 
+async def publications_before(
+    conn: aiosqlite.Connection, before_id: int | None, *, prefix: str, limit: int
+) -> list[dict[str, Any]]:
+    """Publications before ``before_id`` (all when ``None``), newest first."""
+    stmt = select(publications)
+    if before_id is not None:
+        stmt = stmt.where(publications.c.id < before_id)
+    if prefix:
+        stmt = stmt.where(
+            (publications.c.topic == prefix)
+            | (func.substr(publications.c.topic, 1, len(prefix) + 1) == prefix + ".")
+        )
+    rows = await fetch_all(conn, stmt.order_by(publications.c.id.desc()).limit(limit))
+    return [_publication_row(row) for row in rows]
+
+
 async def insert_subscription(
     conn: aiosqlite.Connection, subscriber: str, pattern: str, created_at: str
 ) -> bool:

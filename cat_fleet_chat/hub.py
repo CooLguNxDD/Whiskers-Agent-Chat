@@ -984,7 +984,10 @@ class Hub:
         """Subscribe ``agent`` to ``pattern``. Repeating is a no-op (``created`` false).
 
         From then on matching ``topic.published`` events are relevant to the
-        agent: they wake its ``wait_for_events``, notifications and SSE.
+        agent: they wake its ``wait_for_events``, notifications and SSE. A new
+        subscription logs a ``topic.subscribed`` event (unsubscribing logs
+        ``topic.unsubscribed``) so the portal and auditors see the change; those
+        are not relevant to any agent's wait.
         Delivery starts at the agent's own event cursor; use
         :meth:`list_publications` to replay older history.
         """
@@ -1002,7 +1005,17 @@ class Hub:
                     409,
                     {"agent": clean_agent, "max": pubsub.SUBSCRIPTIONS_MAX},
                 )
-            created = await store.insert_subscription(conn, clean_agent, clean_pattern, utc_now())
+            now = utc_now()
+            created = await store.insert_subscription(conn, clean_agent, clean_pattern, now)
+            if created:
+                await store.insert_event(
+                    conn,
+                    "topic.subscribed",
+                    None,
+                    0,
+                    {"subscriber": clean_agent, "pattern": clean_pattern},
+                    now,
+                )
             return {
                 "agent": clean_agent,
                 "pattern": clean_pattern,
@@ -1021,6 +1034,15 @@ class Hub:
 
         async def op(conn):
             removed = await store.delete_subscription(conn, clean_agent, clean_pattern)
+            if removed:
+                await store.insert_event(
+                    conn,
+                    "topic.unsubscribed",
+                    None,
+                    0,
+                    {"subscriber": clean_agent, "pattern": clean_pattern},
+                    utc_now(),
+                )
             return {
                 "agent": clean_agent,
                 "pattern": clean_pattern,
@@ -1056,25 +1078,46 @@ class Hub:
         return [row["pattern"] for row in await self.db.read(op)]
 
     async def list_publications(
-        self, pattern: Any = None, since_id: Any = 0, limit: Any = None
+        self,
+        pattern: Any = None,
+        since_id: Any = 0,
+        limit: Any = None,
+        *,
+        order: Any = "asc",
+        before_id: Any = None,
     ) -> dict[str, Any]:
-        """Publication history after ``since_id``, oldest first, optionally filtered by ``pattern``.
+        """Publication history, optionally filtered by ``pattern``.
 
-        Page with the returned ``cursor`` while ``has_more``. A wildcard
-        pattern scans at most ``SCAN_MAX`` rows per call; the cursor still
-        advances past what it skipped.
+        ``order="asc"`` (default) pages forward after ``since_id``, oldest
+        first. ``order="desc"`` pages backward from the newest, or from
+        before ``before_id``; send the returned ``cursor`` as ``before_id``.
+        Continue while ``has_more``. A wildcard pattern scans at most
+        ``SCAN_MAX`` rows per call; the cursor still advances past what it skipped.
         """
         clean_pattern = pubsub.pattern(pattern) if pattern not in (None, "") else None
+        if order in (None, ""):
+            order = "asc"
+        if order not in ("asc", "desc"):
+            raise HubError(
+                "validation_error",
+                "order must be asc or desc",
+                400,
+                {"field": "order", "allowed": ["asc", "desc"]},
+            )
+        descending = order == "desc"
         since = optional_id(since_id, "since_id") or 0
+        before = optional_id(before_id, "before_id") or None
         clean_limit = page_limit(limit)
         prefix = pubsub.literal_prefix(clean_pattern) if clean_pattern else ""
-        cursor = since
+        cursor: int | None = before if descending else since
         found: list[dict[str, Any]] = []
         scanned = 0
         while True:
 
-            async def op(conn, after=cursor):
-                return await store.publications_after(conn, after, prefix=prefix, limit=SSE_BATCH)
+            async def op(conn, at=cursor):
+                if descending:
+                    return await store.publications_before(conn, at, prefix=prefix, limit=SSE_BATCH)
+                return await store.publications_after(conn, at, prefix=prefix, limit=SSE_BATCH)
 
             batch = await self.db.read(op)
             for row in batch:
@@ -1091,7 +1134,7 @@ class Hub:
 
     @staticmethod
     def _publication_page(
-        found: list[dict[str, Any]], cursor: int, more: bool, pattern: str | None
+        found: list[dict[str, Any]], cursor: int | None, more: bool, pattern: str | None
     ) -> dict[str, Any]:
         return {"publications": found, "cursor": cursor, "has_more": more, "pattern": pattern}
 
