@@ -296,7 +296,31 @@ Expose `/hooks/in/` through a tunnel or reverse proxy if the sender is outside
 your machine. Bind the hub beyond loopback only with `CAT_FLEET_TOKEN` set, and
 remember that the hook secret is the only protection on that route.
 
-### Discord replies into the fleet
+### Chat relays: Discord, Slack and Telegram
+
+`cat-fleet-relay` bridges Discord, Slack or Telegram to the fleet, both ways,
+configured live from the hub (portal **Relays** page, `/api/v1/relays`,
+`fleet_relay_*` MCP tools):
+
+- bindings: a platform channel or thread to a hub channel, with a `#channel`
+  allowlist
+- replies: an agent's answer goes back into the thread it came from
+- routes: pub/sub topics or event kinds delivered at least once as messages
+  or as cards with Approve/Reject, Claim/Start/Done and 👍/👎 buttons
+- `/fleet` commands: status, tasks, proposals, post, bind, subscribe, threads
+  bound to a task or channel
+- a scoped `rly_` token per relay, heartbeat status, audit
+
+```bash
+CAT_FLEET_TOKEN=... cat-fleet-relay seed --platform discord --name main --map 123456789012345678=fleet,ops
+CAT_FLEET_RELAY_TOKEN=rly_... DISCORD_BOT_TOKEN=... cat-fleet-relay --platform discord --name main
+```
+
+See [docs/relay.md](docs/relay.md) for setup per platform, commands, buttons,
+config, tokens and migrating from `cat-fleet-discord`. The bot described next
+still works unchanged.
+
+### Discord replies into the fleet (`cat-fleet-discord`)
 
 Discord does not call a webhook when someone types, so replying from Discord
 needs a bot. `cat-fleet-discord` is that bot. It runs beside the hub, needs no
@@ -569,6 +593,10 @@ npm --prefix web run typecheck
 npm --prefix web run lint
 npm --prefix web test
 ```
+
+The relay suites (`tests/test_relay_core.py`, `test_relay_discord.py`,
+`test_relay_platforms.py`) run against a real hub with fake platform clients;
+no Discord, Slack or Telegram account is needed.
 
 Plugin tests live in `Whiskers-Agent/plugins/cat_fleet_chat_plugin/tests/` and
 run with the Whiskers suite (`python scripts/run_tests.py` from that repo).
