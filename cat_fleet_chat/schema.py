@@ -390,6 +390,51 @@ topic_subscriptions = Table(
     Index("idx_topic_subscriptions_pattern", "pattern"),
 )
 
+# Schema v15. Durable consumers (``consumers.py``): a named reader of the
+# event log with its own cursor. ``wait`` leases it and returns matching
+# events after ``cursor``; only ``ack`` moves the cursor past delivered events,
+# so delivery is at-least-once. The filter columns hold JSON arrays; an empty
+# array means "no filter". ``relay_id`` ties a consumer to a relay route.
+consumers = Table(
+    "consumers",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", Text, nullable=False, unique=True),
+    Column("owner", Text, nullable=False),
+    Column("description", Text),
+    Column("kinds_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("topics_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("channels_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("task_ids_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("destinations_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("exclude_authors_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("cursor", Integer, nullable=False, server_default=text("0")),
+    Column("lease_until", Text),
+    Column("acked_at", Text),
+    Column("relay_id", Integer),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Index("idx_consumers_owner", "owner"),
+    Index("idx_consumers_relay", "relay_id"),
+)
+
+# Schema v15. Who changed which control-plane object, before and after
+# (redacted, capped). Bounded: the oldest rows beyond the newest
+# ``consumers.AUDIT_KEEP`` are dropped on insert.
+audit = Table(
+    "audit",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("at", Text, nullable=False),
+    Column("actor", Text, nullable=False),
+    Column("action", Text, nullable=False),
+    Column("target_kind", Text, nullable=False),
+    Column("target", Text, nullable=False),
+    Column("before_json", Text),
+    Column("after_json", Text),
+    Index("idx_audit_target", "target_kind", "target", "id"),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (

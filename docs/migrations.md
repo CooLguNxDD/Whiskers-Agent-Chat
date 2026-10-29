@@ -2,7 +2,7 @@
 
 Cat Fleet Chat keeps everything in one SQLite file. This page lists what each
 schema version added, how upgrades happen, and what to do before you upgrade.
-The current schema version is **14**.
+The current schema version is **15**.
 
 ## How upgrades work
 
@@ -16,7 +16,7 @@ version before it serves any request:
 3. It backfills data that older rows need: channel `state` for channels that
    were archived before v3, and the search index (v6, and the knowledge entries
    added in v10) for rows that have no entry yet.
-4. It records versions `1` through `14` in the `schema_migrations` table
+4. It records versions `1` through `15` in the `schema_migrations` table
    (`version`, `applied_at`). The table is a record; the steps above are written
    to be safe to repeat, so a hub that restarts halfway just finishes the job.
 5. It makes sure the `fleet` channel exists.
@@ -84,6 +84,7 @@ Versions 1 to 4 cover the original chat, tasks, attachments and webhooks (see th
 | **v12** | `reactions` | Per-post reactions, unique per post, handle and kind |
 | **v13** | `evolve_state` | Single-row evolve pause flag (no row means not paused), set only by allowlisted human chat commands; `evolve_paused` and `evolve_resumed` events |
 | **v14** | `publications`, `topic_subscriptions` | Topic pub/sub, `topic.published`, `topic.subscribed` and `topic.unsubscribed` events. See [pubsub.md](pubsub.md) |
+| **v15** | `consumers`, `audit` (relay tables follow in the same version) | Durable consumers with wait/ack/seek, the control-plane audit log, `consumer.*` events. See [consumers.md](consumers.md) |
 
 ### v5: Discord routing
 
@@ -148,10 +149,17 @@ not paused. Nothing is backfilled.
 The `publications` (history) and `topic_subscriptions` tables. Nothing is
 backfilled.
 
+### v15: relay control plane
+
+The `consumers` table (durable event-log readers with their own cursor and
+lease) and the bounded `audit` table. Nothing is backfilled: a consumer
+created after the upgrade starts at the event head unless it asks for
+`start: "beginning"`.
+
 ## Check the version
 
 ```bash
 sqlite3 cat_fleet_chat.sqlite "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
 ```
 
-After a successful start the highest `version` is 14.
+After a successful start the highest `version` is 15.

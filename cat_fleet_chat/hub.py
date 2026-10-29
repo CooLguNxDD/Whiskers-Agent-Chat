@@ -11,6 +11,7 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
+from cat_fleet_chat.relay_hub import RelayHubMixin
 from cat_fleet_chat import embed, evolve, feed, knowledge, mailbox, proposals, pubsub, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
@@ -111,7 +112,7 @@ def agent_relevant(
     return kind.startswith("channel.")
 
 
-class Hub:
+class Hub(RelayHubMixin):
     def __init__(self, db: Database, waiters: WaitHub) -> None:
         self.db = db
         self.waiters = waiters

@@ -24,7 +24,9 @@ from cat_fleet_chat.schema import (
     SEARCH_KIND_CODES,
     SEARCH_ROWID_STRIDE,
     attachments,
+    audit,
     channels,
+    consumers,
     embeddings,
     events,
     evolve_state,
@@ -1927,3 +1929,130 @@ async def set_evolve_state(
     }
     stmt = sqlite_insert(evolve_state).values(id=1, **values)
     await run(conn, stmt.on_conflict_do_update(index_elements=[evolve_state.c.id], set_=values))
+
+
+# ---- durable consumers and audit (schema v15) ------------------------------
+
+_CONSUMER_LISTS = ("kinds", "topics", "channels", "task_ids", "destinations", "exclude_authors")
+
+
+def _consumer_row(row: aiosqlite.Row) -> dict[str, Any]:
+    body = dict(row)
+    for name in _CONSUMER_LISTS:
+        body[name] = json.loads(body.pop(f"{name}_json"))
+    return body
+
+
+def _consumer_values(values: dict[str, Any]) -> dict[str, Any]:
+    row = dict(values)
+    for name in _CONSUMER_LISTS:
+        if name in row:
+            row[f"{name}_json"] = json.dumps(row.pop(name), separators=(",", ":"))
+    return row
+
+
+async def insert_consumer(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(consumers).values(**_consumer_values(values)))
+    return int(cursor.lastrowid)
+
+
+async def get_consumer(conn: aiosqlite.Connection, ident: int | str) -> dict[str, Any] | None:
+    """One consumer by numeric id or by name."""
+    column = consumers.c.id if isinstance(ident, int) else consumers.c.name
+    row = await fetch_one(conn, select(consumers).where(column == ident))
+    return None if row is None else _consumer_row(row)
+
+
+async def list_consumers(
+    conn: aiosqlite.Connection,
+    *,
+    owner: str | None = None,
+    relay_id: int | None = None,
+) -> list[dict[str, Any]]:
+    stmt = select(consumers)
+    if owner is not None:
+        stmt = stmt.where(consumers.c.owner == owner)
+    if relay_id is not None:
+        stmt = stmt.where(consumers.c.relay_id == relay_id)
+    rows = await fetch_all(conn, stmt.order_by(consumers.c.id.asc()))
+    return [_consumer_row(row) for row in rows]
+
+
+async def count_consumers(conn: aiosqlite.Connection) -> int:
+    row = await fetch_one(conn, select(func.count().label("n")).select_from(consumers))
+    return int(row["n"])
+
+
+async def update_consumer(conn: aiosqlite.Connection, consumer_id: int, values: dict[str, Any]) -> None:
+    await run(
+        conn,
+        update(consumers).where(consumers.c.id == consumer_id).values(**_consumer_values(values)),
+    )
+
+
+async def advance_consumer(
+    conn: aiosqlite.Connection, consumer_id: int, *, expected: int, cursor: int
+) -> bool:
+    """Move the cursor only if it still holds ``expected``, so a skip never undoes a seek."""
+    result = await run(
+        conn,
+        update(consumers)
+        .where(consumers.c.id == consumer_id, consumers.c.cursor == expected)
+        .values(cursor=cursor),
+    )
+    return result.rowcount > 0
+
+
+async def delete_consumer(conn: aiosqlite.Connection, consumer_id: int) -> None:
+    await run(conn, delete(consumers).where(consumers.c.id == consumer_id))
+
+
+async def event_id_before(conn: aiosqlite.Connection, at: str) -> int:
+    """The newest event id created strictly before ``at`` (ISO text), or 0."""
+    row = await fetch_one(
+        conn,
+        select(func.coalesce(func.max(events.c.id), 0).label("n")).where(events.c.created_at < at),
+    )
+    return int(row["n"])
+
+
+async def insert_audit(
+    conn: aiosqlite.Connection, values: dict[str, Any], *, keep: int
+) -> int:
+    """Append an audit row, then drop rows older than the newest ``keep``."""
+    cursor = await run(conn, insert(audit).values(**values))
+    new_id = int(cursor.lastrowid)
+    if new_id > keep:
+        await run(conn, delete(audit).where(audit.c.id <= new_id - keep))
+    return new_id
+
+
+def _audit_row(row: aiosqlite.Row) -> dict[str, Any]:
+    body = dict(row)
+    for name in ("before", "after"):
+        raw = body.pop(f"{name}_json")
+        body[name] = None if raw is None else json.loads(raw)
+    return body
+
+
+async def list_audit(
+    conn: aiosqlite.Connection,
+    *,
+    target_kind: str | None,
+    target: str | None,
+    actor: str | None,
+    before_id: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Newest first."""
+    stmt = select(audit)
+    if target_kind is not None:
+        stmt = stmt.where(audit.c.target_kind == target_kind)
+    if target is not None:
+        stmt = stmt.where(audit.c.target == target)
+    if actor is not None:
+        stmt = stmt.where(audit.c.actor == actor)
+    if before_id is not None:
+        stmt = stmt.where(audit.c.id < before_id)
+    rows = await fetch_all(conn, stmt.order_by(audit.c.id.desc()).limit(limit))
+    return [_audit_row(row) for row in rows]

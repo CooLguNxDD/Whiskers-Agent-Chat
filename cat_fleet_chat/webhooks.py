@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from cat_fleet_chat.consumers import event_actor
 from cat_fleet_chat.hub import Hub, agent_relevant
 
 logger = logging.getLogger("cat_fleet_chat.webhooks")
@@ -40,33 +41,19 @@ USER_AGENT = "cat-fleet-chat-webhook/1"
 # ---- matching ----------------------------------------------------------
 
 # Kinds a hook receives only when its ``kinds`` filter names them.
-OPT_IN_KINDS = frozenset({"mail", "topic.published", "topic.subscribed", "topic.unsubscribed"})
-
-
-def event_actor(event: dict[str, Any]) -> str | None:
-    """Who caused ``event``: message author, last task actor, or channel actor."""
-    payload = event.get("payload") or {}
-    kind = event["kind"]
-    if kind == "message.created":
-        return payload.get("author")
-    if kind == "task.updated":
-        history = payload.get("events") or []
-        return history[-1].get("actor") if history else None
-    if kind in {"feed_post", "feed_repost", "knowledge_fact"}:
-        return payload.get("author")
-    if kind in {"proposal_created", "proposal_updated"}:
-        return payload.get("actor") or payload.get("author")
-    if kind == "feed_follow":
-        return payload.get("follower")
-    if kind in {"reaction_added", "reaction_removed"}:
-        return payload.get("handle")
-    if kind == "mail":
-        return payload.get("sender")
-    if kind == "topic.published":
-        return payload.get("publisher")
-    if kind in {"topic.subscribed", "topic.unsubscribed"}:
-        return payload.get("subscriber")
-    return payload.get("actor")
+OPT_IN_KINDS = frozenset(
+    {
+        "mail",
+        "topic.published",
+        "topic.subscribed",
+        "topic.unsubscribed",
+        # Control-plane bookkeeping (schema v15) stays out of chat by default.
+        "consumer.created",
+        "consumer.updated",
+        "consumer.deleted",
+        "consumer.seeked",
+    }
+)
 
 
 def event_destination(event: dict[str, Any]) -> str | None:

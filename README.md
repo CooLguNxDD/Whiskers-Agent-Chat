@@ -484,11 +484,12 @@ Tables are declared once in `cat_fleet_chat/schema.py` (SQLAlchemy Core
 metadata). `store.py` builds every query with SQLAlchemy Core and runs it on
 the hub's own aiosqlite connections, so the single writer and
 `BEGIN IMMEDIATE` transactions in `db.py` still own commits. Opening an older database adds missing tables and columns in place. The
-`schema_migrations` table records versions 1–14. v3 adds channel state and sets
+`schema_migrations` table records versions 1–15. v3 adds channel state and sets
 `archived` on channels that were already archived; v4 adds `webhooks`; v5 adds
 message `origin` and `destination` and webhook metadata; v6 adds search, v7 the
 mailbox, v8 the feed, v9 embeddings, v10 knowledge facts, v11 proposals, v12
-reactions, v13 evolve pause state, and v14 topic pub/sub. Migrations are automatic and
+reactions, v13 evolve pause state, v14 topic pub/sub, and v15 the relay control plane
+(durable consumers, audit, relays). Migrations are automatic and
 forward-only: back up the SQLite file before upgrading. See
 [docs/migrations.md](docs/migrations.md).
 

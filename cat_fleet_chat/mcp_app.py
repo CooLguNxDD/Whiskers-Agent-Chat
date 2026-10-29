@@ -9,6 +9,7 @@ from fastmcp import FastMCP
 
 from cat_fleet_chat.errors import INTERNAL_ERROR, HubError
 from cat_fleet_chat.hub import Hub
+from cat_fleet_chat.relay_mcp import RELAY_TOOLS
 
 logger = logging.getLogger("cat_fleet_chat.mcp_app")
 
@@ -1045,6 +1046,7 @@ def build_mcp() -> FastMCP:
         get_proposal,
         update_proposal,
         get_evolve_state,
+        *RELAY_TOOLS,
     ):
         mcp.tool(run_in_thread=False)(fn)
     return mcp

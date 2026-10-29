@@ -67,6 +67,11 @@ EVENT_KINDS = frozenset(
         # A subscription was added or dropped (schema v14). No channel: channel_id is null.
         "topic.subscribed",
         "topic.unsubscribed",
+        # A durable consumer changed (schema v15). No channel: channel_id is null.
+        "consumer.created",
+        "consumer.updated",
+        "consumer.deleted",
+        "consumer.seeked",
     }
 )
 
