@@ -122,7 +122,10 @@ async def fleet_consumer_wait(name: str, timeout: int = 30, limit: int = 50) -> 
 
 
 async def fleet_consumer_ack(name: str, cursor: int) -> dict[str, Any]:
-    """Mark everything up to event id ``cursor`` handled. Never moves backward; safe to repeat."""
+    """Mark everything up to event id ``cursor`` handled. Never moves backward; safe to repeat.
+
+    A relay route's consumer is acked only by its relay (use ``fleet_relay_route_seek`` to replay one).
+    """
     try:
         return await _hub().consumer_ack(name, cursor)
     except HubError as exc:
@@ -132,7 +135,10 @@ async def fleet_consumer_ack(name: str, cursor: int) -> dict[str, Any]:
 async def fleet_consumer_seek(
     actor: str, name: str, after_event_id: int | None = None, at: str | None = None
 ) -> dict[str, Any]:
-    """Replay: move the cursor back (or forward) to ``after_event_id``, or to just before ISO time ``at``. Audited."""
+    """Replay: move the cursor back (or forward) to ``after_event_id``, or to just before ISO time ``at``. Audited.
+
+    Relay route consumers are replayed with ``fleet_relay_route_seek`` instead.
+    """
     try:
         return await _hub().consumer_seek(actor, name, after_event_id=after_event_id, at=at)
     except HubError as exc:
@@ -334,6 +340,20 @@ async def fleet_relay_route_update(
         return exc.mcp_body()
 
 
+async def fleet_relay_route_seek(
+    actor: str, relay: str, route_id: int, after_event_id: int | None = None, at: str | None = None
+) -> dict[str, Any]:
+    """Replay a route: events after ``after_event_id`` (or ISO time ``at``) are posted to its platform channel again. Audited.
+
+    Route consumers refuse ``fleet_consumer_seek`` and ``fleet_consumer_ack``:
+    moving their cursor changes what a Discord, Slack or Telegram channel sees.
+    """
+    try:
+        return await _hub().seek_route(actor, relay, route_id, after_event_id=after_event_id, at=at)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 async def fleet_relay_route_remove(actor: str, relay: str, route_id: int) -> dict[str, Any]:
     """Remove a route and its consumer."""
     try:
@@ -360,5 +380,6 @@ RELAY_TOOLS = (
     fleet_relay_unbind,
     fleet_relay_route_add,
     fleet_relay_route_update,
+    fleet_relay_route_seek,
     fleet_relay_route_remove,
 )

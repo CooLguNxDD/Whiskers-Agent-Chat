@@ -10,7 +10,7 @@ import {
   listAudit,
   listRelays,
   rotateRelayToken,
-  seekConsumer,
+  seekRoute,
   updateRelay,
   updateRoute,
 } from "@/api/relays"
@@ -90,8 +90,8 @@ export function useRelayMutations() {
       onSuccess: refresh,
     })),
     seek: createMutation(() => ({
-      mutationFn: (input: { consumer: string; afterEventId: number; actor: string }) =>
-        seekConsumer(input.consumer, input.afterEventId, input.actor),
+      mutationFn: (input: { name: string; id: number; afterEventId: number; actor: string }) =>
+        seekRoute(input.name, input.id, input.afterEventId, input.actor),
       onSuccess: refresh,
     })),
   }

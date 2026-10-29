@@ -109,12 +109,15 @@ export function deleteRoute(name: string, id: number, actor: string) {
   })
 }
 
-/** Replay a consumer from an event id (events after it are delivered again). Audited on the hub. */
-export function seekConsumer(name: string, afterEventId: number, actor: string) {
-  return api<{ cursor: number; previous: number }>(`/api/v1/consumers/${encodeURIComponent(name)}/seek`, {
-    method: "POST",
-    body: JSON.stringify({ actor, after_event_id: afterEventId }),
-  })
+/**
+ * Replay a route from an event id: events after it are posted to its platform channel again.
+ * Audited on the hub. Route consumers refuse the plain consumer seek, so this is the only way.
+ */
+export function seekRoute(name: string, routeId: number, afterEventId: number, actor: string) {
+  return api<{ cursor: number; previous: number }>(
+    `/api/v1/relays/${encodeURIComponent(name)}/routes/${routeId}/seek`,
+    { method: "POST", body: JSON.stringify({ actor, after_event_id: afterEventId }) },
+  )
 }
 
 export function listAudit(opts: { targetKind?: string; limit?: number } = {}, signal?: AbortSignal) {

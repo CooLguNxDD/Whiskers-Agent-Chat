@@ -27,7 +27,7 @@ reader that crashes before acking gets the same events again. Dedupe by event
 | `lease_until` / `armed` | A wait holds a lease for its timeout plus 15 s; `armed` is true while it is live |
 | `acked_at` | Last ack |
 | `behind` | Events after the cursor (listing only; not all of them may match) |
-| `relay_id` | Set when a relay route owns the consumer; change it through the route |
+| `relay_id` | Set when a relay route owns the consumer. Change or replay it through the route (`POST /relays/{name}/routes/{id}/seek`); update, delete, seek and ack answer 409 `managed_by_relay`, except an ack from the owning relay's own token |
 
 ### Filters
 

@@ -325,3 +325,69 @@ async def test_mcp_relay_tools(running):
     assert (await relay_mcp.fleet_relay_route_remove("ann", "tg", route["route"]["id"]))["deleted"]
     assert (await relay_mcp.fleet_relay_unbind("ann", "tg", bound["binding"]["id"]))["deleted"]
     assert len((await relay_mcp.fleet_relay_list())["relays"]) == 1
+
+
+# --- route consumers are moved only by their relay or through the route ------------
+
+
+async def test_route_consumer_cursor_is_guarded(authed):
+    client, app = authed
+    token = (await make_relay(client))["token"]
+    other = (await make_relay(client, name="other"))["token"]
+    hub = app.state.hub
+    route = (
+        await client.post(
+            "/api/v1/relays/bot/routes",
+            json={"actor": "ann", "external_id": "111", "topics": ["ci.>"]},
+            headers=ADMIN,
+        )
+    ).json()["route"]
+    consumer = route["consumer"]["name"]
+    await hub.publish("ci", "ci.web.done", {"ok": True})
+    head = (await hub.event_cursor())["event_cursor"]
+
+    # the fleet token cannot skip or replay a route's pending deliveries
+    skipped = await client.post(f"/api/v1/consumers/{consumer}/ack", json={"cursor": head}, headers=ADMIN)
+    assert skipped.status_code == 409 and skipped.json()["error"]["code"] == "managed_by_relay"
+    replayed = await client.post(
+        f"/api/v1/consumers/{consumer}/seek", json={"actor": "ann", "after_event_id": 0}, headers=ADMIN
+    )
+    assert replayed.status_code == 409
+    with pytest.raises(HubError) as exc:
+        await hub.consumer_ack(consumer, head)
+    assert exc.value.code == "managed_by_relay"
+    # another relay's token cannot reach it at all
+    assert (
+        await client.post(f"/api/v1/consumers/{consumer}/ack", json={"cursor": head}, headers=bearer(other))
+    ).status_code == 403
+    # its own relay acks after delivering
+    own = await client.post(f"/api/v1/consumers/{consumer}/ack", json={"cursor": head}, headers=bearer(token))
+    assert own.status_code == 200 and own.json()["cursor"] == head
+
+    # replay goes through the route: audited, and not open to relay tokens
+    denied = await client.post(
+        f"/api/v1/relays/bot/routes/{route['id']}/seek", json={"after_event_id": 0}, headers=bearer(token)
+    )
+    assert denied.status_code == 403
+    seek = await client.post(
+        f"/api/v1/relays/bot/routes/{route['id']}/seek", json={"actor": "ann", "after_event_id": 0}, headers=ADMIN
+    )
+    assert seek.status_code == 200, seek.text
+    assert seek.json()["cursor"] == 0 and seek.json()["route"] == route["id"]
+    missing = await client.post(
+        "/api/v1/relays/bot/routes/999/seek", json={"actor": "ann", "after_event_id": 0}, headers=ADMIN
+    )
+    assert missing.status_code == 404
+    audit = (await client.get("/api/v1/audit", params={"target": consumer}, headers=ADMIN)).json()["audit"]
+    assert audit[0]["action"] == "seek" and audit[0]["actor"] == "ann"
+
+
+async def test_mcp_route_seek_and_guarded_consumer_tools(running):
+    created = await relay_mcp.fleet_relay_create("ann", "tg2", "telegram")
+    assert created["relay"]["name"] == "tg2"
+    route = (await relay_mcp.fleet_relay_route_add("ann", "tg2", "-100123", topics=["x.>"]))["route"]
+    name = route["consumer"]["name"]
+    assert (await relay_mcp.fleet_consumer_ack(name, 1))["error"] == "managed_by_relay"
+    assert (await relay_mcp.fleet_consumer_seek("ann", name, after_event_id=0))["error"] == "managed_by_relay"
+    replay = await relay_mcp.fleet_relay_route_seek("ann", "tg2", route["id"], after_event_id=0)
+    assert replay["cursor"] == 0 and replay["relay"] == "tg2"

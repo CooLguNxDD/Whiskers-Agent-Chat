@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/solid-query"
 import { MemoryRouter, Route } from "@solidjs/router"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ApiError } from "@/api/client"
-import { addBinding, addRoute, createRelay, getRelay, listAudit, listRelays, rotateRelayToken, updateRelay } from "@/api/relays"
+import { addBinding, addRoute, createRelay, getRelay, listAudit, listRelays, rotateRelayToken, seekRoute, updateRelay } from "@/api/relays"
 import type { Relay, RelaySnapshot } from "@/api/types"
 import { prefs } from "@/store/prefsSlice"
 import RelayPage from "./RelayPage"
@@ -22,7 +22,7 @@ vi.mock("@/api/relays", async (importOriginal) => ({
   addRoute: vi.fn(),
   updateRoute: vi.fn(),
   deleteRoute: vi.fn(),
-  seekConsumer: vi.fn(),
+  seekRoute: vi.fn(),
   listAudit: vi.fn(),
 }))
 
@@ -88,7 +88,7 @@ beforeEach(() => {
   vi.mocked(listRelays).mockReset().mockResolvedValue({ relays: [relay(), relay({ id: 2, name: "tg", platform: "telegram", state: "offline", last_seen_at: null })] })
   vi.mocked(getRelay).mockReset().mockResolvedValue(snapshot())
   vi.mocked(listAudit).mockReset().mockResolvedValue({ audit: [], next_before_id: null })
-  for (const fn of [createRelay, updateRelay, rotateRelayToken, addBinding, addRoute]) vi.mocked(fn).mockReset()
+  for (const fn of [createRelay, updateRelay, rotateRelayToken, addBinding, addRoute, seekRoute]) vi.mocked(fn).mockReset()
   prefs.setDisplayName("ann")
   container = document.createElement("div")
   document.body.append(container)
@@ -169,6 +169,18 @@ describe("relay page", () => {
     await settle()
     expect(vi.mocked(updateRelay)).not.toHaveBeenCalled()
     expect(container.textContent).toContain("Set a valid Name")
+  })
+
+  it("replays a route through the route endpoint", async () => {
+    vi.mocked(seekRoute).mockResolvedValue({ cursor: 10, previous: 40 })
+    mount()
+    await settle()
+    button("Replay…").click()
+    await settle()
+    type("Replay after event id", "10")
+    submit("Replay route")
+    await settle()
+    expect(vi.mocked(seekRoute)).toHaveBeenCalledWith("main", 7, 10, "ann")
   })
 
   it("rotates the token and shows it", async () => {

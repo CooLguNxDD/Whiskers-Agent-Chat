@@ -339,7 +339,7 @@ function Routes(props: { snapshot: RelaySnapshot; mutations: Mutations }) {
   const [mode, setMode] = createSignal<"topics" | "kinds">("topics")
   const [format, setFormat] = createSignal<RouteFormat>("line")
   const [error, setError] = createSignal("")
-  const [seekFor, setSeekFor] = createSignal<string | null>(null)
+  const [seekFor, setSeekFor] = createSignal<number | null>(null)
   const [seekTo, setSeekTo] = createSignal("")
   const name = () => props.snapshot.relay.name
   return (
@@ -363,10 +363,10 @@ function Routes(props: { snapshot: RelaySnapshot; mutations: Mutations }) {
                 <Button type="button" size="sm" variant="outline" onClick={() => actor() && props.mutations.updateRoute.mutate({ name: name(), id: route.id, changes: { actor: actor(), enabled: !route.enabled } }, { onError: (err) => setError(getErrorMessage(err)) })}>
                   {route.enabled ? "Pause" : "Resume"}
                 </Button>
-                <Button type="button" size="sm" variant="outline" onClick={() => { setSeekFor(route.consumer?.name ?? null); setSeekTo("") }}>Replay…</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => { setSeekFor(route.id); setSeekTo("") }}>Replay…</Button>
                 <Button type="button" size="sm" variant="ghost" onClick={() => actor() && props.mutations.removeRoute.mutate({ name: name(), id: route.id, actor: actor() }, { onError: (err) => setError(getErrorMessage(err)) })}>Remove</Button>
               </div>
-              <Show when={seekFor() !== null && seekFor() === route.consumer?.name}>
+              <Show when={seekFor() === route.id}>
                 <form
                   class="mt-2 flex gap-2"
                   aria-label="Replay route"
@@ -374,7 +374,7 @@ function Routes(props: { snapshot: RelaySnapshot; mutations: Mutations }) {
                     event.preventDefault()
                     const value = Number(seekTo())
                     if (!actor() || !Number.isSafeInteger(value) || value < 0) { setError("Replay needs an event id and your Name."); return }
-                    props.mutations.seek.mutate({ consumer: route.consumer?.name ?? "", afterEventId: value, actor: actor() }, {
+                    props.mutations.seek.mutate({ name: name(), id: route.id, afterEventId: value, actor: actor() }, {
                       onSuccess: () => setSeekFor(null),
                       onError: (err) => setError(getErrorMessage(err)),
                     })

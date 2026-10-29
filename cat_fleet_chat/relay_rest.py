@@ -91,7 +91,10 @@ async def consumer_wait(request: Request) -> JSONResponse:
 async def consumer_ack(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
-        return JSONResponse(await _hub(request).consumer_ack(request.path_params["name"], body.get("cursor")))
+        result = await _hub(request).consumer_ack(
+            request.path_params["name"], body.get("cursor"), relay=_relay_caller(request)
+        )
+        return JSONResponse(result)
     except HubError as exc:
         return _json_error(exc)
 
@@ -240,6 +243,21 @@ async def add_route(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+async def seek_route(request: Request) -> JSONResponse:
+    try:
+        body = await _body(request)
+        result = await _hub(request).seek_route(
+            _actor(request, body),
+            request.path_params["relay"],
+            request.path_params["route_id"],
+            after_event_id=body.get("after_event_id"),
+            at=body.get("at"),
+        )
+        return JSONResponse(result)
+    except HubError as exc:
+        return _json_error(exc)
+
+
 async def update_route(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
@@ -279,6 +297,7 @@ def relay_api_routes() -> list[Route]:
         Route("/api/v1/relays/{relay}/routes", add_route, methods=["POST"]),
         Route("/api/v1/relays/{relay}/routes/{route_id:int}", update_route, methods=["PATCH"]),
         Route("/api/v1/relays/{relay}/routes/{route_id:int}", delete_route, methods=["DELETE"]),
+        Route("/api/v1/relays/{relay}/routes/{route_id:int}/seek", seek_route, methods=["POST"]),
         Route("/api/v1/consumers", list_consumers, methods=["GET"]),
         Route("/api/v1/consumers", create_consumer, methods=["POST"]),
         Route("/api/v1/consumers/{name}", get_consumer, methods=["GET"]),

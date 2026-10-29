@@ -12,7 +12,7 @@ from the portal, REST or MCP while the bot runs.
 - MCP: `fleet_relay_list`, `fleet_relay_get`, `fleet_relay_create`,
   `fleet_relay_update`, `fleet_relay_delete`, `fleet_relay_bind`,
   `fleet_relay_unbind`, `fleet_relay_route_add`, `fleet_relay_route_update`,
-  `fleet_relay_route_remove`
+  `fleet_relay_route_seek`, `fleet_relay_route_remove`
 
 The older `cat-fleet-discord --map …` bot still works unchanged (inbound only,
 replies through an outbound webhook). `cat-fleet-relay seed` turns its `--map`
@@ -223,6 +223,7 @@ A **route** has `external_id`, `format`, `enabled` and the consumer filters
 | `GET /api/v1/relays/{name}/reply-target/{message_id}` | Where to post a message addressed to the relay |
 | `POST /api/v1/relays/{name}/bindings`, `PATCH|DELETE …/bindings/{id}` | Bindings |
 | `POST /api/v1/relays/{name}/routes`, `PATCH|DELETE …/routes/{id}` | Routes |
+| `POST /api/v1/relays/{name}/routes/{id}/seek` | Replay a route (`actor`, `after_event_id` or `at`); audited. A route's consumer refuses the plain consumer `seek`, and its `ack` comes only from its own relay |
 
 ## Migrating from `cat-fleet-discord`
 

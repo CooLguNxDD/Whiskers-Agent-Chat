@@ -340,8 +340,13 @@ class RelayHubMixin:
                 except asyncio.TimeoutError:
                     continue
 
-    async def consumer_ack(self, name: Any, cursor: Any) -> dict[str, Any]:
-        """Move the cursor forward to ``cursor`` (an event id). Never backward; clamped to the head."""
+    async def consumer_ack(self, name: Any, cursor: Any, *, relay: str | None = None) -> dict[str, Any]:
+        """Move the cursor forward to ``cursor`` (an event id). Never backward; clamped to the head.
+
+        A relay route's consumer is acked only by its own relay (``relay`` is
+        the name a scoped ``rly_`` token authenticated): anyone else acking
+        it would silently skip pending platform deliveries.
+        """
         clean = consumers.name(name)
         target = optional_id(cursor, "cursor")
         if target is None:
@@ -349,6 +354,10 @@ class RelayHubMixin:
 
         async def op(conn):
             found = await self._consumer_or_404(conn, clean)
+            if found.get("relay_id") is not None:
+                owner = await store.get_relay(conn, relay) if relay else None
+                if owner is None or owner["id"] != found["relay_id"]:
+                    self._require_unmanaged(found)
             head = await store.max_event_id(conn)
             new = max(int(found["cursor"]), min(target, head))
             now = _iso(_now())
@@ -358,12 +367,14 @@ class RelayHubMixin:
         return await self._quiet(op)
 
     async def consumer_seek(
-        self, actor: Any, name: Any, *, after_event_id: Any = None, at: Any = None
+        self, actor: Any, name: Any, *, after_event_id: Any = None, at: Any = None, internal: bool = False
     ) -> dict[str, Any]:
         """Replay: move the cursor to ``after_event_id``, or to the last event before ``at``.
 
         Exactly one is required. Clamped to the head, audited, and it wakes
-        waiters so a parked wait sees the replay at once.
+        waiters so a parked wait sees the replay at once. A relay route's
+        consumer is replayed through :meth:`seek_route` instead, since a
+        replay re-posts into a platform channel.
         """
         clean_actor = handle(actor, "actor")
         clean = consumers.name(name)
@@ -378,6 +389,8 @@ class RelayHubMixin:
 
         async def op(conn):
             before = await self._consumer_or_404(conn, clean)
+            if not internal:
+                self._require_unmanaged(before)
             head = await store.max_event_id(conn)
             new = min(target, head) if target is not None else await store.event_id_before(conn, moment)
             now = _iso(_now())
@@ -849,6 +862,27 @@ class RelayHubMixin:
             return {"deleted": True, "id": before["id"], "version": fresh["version"]}
 
         return await self._txn(op)
+
+    async def seek_route(
+        self, actor: Any, relay_name: Any, route_id: Any, *, after_event_id: Any = None, at: Any = None
+    ) -> dict[str, Any]:
+        """Replay a route: events after the new cursor are posted to its platform channel again. Audited."""
+        clean = relays.name(relay_name, "relay")
+        ident = optional_id(route_id, "route_id")
+
+        async def find(conn):
+            relay = await self._relay_or_404(conn, clean)
+            route = await self._route_or_404(conn, relay, ident)
+            consumer = await store.get_consumer(conn, route["consumer_id"])
+            if consumer is None:
+                raise HubError("not_found", f"route {ident} has no consumer", 404, {"id": ident})
+            return consumer["name"]
+
+        consumer_name = await self.db.read(find)
+        result = await self.consumer_seek(
+            actor, consumer_name, after_event_id=after_event_id, at=at, internal=True
+        )
+        return {**result, "route": ident, "relay": clean}
 
     @staticmethod
     async def _route_or_404(conn, relay: dict[str, Any], ident: int | None) -> dict[str, Any]:
