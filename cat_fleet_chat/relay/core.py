@@ -305,7 +305,8 @@ class RelayCore:
             "channel": hub_channel,
             "author": self.handle(message.user_name),
             "text": text,
-            "client_request_id": self._key("msg", message.message_id),
+            # Telegram and Slack message ids are unique only within a chat or channel.
+            "client_request_id": self._key("msg", message.channel_id, message.message_id),
             "origin": self._origin(message.channel_id, message.parent_id, message.message_id, message.user_id, message.user_name),
         }
         ok, body = await self.hub.post_message(payload)

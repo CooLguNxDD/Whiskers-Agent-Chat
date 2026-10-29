@@ -272,3 +272,26 @@ async def test_config_cache_survives_hub_outage(relay, tmp_path):
     assert offline.config.binding_for("111")["hub_channel"] == "fleet"
     empty = RelayCore(DownHub(), adapter, cache_path=str(tmp_path / "none.json"))
     assert not await empty.load()
+
+
+async def test_same_message_id_in_two_chats_is_two_messages(relay, authed):
+    core, _adapter, hub, client = relay
+    await client.post(
+        "/api/v1/relays/bot/bindings", json={"actor": "ann", "external_id": "444", "hub_channel": "fleet"}, headers=ADMIN
+    )
+    await core.reload()
+    first = await core.inbound(inbound("from chat 111", channel="111", message="5"))
+    second = await core.inbound(inbound("from chat 444", channel="444", message="5"))
+    assert first.status == second.status == "sent"
+    assert first.hub_message_id != second.hub_message_id
+
+
+def test_cli_keeps_httpx_request_urls_out_of_info_logs(monkeypatch):
+    import logging
+
+    from cat_fleet_chat.relay import cli
+
+    with __import__("pytest").raises(SystemExit):
+        cli.main(["--name", "ok", "--token", "nope"])
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING

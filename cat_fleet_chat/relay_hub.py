@@ -630,7 +630,12 @@ class RelayHubMixin:
         return await self._txn(op)
 
     async def relay_by_token(self, token: str) -> dict[str, Any] | None:
-        """The enabled relay a ``rly_`` token belongs to, for request auth. ``None`` when unknown."""
+        """The relay a ``rly_`` token belongs to, for request auth. ``None`` when unknown.
+
+        A disabled relay is returned too (check ``enabled``): ``Guard`` lets it
+        heartbeat and read its config, so the running process learns it was
+        disabled and stops relaying instead of failing every message.
+        """
         if not isinstance(token, str) or not token.startswith(relays.TOKEN_PREFIX):
             return None
         digest = relays.token_hash(token)
@@ -639,7 +644,7 @@ class RelayHubMixin:
             return await store.find_relay_by_token_hash(conn, digest)
 
         found = await self.db.read(op)
-        if found is None or not found["enabled"] or not secrets.compare_digest(found["token_hash"], digest):
+        if found is None or not secrets.compare_digest(found["token_hash"], digest):
             return None
         return found
 

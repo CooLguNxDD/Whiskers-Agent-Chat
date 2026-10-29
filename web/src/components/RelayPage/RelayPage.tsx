@@ -28,6 +28,12 @@ interface TokenNotice {
   token: string
 }
 
+/** `true` when `actor` is set; otherwise shows the same hint every action uses and returns `false`. */
+function hasActor(actor: () => string, setError: (message: string) => void): boolean {
+  if (!actor()) setError("Set a valid Name in the header first.")
+  return Boolean(actor())
+}
+
 /** The acting handle for audit rows, from the Name field in the header. */
 function useActor() {
   const prefs = usePrefs()
@@ -89,8 +95,9 @@ export default function RelayPage() {
             </ul>
             <NewRelayForm mutations={mutations} onCreated={(created) => { setNotice(created); setSelected(created.name) }} />
           </aside>
-          <Show when={current()} fallback={<p class="text-sm text-cream-dim">Create a relay to configure it.</p>}>
-            {(name) => <RelayDetail name={name()} mutations={mutations} onToken={setNotice} onDeleted={() => setSelected(null)} />}
+          {/* keyed: each relay gets a fresh tree, so a draft for one relay can't be saved to another */}
+          <Show when={current()} keyed fallback={<p class="text-sm text-cream-dim">Create a relay to configure it.</p>}>
+            {(name) => <RelayDetail name={name} mutations={mutations} onToken={setNotice} onDeleted={() => setSelected(null)} />}
           </Show>
         </div>
       </div>
@@ -283,7 +290,7 @@ function Bindings(props: { snapshot: RelaySnapshot; mutations: Mutations }) {
                 variant="ghost"
                 class="ml-auto"
                 aria-label={`Unbind ${binding.external_id}`}
-                onClick={() => actor() && props.mutations.unbind.mutate({ name: name(), id: binding.id, actor: actor() }, { onError: (err) => setError(getErrorMessage(err)) })}
+                onClick={() => hasActor(actor, setError) && props.mutations.unbind.mutate({ name: name(), id: binding.id, actor: actor() }, { onError: (err) => setError(getErrorMessage(err)) })}
               >
                 Unbind
               </Button>
@@ -360,11 +367,11 @@ function Routes(props: { snapshot: RelaySnapshot; mutations: Mutations }) {
                 <Show when={!route.enabled}><Badge class="text-rust">disabled</Badge></Show>
               </div>
               <div class="mt-2 flex flex-wrap gap-2">
-                <Button type="button" size="sm" variant="outline" onClick={() => actor() && props.mutations.updateRoute.mutate({ name: name(), id: route.id, changes: { actor: actor(), enabled: !route.enabled } }, { onError: (err) => setError(getErrorMessage(err)) })}>
+                <Button type="button" size="sm" variant="outline" onClick={() => hasActor(actor, setError) && props.mutations.updateRoute.mutate({ name: name(), id: route.id, changes: { actor: actor(), enabled: !route.enabled } }, { onError: (err) => setError(getErrorMessage(err)) })}>
                   {route.enabled ? "Pause" : "Resume"}
                 </Button>
                 <Button type="button" size="sm" variant="outline" onClick={() => { setSeekFor(route.id); setSeekTo("") }}>Replay…</Button>
-                <Button type="button" size="sm" variant="ghost" onClick={() => actor() && props.mutations.removeRoute.mutate({ name: name(), id: route.id, actor: actor() }, { onError: (err) => setError(getErrorMessage(err)) })}>Remove</Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => hasActor(actor, setError) && props.mutations.removeRoute.mutate({ name: name(), id: route.id, actor: actor() }, { onError: (err) => setError(getErrorMessage(err)) })}>Remove</Button>
               </div>
               <Show when={seekFor() === route.id}>
                 <form
@@ -372,8 +379,10 @@ function Routes(props: { snapshot: RelaySnapshot; mutations: Mutations }) {
                   aria-label="Replay route"
                   onSubmit={(event) => {
                     event.preventDefault()
-                    const value = Number(seekTo())
-                    if (!actor() || !Number.isSafeInteger(value) || value < 0) { setError("Replay needs an event id and your Name."); return }
+                    // Digits only: Number("") is 0, which would replay the whole event log.
+                    const raw = seekTo().trim()
+                    const value = Number(raw)
+                    if (!actor() || !/^\d+$/.test(raw) || !Number.isSafeInteger(value)) { setError("Replay needs an event id and your Name."); return }
                     props.mutations.seek.mutate({ name: name(), id: route.id, afterEventId: value, actor: actor() }, {
                       onSuccess: () => setSeekFor(null),
                       onError: (err) => setError(getErrorMessage(err)),

@@ -253,10 +253,21 @@ async def test_relay_token_allowlist(authed):
     assert rotated.json()["token"] != token
     assert (await client.get("/api/v1/relays/bot/config", headers=headers)).status_code == 401
     assert (await client.get("/api/v1/relays/other/config", headers=bearer(other))).status_code == 200
-    # a disabled relay's token stops working
+    # a disabled relay's token can only learn it was disabled
     version = (await client.get("/api/v1/relays/other", headers=ADMIN)).json()["version"]
     await client.patch("/api/v1/relays/other", json={"actor": "ann", "enabled": False}, headers={**ADMIN, "If-Match": str(version)})
-    assert (await client.get("/api/v1/relays/other/config", headers=bearer(other))).status_code == 401
+    beat = await client.post("/api/v1/relays/other/heartbeat", json={"status": {}}, headers=bearer(other))
+    assert beat.status_code == 200 and beat.json()["enabled"] is False
+    config = await client.get("/api/v1/relays/other/config", headers=bearer(other))
+    assert config.status_code == 200 and config.json()["relay"]["enabled"] is False
+    assert (await client.get("/api/v1/channels", headers=bearer(other))).status_code == 401
+    assert (
+        await client.post(
+            "/api/v1/messages",
+            json={"channel": "fleet", "author": "dc-x", "text": "hi", "origin": {"source": "discord", "channel_id": "1", "relay": "other"}},
+            headers=bearer(other),
+        )
+    ).status_code == 401
     assert app.state.hub
 
 
@@ -391,3 +402,59 @@ async def test_mcp_route_seek_and_guarded_consumer_tools(running):
     assert (await relay_mcp.fleet_consumer_seek("ann", name, after_event_id=0))["error"] == "managed_by_relay"
     replay = await relay_mcp.fleet_relay_route_seek("ann", "tg2", route["id"], after_event_id=0)
     assert replay["cursor"] == 0 and replay["relay"] == "tg2"
+
+
+async def test_relay_token_acts_only_as_its_prefixed_handles(authed):
+    client, app = authed
+    hub = app.state.hub
+    token = (await make_relay(client))["token"]
+    headers = bearer(token)
+    hub.human_handles = frozenset({"boss"})
+    proposal = (await hub.create_proposal("builder", "demo", "Ship", "Summary", 2))["proposal"]
+    origin = {"source": "discord", "channel_id": "111", "relay": "bot"}
+    for author in ("builder", "boss", "sl-ann"):
+        spoofed = await client.post(
+            "/api/v1/messages",
+            json={"channel": "fleet", "author": author, "text": f"approve {proposal['id']}", "origin": origin},
+            headers=headers,
+        )
+        assert spoofed.status_code == 403, author
+    assert (await hub.get_proposal(proposal["id"]))["proposal"]["status"] == "open"
+    ok = await client.post(
+        "/api/v1/messages", json={"channel": "fleet", "author": "dc-ann", "text": "hi", "origin": origin}, headers=headers
+    )
+    assert ok.status_code == 201
+    task = (await hub.create_task("fleet", "T", actor="ann"))["task"]
+    assert (
+        await client.post(f"/api/v1/tasks/{task['id']}/claim", json={"actor": "builder"}, headers=headers)
+    ).status_code == 403
+    assert (
+        await client.post(f"/api/v1/tasks/{task['id']}/claim", json={"actor": "dc-ann"}, headers=headers)
+    ).status_code == 200
+    assert (
+        await client.post(
+            f"/api/v1/tasks/{task['id']}/status",
+            json={"actor": "builder", "status": "in_progress", "expected_version": 2},
+            headers=headers,
+        )
+    ).status_code == 403
+    post = (await hub.feed_post("builder", "hello"))["post"]
+    assert (
+        await client.put(f"/api/v1/feed/posts/{post['id']}/reactions/+1", json={"handle": "boss"}, headers=headers)
+    ).status_code == 403
+    assert (
+        await client.put(f"/api/v1/feed/posts/{post['id']}/reactions/+1", json={"handle": "dc-ann"}, headers=headers)
+    ).status_code == 201
+    # control-plane writes: the relay itself or one of its humans, never someone else
+    bind = await client.post(
+        "/api/v1/relays/bot/bindings",
+        json={"actor": "builder", "external_id": "333", "hub_channel": "fleet"},
+        headers=headers,
+    )
+    assert bind.status_code == 403
+    bind = await client.post(
+        "/api/v1/relays/bot/bindings",
+        json={"actor": "dc-ann", "external_id": "333", "hub_channel": "fleet"},
+        headers=headers,
+    )
+    assert bind.status_code == 201

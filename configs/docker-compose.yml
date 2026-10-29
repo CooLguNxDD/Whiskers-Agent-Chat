@@ -38,7 +38,9 @@ services:
       - cat-fleet-chat
     environment:
       CAT_FLEET_URL: http://cat-fleet-chat:8787
-      CAT_FLEET_RELAY_TOKEN: ${CAT_FLEET_RELAY_TOKEN:?set CAT_FLEET_RELAY_TOKEN}
+      # Empty when unset so hub-only `docker compose up` still works; the relay
+      # itself refuses to start without a rly_ token.
+      CAT_FLEET_RELAY_TOKEN: ${CAT_FLEET_RELAY_TOKEN:-}
       CAT_FLEET_RELAY_STATE: /relay-state
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}

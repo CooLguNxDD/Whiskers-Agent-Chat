@@ -183,6 +183,36 @@ describe("relay page", () => {
     expect(vi.mocked(seekRoute)).toHaveBeenCalledWith("main", 7, 10, "ann")
   })
 
+  it("never replays from an empty event id", async () => {
+    mount()
+    await settle()
+    button("Replay…").click()
+    await settle()
+    submit("Replay route")
+    await settle()
+    expect(vi.mocked(seekRoute)).not.toHaveBeenCalled()
+    expect(container.textContent).toContain("Replay needs an event id")
+  })
+
+  it("says why Remove does nothing without a Name", async () => {
+    prefs.setDisplayName("")
+    mount()
+    await settle()
+    button("Remove").click()
+    await settle()
+    expect(container.textContent).toContain("Set a valid Name")
+  })
+
+  it("starts a fresh form when switching relays", async () => {
+    vi.mocked(getRelay).mockImplementation(async (name: string) => ({ ...snapshot(), relay: relay({ name }) }))
+    mount()
+    await settle()
+    type("Platform channel id", "draft-for-main")
+    ;(container.querySelector('[aria-pressed="false"]') as HTMLButtonElement).click()
+    await settle()
+    expect(byLabel("Platform channel id").value).toBe("")
+  })
+
   it("rotates the token and shows it", async () => {
     vi.mocked(rotateRelayToken).mockResolvedValue({ relay: relay(), token: "rly_rotated" })
     mount()

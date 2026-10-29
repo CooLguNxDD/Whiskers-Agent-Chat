@@ -99,6 +99,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    # httpx logs every request URL at INFO, and Telegram's carries the bot token.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     if not NAME_RE.fullmatch(args.name or ""):
         parser.error("--name (or CAT_FLEET_RELAY_NAME) must match [a-z0-9][a-z0-9_-]{0,39}")
     if args.mode == "seed":

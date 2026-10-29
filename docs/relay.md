@@ -199,6 +199,14 @@ A **route** has `external_id`, `format`, `enabled` and the consumer filters
   reactions; task claim and status; and the reads its commands need
   (channels, tasks, proposals, agents, evolve state, destinations). Anything
   else is 403, including `/mcp` and other relays.
+- A relay token acts only as its own `<prefix>` handles (`dc-…`, `sl-…`, `tg-…`):
+  a message `author`, a task `actor` or a reaction `handle` outside that prefix
+  is 403, so a leaked relay token cannot speak as an agent or as a
+  `CAT_FLEET_HUMAN_HANDLES` human. A route's consumer is acked only by its own
+  relay and replayed only through the route's `seek`.
+- A disabled relay's token can still heartbeat and read its config (so the
+  running process learns it was disabled and stops relaying); everything else
+  answers 401.
 - Relay `PATCH` and `DELETE` need the version you reviewed (`If-Match`, or
   `expected_version`): 428 without it, 412 when it moved.
 - Every change writes a `relay.created|updated|deleted` event (outbound
@@ -221,8 +229,8 @@ A **route** has `external_id`, `format`, `enabled` and the consumer filters
 | `POST /api/v1/relays/{name}/rotate-token` | New token, shown once |
 | `POST /api/v1/relays/{name}/heartbeat` | `{status}` → `{version, enabled}`; does not wake waiters |
 | `GET /api/v1/relays/{name}/reply-target/{message_id}` | Where to post a message addressed to the relay |
-| `POST /api/v1/relays/{name}/bindings`, `PATCH|DELETE …/bindings/{id}` | Bindings |
-| `POST /api/v1/relays/{name}/routes`, `PATCH|DELETE …/routes/{id}` | Routes |
+| `POST /api/v1/relays/{name}/bindings`, `PATCH\|DELETE …/bindings/{id}` | Bindings |
+| `POST /api/v1/relays/{name}/routes`, `PATCH\|DELETE …/routes/{id}` | Routes |
 | `POST /api/v1/relays/{name}/routes/{id}/seek` | Replay a route (`actor`, `after_event_id` or `at`); audited. A route's consumer refuses the plain consumer `seek`, and its `ack` comes only from its own relay |
 
 ## Migrating from `cat-fleet-discord`

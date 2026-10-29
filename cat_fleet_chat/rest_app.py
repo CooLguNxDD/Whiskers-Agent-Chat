@@ -85,6 +85,14 @@ RELAY_ALLOWED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
+# What a disabled relay's token can still do: report in and read its config.
+RELAY_DISABLED_ALLOWED = tuple(
+    (method, pattern)
+    for method, pattern in RELAY_ALLOWED
+    if pattern.pattern.endswith(("/heartbeat", "/config"))
+)
+
+
 class Guard:
     """Bearer auth plus browser Origin/Host checks.
 
@@ -132,10 +140,19 @@ class Guard:
         relay = await hub.relay_by_token(presented[len("Bearer "):]) if hub is not None else None
         if relay is None:
             return _unauthorized()
-        scope.setdefault("state", {})["relay"] = relay["name"]
+        state = scope.setdefault("state", {})
+        state["relay"] = relay["name"]
+        # Handles a relay token may act as: its own prefix (``dc-``, ``sl-``, …).
+        state["relay_prefix"] = (relay.get("config") or {}).get("prefix") or ""
         method = request.method.upper()
         path = request.url.path
-        for allowed_method, pattern in RELAY_ALLOWED:
+        allowed = RELAY_ALLOWED
+        if not relay["enabled"]:
+            # Disabled: only learn it (heartbeat answers enabled=false), nothing else.
+            allowed = RELAY_DISABLED_ALLOWED
+            if not any(m == method and p.fullmatch(path) for m, p in allowed):
+                return _unauthorized()
+        for allowed_method, pattern in allowed:
             match = pattern.fullmatch(path)
             if match is None or method != allowed_method:
                 continue
@@ -240,6 +257,16 @@ def _relay_caller(request: Request) -> str | None:
     return request.scope.get("state", {}).get("relay")
 
 
+def _require_relay_handle(request: Request, value: Any, field: str) -> None:
+    """A relay token acts only as its own ``<prefix><name>`` handles, never as an agent or listed human."""
+    relay = _relay_caller(request)
+    if relay is None:
+        return
+    prefix = request.scope.get("state", {}).get("relay_prefix") or ""
+    if not prefix or not isinstance(value, str) or not value.startswith(prefix):
+        raise HubError("forbidden", f"a relay token acts only as {prefix}* handles ({field})", 403, {"field": field})
+
+
 async def post_message(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
@@ -250,6 +277,7 @@ async def post_message(request: Request) -> JSONResponse:
                 raise HubError("forbidden", f"a relay token posts only with origin.relay={relay}", 403)
             if body.get("destination") not in (None, ""):
                 raise HubError("forbidden", "a relay token cannot address a destination", 403)
+            _require_relay_handle(request, _author(body), "author")
         result = await _hub(request).post_message(
             body.get("channel"),
             _author(body),
@@ -513,6 +541,7 @@ async def create_task(request: Request) -> JSONResponse:
 async def claim_task(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
+        _require_relay_handle(request, _author(body, "actor"), "actor")
         result = await _hub(request).claim_task(
             request.path_params["task_id"],
             _author(body, "actor"),
@@ -526,6 +555,7 @@ async def claim_task(request: Request) -> JSONResponse:
 async def update_task_status(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
+        _require_relay_handle(request, _author(body, "actor"), "actor")
         result = await _hub(request).update_task_status(
             request.path_params["task_id"],
             body.get("status"),
@@ -775,6 +805,7 @@ async def feed_reaction(request: Request) -> JSONResponse:
         if request.method.upper() == "DELETE":
             return JSONResponse(await hub.unreact(_caller(request, {}, "handle"), post_id, kind))
         body = await _body(request)
+        _require_relay_handle(request, _caller(request, body, "handle"), "handle")
         result = await hub.react(_caller(request, body, "handle"), post_id, kind)
         return JSONResponse(result, status_code=200 if result.get("idempotent") else 201)
     except HubError as exc:

@@ -12,14 +12,17 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat.rest_app import _body, _caller, _hub, _json_error, _relay_caller
+from cat_fleet_chat.rest_app import _body, _caller, _hub, _json_error, _relay_caller, _require_relay_handle
 
 
 def _actor(request: Request, body: dict) -> str:
-    """The acting handle. A relay token acts as its relay unless it names the human."""
+    """The acting handle. A relay token acts as its relay, or as one of its ``<prefix>`` humans."""
     actor = _caller(request, body, "actor")
+    relay = _relay_caller(request)
     if actor in (None, ""):
-        actor = _relay_caller(request)
+        actor = relay
+    elif relay is not None and actor != relay:
+        _require_relay_handle(request, actor, "actor")
     if actor in (None, ""):
         raise HubError("validation_error", "actor is required", 400, {"field": "actor"})
     return actor
