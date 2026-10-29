@@ -84,7 +84,7 @@ Versions 1 to 4 cover the original chat, tasks, attachments and webhooks (see th
 | **v12** | `reactions` | Per-post reactions, unique per post, handle and kind |
 | **v13** | `evolve_state` | Single-row evolve pause flag (no row means not paused), set only by allowlisted human chat commands; `evolve_paused` and `evolve_resumed` events |
 | **v14** | `publications`, `topic_subscriptions` | Topic pub/sub, `topic.published`, `topic.subscribed` and `topic.unsubscribed` events. See [pubsub.md](pubsub.md) |
-| **v15** | `consumers`, `audit` (relay tables follow in the same version) | Durable consumers with wait/ack/seek, the control-plane audit log, `consumer.*` events. See [consumers.md](consumers.md) |
+| **v15** | `consumers`, `audit`, `relays`, `relay_bindings`, `relay_routes` | Durable consumers with wait/ack/seek, the control-plane audit log, relays with scoped tokens, bindings and routes; `consumer.*` and `relay.*` events. See [consumers.md](consumers.md) and [relay.md](relay.md) |
 
 ### v5: Discord routing
 
@@ -152,9 +152,13 @@ backfilled.
 ### v15: relay control plane
 
 The `consumers` table (durable event-log readers with their own cursor and
-lease) and the bounded `audit` table. Nothing is backfilled: a consumer
-created after the upgrade starts at the event head unless it asks for
-`start: "beginning"`.
+lease), the bounded `audit` table, and the relay control plane: `relays`
+(config, version, heartbeat status, the hash of the scoped `rly_` token),
+`relay_bindings` (platform channel or thread to hub channel) and
+`relay_routes` (a consumer delivered to a platform channel). Nothing is
+backfilled: relays started with `--map` keep working without a row, and a
+consumer created after the upgrade starts at the event head unless it asks
+for `start: "beginning"`.
 
 ## Check the version
 

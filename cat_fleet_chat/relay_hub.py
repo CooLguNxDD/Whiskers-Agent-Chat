@@ -1,4 +1,4 @@
-"""Business rules for the relay control plane: durable consumers and the audit log.
+"""Business rules for the relay control plane: durable consumers, relays and the audit log.
 
 A mixin of :class:`cat_fleet_chat.hub.Hub`, kept in its own module so the
 core hub stays readable. Same layering as the rest of the hub: clean every
@@ -10,13 +10,14 @@ control-plane change.
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from cat_fleet_chat import consumers, store
+from cat_fleet_chat import consumers, relays, store
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat.validate import handle, optional_id, page_limit
+from cat_fleet_chat.validate import channel_name, handle, optional_id, page_limit
 
 SCAN_BATCH = 200
 # One wait scans at most this many events before it returns, so a narrow
@@ -57,8 +58,12 @@ def public_consumer(consumer: dict[str, Any], *, head: int | None = None) -> dic
     return out
 
 
+# How many parents a relay reply may climb to find the message that came in through it.
+REPLY_CHAIN_MAX = 5
+
+
 class RelayHubMixin:
-    """Consumers and audit. Expects ``self.db``, ``self.waiters`` and ``self._txn``."""
+    """Consumers, relays and audit. Expects ``self.db``, ``self.waiters`` and ``self._txn``."""
 
     # ---- plumbing ---------------------------------------------------------
 
@@ -415,5 +420,493 @@ class RelayHubMixin:
                 limit=clean_limit,
             )
             return {"audit": rows, "next_before_id": rows[-1]["id"] if len(rows) == clean_limit else None}
+
+        return await self.db.read(op)
+
+    # ---- relays ------------------------------------------------------------
+
+    @staticmethod
+    async def _relay_or_404(conn, name: str) -> dict[str, Any]:
+        found = await store.get_relay(conn, name)
+        if found is None:
+            raise HubError("not_found", f"relay {name} not found", 404, {"name": name})
+        return found
+
+    @staticmethod
+    def _check_version(relay: dict[str, Any], expected: int | None) -> None:
+        if expected is not None and expected != relay["version"]:
+            raise HubError(
+                "version_conflict",
+                f"relay {relay['name']} changed: it is at version {relay['version']}, you reviewed {expected}",
+                412,
+                {"version": relay["version"], "expected_version": expected},
+            )
+
+    async def _relay_changed(
+        self, conn, relay: dict[str, Any], actor: str, change: str, before: Any, after: Any, target: str
+    ) -> dict[str, Any]:
+        """Bump the version, log ``relay.updated`` and an audit row. Returns the fresh relay."""
+        now = _iso(_now())
+        await store.bump_relay(conn, relay["id"], now)
+        fresh = await store.get_relay(conn, relay["id"])
+        await store.insert_event(
+            conn, "relay.updated", None, relay["id"], relays.event_payload(fresh, actor, change), now
+        )
+        kind, _, _ = change.partition(".")
+        await self._audit(conn, actor, change, kind if kind != change else "relay", target, before, after)
+        return fresh
+
+    async def create_relay(self, actor: Any, body: dict[str, Any]) -> dict[str, Any]:
+        """Register a relay. Returns its scoped ``rly_`` token once; only the hash is stored.
+
+        Also creates the relay's built-in replies consumer, which delivers
+        messages addressed to ``relay:<name>`` (replies to messages that came
+        in through this relay, or explicit ``destination``).
+        """
+        clean_actor = handle(actor, "actor")
+        name = relays.name(body.get("name"))
+        platform = relays.platform(body.get("platform"))
+        description = relays.description(body.get("description"))
+        config = relays.config(body.get("config"), platform)
+        enabled = body.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise HubError("validation_error", "enabled must be true or false", 400, {"field": "enabled"})
+        token = relays.new_token()
+
+        async def op(conn):
+            if await store.get_relay(conn, name) is not None:
+                raise HubError("conflict", f"relay {name} already exists", 409, {"name": name})
+            now = _iso(_now())
+            relay_id = await store.insert_relay(
+                conn,
+                {
+                    "name": name,
+                    "platform": platform,
+                    "enabled": int(enabled),
+                    "description": description,
+                    "config": config,
+                    "token_hash": relays.token_hash(token),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            await self.create_consumer(
+                clean_actor,
+                {
+                    "name": relays.replies_consumer(name),
+                    "owner": clean_actor,
+                    "description": f"replies addressed to relay {name}",
+                    "kinds": ["message.created"],
+                    "destinations": [relays.destination(name)],
+                },
+                relay_id=relay_id,
+                conn=conn,
+            )
+            relay = await store.get_relay(conn, relay_id)
+            await store.insert_event(
+                conn, "relay.created", None, relay_id, relays.event_payload(relay, clean_actor, "relay.create"), now
+            )
+            await self._audit(conn, clean_actor, "relay.create", "relay", name, None, relay)
+            return {"relay": relays.public_relay(relay), "token": token}
+
+        return await self._txn(op)
+
+    async def list_relays(self) -> dict[str, Any]:
+        async def op(conn):
+            return {"relays": [relays.public_relay(row) for row in await store.list_relays(conn)]}
+
+        return await self.db.read(op)
+
+    async def get_relay(self, name: Any) -> dict[str, Any]:
+        """A relay with its bindings and routes."""
+        clean = relays.name(name)
+
+        async def op(conn):
+            return await self._relay_snapshot(conn, await self._relay_or_404(conn, clean))
+
+        return await self.db.read(op)
+
+    async def _relay_snapshot(self, conn, relay: dict[str, Any]) -> dict[str, Any]:
+        head = await store.max_event_id(conn)
+        routes = []
+        for route in await store.list_routes(conn, relay["id"]):
+            consumer = await store.get_consumer(conn, route["consumer_id"])
+            routes.append(
+                {**route, "consumer": public_consumer(consumer, head=head) if consumer else None}
+            )
+        replies = await store.get_consumer(conn, relays.replies_consumer(relay["name"]))
+        return {
+            "relay": relays.public_relay(relay),
+            "bindings": await store.list_bindings(conn, relay["id"]),
+            "routes": routes,
+            "replies_consumer": replies["name"] if replies else None,
+            "version": relay["version"],
+        }
+
+    async def relay_config(self, name: Any) -> dict[str, Any]:
+        """Everything a relay process needs to run, at one ``version``."""
+        return await self.get_relay(name)
+
+    async def update_relay(
+        self, actor: Any, name: Any, body: dict[str, Any], *, expected_version: Any = None
+    ) -> dict[str, Any]:
+        """Change ``enabled``, ``description`` or ``config`` (top-level keys merge).
+
+        ``expected_version`` (REST ``If-Match``) must be the version the caller
+        reviewed; a mismatch is 412 ``version_conflict``.
+        """
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(name)
+        expected = relays.expected_version(expected_version, required=True)
+
+        async def op(conn):
+            before = await self._relay_or_404(conn, clean)
+            self._check_version(before, expected)
+            values: dict[str, Any] = {}
+            if "enabled" in body:
+                if not isinstance(body["enabled"], bool):
+                    raise HubError("validation_error", "enabled must be true or false", 400, {"field": "enabled"})
+                values["enabled"] = int(body["enabled"])
+            if "description" in body:
+                values["description"] = relays.description(body.get("description"))
+            if "config" in body:
+                values["config"] = relays.merge_config(before["config"], body["config"], before["platform"])
+            if not values:
+                return await self._relay_snapshot(conn, before)
+            await store.update_relay(conn, before["id"], values)
+            changed = await store.get_relay(conn, before["id"])
+            fresh = await self._relay_changed(conn, changed, clean_actor, "relay.update", before, changed, clean)
+            return await self._relay_snapshot(conn, fresh)
+
+        return await self._txn(op)
+
+    async def delete_relay(self, actor: Any, name: Any, *, expected_version: Any = None) -> dict[str, Any]:
+        """Delete a relay, its bindings, its routes and their consumers. Needs the reviewed version."""
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(name)
+        expected = relays.expected_version(expected_version, required=True)
+
+        async def op(conn):
+            before = await self._relay_or_404(conn, clean)
+            self._check_version(before, expected)
+            owned = await store.list_consumers(conn, relay_id=before["id"])
+            await store.delete_relay(conn, before["id"])
+            for consumer in owned:
+                await self.delete_consumer(clean_actor, consumer["name"], internal=True, conn=conn)
+            await store.insert_event(
+                conn, "relay.deleted", None, before["id"], relays.event_payload(before, clean_actor, "relay.delete"),
+                _iso(_now()),
+            )
+            await self._audit(conn, clean_actor, "relay.delete", "relay", clean, before, None)
+            return {"deleted": True, "name": clean}
+
+        return await self._txn(op)
+
+    async def rotate_relay_token(self, actor: Any, name: Any) -> dict[str, Any]:
+        """Issue a new ``rly_`` token; the old one stops working at once. Returned once."""
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(name)
+        token = relays.new_token()
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            await store.update_relay(conn, relay["id"], {"token_hash": relays.token_hash(token), "updated_at": _iso(_now())})
+            await self._audit(conn, clean_actor, "relay.rotate_token", "relay", clean, None, {"rotated": True})
+            return {"relay": relays.public_relay(await store.get_relay(conn, relay["id"])), "token": token}
+
+        return await self._txn(op)
+
+    async def relay_by_token(self, token: str) -> dict[str, Any] | None:
+        """The enabled relay a ``rly_`` token belongs to, for request auth. ``None`` when unknown."""
+        if not isinstance(token, str) or not token.startswith(relays.TOKEN_PREFIX):
+            return None
+        digest = relays.token_hash(token)
+
+        async def op(conn):
+            return await store.find_relay_by_token_hash(conn, digest)
+
+        found = await self.db.read(op)
+        if found is None or not found["enabled"] or not secrets.compare_digest(found["token_hash"], digest):
+            return None
+        return found
+
+    async def relay_heartbeat(self, name: Any, status: Any = None) -> dict[str, Any]:
+        """Record that a relay is alive, with its status. Does not wake waiters.
+
+        Returns the current config ``version`` and ``enabled``, so the relay
+        reloads its config when the version moved.
+        """
+        clean = relays.name(name)
+        clean_status = relays.status(status)
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            await store.update_relay(conn, relay["id"], {"last_seen_at": _iso(_now()), "status": clean_status})
+            return {"name": clean, "version": relay["version"], "enabled": relay["enabled"]}
+
+        return await self._quiet(op)
+
+    # ---- bindings ------------------------------------------------------------
+
+    async def add_binding(self, actor: Any, relay_name: Any, body: dict[str, Any]) -> dict[str, Any]:
+        """Bind a platform channel or thread to a hub channel. The hub channel must exist."""
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(relay_name, "relay")
+        values = relays.binding(body)
+        expected = relays.expected_version(body.get("expected_version"), required=False)
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            self._check_version(relay, expected)
+            await self._require_hub_channels(conn, [values["hub_channel"], *values["allowed"]])
+            if await store.find_binding(conn, relay["id"], values["external_id"]) is not None:
+                raise HubError(
+                    "conflict",
+                    f"{values['external_id']} is already bound for relay {clean}",
+                    409,
+                    {"external_id": values["external_id"]},
+                )
+            if len(await store.list_bindings(conn, relay["id"])) >= relays.BINDINGS_MAX:
+                raise HubError("limit_exceeded", f"at most {relays.BINDINGS_MAX} bindings per relay", 409)
+            now = _iso(_now())
+            binding_id = await store.insert_binding(
+                conn, {**values, "relay_id": relay["id"], "created_at": now, "updated_at": now}
+            )
+            binding = await store.get_binding(conn, binding_id)
+            fresh = await self._relay_changed(
+                conn, relay, clean_actor, "binding.create", None, binding, f"{clean}/{values['external_id']}"
+            )
+            return {"binding": binding, "version": fresh["version"]}
+
+        return await self._txn(op)
+
+    async def update_binding(
+        self, actor: Any, relay_name: Any, binding_id: Any, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(relay_name, "relay")
+        ident = optional_id(binding_id, "binding_id")
+        values = relays.binding(body, partial=True)
+        values.pop("external_id", None)
+        expected = relays.expected_version(body.get("expected_version"), required=False)
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            self._check_version(relay, expected)
+            before = await self._binding_or_404(conn, relay, ident)
+            names = [values[key] for key in ("hub_channel",) if key in values] + values.get("allowed", [])
+            await self._require_hub_channels(conn, names)
+            if not values:
+                return {"binding": before, "version": relay["version"]}
+            await store.update_binding(conn, before["id"], {**values, "updated_at": _iso(_now())})
+            after = await store.get_binding(conn, before["id"])
+            fresh = await self._relay_changed(
+                conn, relay, clean_actor, "binding.update", before, after, f"{clean}/{before['external_id']}"
+            )
+            return {"binding": after, "version": fresh["version"]}
+
+        return await self._txn(op)
+
+    async def delete_binding(self, actor: Any, relay_name: Any, binding_id: Any) -> dict[str, Any]:
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(relay_name, "relay")
+        ident = optional_id(binding_id, "binding_id")
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            before = await self._binding_or_404(conn, relay, ident)
+            await store.delete_binding(conn, before["id"])
+            fresh = await self._relay_changed(
+                conn, relay, clean_actor, "binding.delete", before, None, f"{clean}/{before['external_id']}"
+            )
+            return {"deleted": True, "id": before["id"], "version": fresh["version"]}
+
+        return await self._txn(op)
+
+    @staticmethod
+    async def _binding_or_404(conn, relay: dict[str, Any], ident: int | None) -> dict[str, Any]:
+        found = await store.get_binding(conn, ident) if ident else None
+        if found is None or found["relay_id"] != relay["id"]:
+            raise HubError("not_found", f"binding {ident} not found", 404, {"id": ident})
+        return found
+
+    @staticmethod
+    async def _require_hub_channels(conn, names: list[str]) -> None:
+        for item in names:
+            if await store.get_channel_by_name(conn, channel_name(item)) is None:
+                raise HubError("not_found", f"channel {item} not found", 404, {"channel": item})
+
+    # ---- routes --------------------------------------------------------------
+
+    async def add_route(self, actor: Any, relay_name: Any, body: dict[str, Any]) -> dict[str, Any]:
+        """Deliver matching events to a platform channel through the relay.
+
+        Creates the route's durable consumer (filters as for consumers, plus
+        ``start``) so delivery survives relay restarts and is at-least-once.
+        ``format`` is ``line``, ``embed`` or ``card`` (cards carry buttons).
+        """
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(relay_name, "relay")
+        external = relays.external_id(body.get("external_id"), "external_id")
+        fmt = relays.route_format(body.get("format"))
+        enabled = body.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise HubError("validation_error", "enabled must be true or false", 400, {"field": "enabled"})
+        filters = consumers.filters(body)
+        expected = relays.expected_version(body.get("expected_version"), required=False)
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            self._check_version(relay, expected)
+            if len(await store.list_routes(conn, relay["id"])) >= relays.ROUTES_MAX:
+                raise HubError("limit_exceeded", f"at most {relays.ROUTES_MAX} routes per relay", 409)
+            created = await self.create_consumer(
+                clean_actor,
+                {
+                    "name": relays.route_consumer(clean, secrets.token_hex(4)),
+                    "owner": clean_actor,
+                    "description": f"relay {clean} route to {external}",
+                    "start": body.get("start", "now"),
+                    **filters,
+                },
+                relay_id=relay["id"],
+                conn=conn,
+            )
+            now = _iso(_now())
+            route_id = await store.insert_route(
+                conn,
+                {
+                    "relay_id": relay["id"],
+                    "consumer_id": created["consumer"]["id"],
+                    "external_id": external,
+                    "format": fmt,
+                    "enabled": int(enabled),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            route = await store.get_route(conn, route_id)
+            shaped = {**route, "consumer": created["consumer"]}
+            fresh = await self._relay_changed(conn, relay, clean_actor, "route.create", None, shaped, f"{clean}/{route_id}")
+            return {"route": shaped, "version": fresh["version"]}
+
+        return await self._txn(op)
+
+    async def update_route(
+        self, actor: Any, relay_name: Any, route_id: Any, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Change ``external_id``, ``format``, ``enabled`` or the consumer filters."""
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(relay_name, "relay")
+        ident = optional_id(route_id, "route_id")
+        values: dict[str, Any] = {}
+        if "external_id" in body:
+            values["external_id"] = relays.external_id(body["external_id"], "external_id")
+        if "format" in body:
+            values["format"] = relays.route_format(body["format"])
+        if "enabled" in body:
+            if not isinstance(body["enabled"], bool):
+                raise HubError("validation_error", "enabled must be true or false", 400, {"field": "enabled"})
+            values["enabled"] = int(body["enabled"])
+        filters = consumers.filters(body, partial=True)
+        expected = relays.expected_version(body.get("expected_version"), required=False)
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            self._check_version(relay, expected)
+            before = await self._route_or_404(conn, relay, ident)
+            consumer = await store.get_consumer(conn, before["consumer_id"])
+            if not values and not filters:
+                return {"route": {**before, "consumer": public_consumer(consumer)}, "version": relay["version"]}
+            if values:
+                await store.update_route(conn, before["id"], {**values, "updated_at": _iso(_now())})
+            if filters:
+                await self.update_consumer(clean_actor, consumer["name"], filters, internal=True, conn=conn)
+            after = {
+                **await store.get_route(conn, before["id"]),
+                "consumer": public_consumer(await store.get_consumer(conn, before["consumer_id"])),
+            }
+            fresh = await self._relay_changed(
+                conn, relay, clean_actor, "route.update", {**before, "consumer": consumer}, after, f"{clean}/{before['id']}"
+            )
+            return {"route": after, "version": fresh["version"]}
+
+        return await self._txn(op)
+
+    async def delete_route(self, actor: Any, relay_name: Any, route_id: Any) -> dict[str, Any]:
+        clean_actor = handle(actor, "actor")
+        clean = relays.name(relay_name, "relay")
+        ident = optional_id(route_id, "route_id")
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            before = await self._route_or_404(conn, relay, ident)
+            consumer = await store.get_consumer(conn, before["consumer_id"])
+            await store.delete_route(conn, before["id"])
+            if consumer is not None:
+                await self.delete_consumer(clean_actor, consumer["name"], internal=True, conn=conn)
+            fresh = await self._relay_changed(conn, relay, clean_actor, "route.delete", before, None, f"{clean}/{before['id']}")
+            return {"deleted": True, "id": before["id"], "version": fresh["version"]}
+
+        return await self._txn(op)
+
+    @staticmethod
+    async def _route_or_404(conn, relay: dict[str, Any], ident: int | None) -> dict[str, Any]:
+        found = await store.get_route(conn, ident) if ident else None
+        if found is None or found["relay_id"] != relay["id"]:
+            raise HubError("not_found", f"route {ident} not found", 404, {"id": ident})
+        return found
+
+    async def relay_owns_consumer(self, relay_name: str, consumer_name: str) -> bool:
+        """Whether ``consumer_name`` is one of this relay's route or replies consumers."""
+
+        async def op(conn):
+            relay = await store.get_relay(conn, relay_name)
+            consumer = await store.get_consumer(conn, consumer_name)
+            return relay is not None and consumer is not None and consumer.get("relay_id") == relay["id"]
+
+        return await self.db.read(op)
+
+    # ---- reply targets ---------------------------------------------------------
+
+    async def relay_reply_target(self, relay_name: Any, message_id: Any) -> dict[str, Any]:
+        """Where a relay should post a message addressed to it.
+
+        Walks the reply chain for the nearest message that came in through
+        this relay and answers in its thread (or channel), quoting it. With
+        none, falls back to the first outbound binding of the message's hub
+        channel. ``target`` is null when there is nowhere to post it.
+        """
+        clean = relays.name(relay_name, "relay")
+        ident = optional_id(message_id, "message_id")
+
+        async def op(conn):
+            relay = await self._relay_or_404(conn, clean)
+            message = await store.get_message(conn, ident) if ident else None
+            if message is None:
+                raise HubError("not_found", f"message {ident} not found", 404, {"id": ident})
+            current = await store.get_message(conn, message["reply_to"]) if message.get("reply_to") else None
+            for _ in range(REPLY_CHAIN_MAX):
+                if current is None:
+                    break
+                origin = current.get("origin") or {}
+                if origin.get("relay") == clean:
+                    return {
+                        "message_id": message["id"],
+                        "target": {
+                            "external_id": origin.get("thread_id") or origin["channel_id"],
+                            "reply_to_external": origin.get("message_id"),
+                            "via": "origin",
+                        },
+                    }
+                reply_to = current.get("reply_to")
+                current = await store.get_message(conn, reply_to) if reply_to else None
+            for binding in await store.list_bindings(conn, relay["id"]):
+                if binding["hub_channel"] == message["channel"] and binding["direction"] in ("out", "both"):
+                    return {
+                        "message_id": message["id"],
+                        "target": {"external_id": binding["external_id"], "reply_to_external": None, "via": "binding"},
+                    }
+            return {"message_id": message["id"], "target": None}
 
         return await self.db.read(op)

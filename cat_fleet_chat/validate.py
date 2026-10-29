@@ -72,6 +72,10 @@ EVENT_KINDS = frozenset(
         "consumer.updated",
         "consumer.deleted",
         "consumer.seeked",
+        # A relay, its bindings or its routes changed (schema v15). No channel.
+        "relay.created",
+        "relay.updated",
+        "relay.deleted",
     }
 )
 
@@ -346,7 +350,7 @@ def webhook_patterns(value: Any, field: str) -> list[str]:
     return items
 
 
-ORIGIN_SOURCES = ("discord",)
+ORIGIN_SOURCES = ("discord", "slack", "telegram")
 DESCRIPTION_MAX = 200
 ORIGIN_AUTHOR_MAX = 80
 SNOWFLAKE_RE = re.compile(r"^[0-9]{1,25}$")
@@ -371,20 +375,48 @@ def webhook_description(value: Any) -> str | None:
     return text or None
 
 
+RELAY_DESTINATION_RE = re.compile(r"^relay:[a-z0-9][a-z0-9_-]{0,39}$")
+
+
 def destination_name(value: Any) -> str | None:
-    """An outbound hook name a message is addressed to. ``None`` or empty means no destination."""
+    """Where a message is addressed: an outbound hook name, or ``relay:<name>``.
+
+    ``None`` or empty means no destination.
+    """
     if value is None or value == "":
         return None
-    if not isinstance(value, str) or not CHANNEL_RE.fullmatch(value):
+    if not isinstance(value, str) or not (
+        CHANNEL_RE.fullmatch(value) or RELAY_DESTINATION_RE.fullmatch(value)
+    ):
         raise _fail(
-            "destination must be the name of an outbound webhook",
+            "destination must be the name of an outbound webhook or relay:<name>",
             details={"field": "destination"},
         )
     return value
 
 
+# Platform ids other than Discord snowflakes: Slack ``C0123`` or thread
+# ``1700000000.000100``, Telegram ``-100123`` or ``-100123:7``.
+EXTERNAL_ID_RE = re.compile(r"^-?[A-Za-z0-9][A-Za-z0-9_:.-]{0,63}$")
+RELAY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+
+
+def _platform_id(source: str, value: Any, field: str) -> str:
+    if source == "discord":
+        return snowflake(value, field)
+    text = str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+    if not EXTERNAL_ID_RE.fullmatch(text):
+        raise _fail(f"{field} must be a {source} id", details={"field": field})
+    return text
+
+
 def origin(value: Any) -> dict[str, str] | None:
-    """Where a message came from. Only ``discord`` today. Unknown keys are dropped."""
+    """Where a message came from: a chat platform the relay bridges. Unknown keys are dropped.
+
+    ``channel_id`` is the bound platform channel; ``thread_id`` the thread
+    inside it; ``relay`` the relay process that posted it, so a reply can go
+    back through that relay.
+    """
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -394,10 +426,11 @@ def origin(value: Any) -> dict[str, str] | None:
         raise _fail(
             f"origin.source must be one of {', '.join(ORIGIN_SOURCES)}", details={"field": "origin"}
         )
-    clean = {"source": source, "channel_id": snowflake(value.get("channel_id"), "origin.channel_id")}
-    message_id = optional_snowflake(value.get("message_id"), "origin.message_id")
-    if message_id is not None:
-        clean["message_id"] = message_id
+    clean = {"source": source, "channel_id": _platform_id(source, value.get("channel_id"), "origin.channel_id")}
+    for key in ("message_id", "thread_id", "user_id"):
+        item = value.get(key)
+        if item not in (None, ""):
+            clean[key] = _platform_id(source, item, f"origin.{key}")
     author = value.get("author")
     if author not in (None, ""):
         if not isinstance(author, str) or len(author) > ORIGIN_AUTHOR_MAX:
@@ -406,6 +439,11 @@ def origin(value: Any) -> dict[str, str] | None:
                 details={"field": "origin"},
             )
         clean["author"] = author.strip()
+    relay = value.get("relay")
+    if relay not in (None, ""):
+        if not isinstance(relay, str) or not RELAY_NAME_RE.fullmatch(relay):
+            raise _fail("origin.relay must be a relay name", details={"field": "origin"})
+        clean["relay"] = relay
     return clean
 
 

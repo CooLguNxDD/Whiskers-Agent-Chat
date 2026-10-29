@@ -302,7 +302,8 @@ async def test_origin_is_validated(hooked):
     async def attempt(origin):
         return await send(client, "x", origin=origin)
 
-    assert (await attempt({"source": "slack", "channel_id": "1"})).status_code == 400
+    assert (await attempt({"source": "irc", "channel_id": "1"})).status_code == 400
+    assert (await attempt({"source": "slack", "channel_id": "bad id"})).status_code == 400
     assert (await attempt({"source": "discord", "channel_id": "abc"})).status_code == 400
     assert (await attempt({"source": "discord"})).status_code == 400
     assert (await attempt("discord")).status_code == 400

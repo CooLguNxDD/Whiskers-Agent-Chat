@@ -269,8 +269,8 @@ async def test_v14_database_upgrades_on_open(tmp_path):
     await db.open()
     await db.close()
     with sqlite3.connect(path) as conn:
-        conn.execute("DROP TABLE consumers")
-        conn.execute("DROP TABLE audit")
+        for table in ("relay_routes", "relay_bindings", "relays", "consumers", "audit"):
+            conn.execute(f"DROP TABLE {table}")
         conn.execute("DELETE FROM schema_migrations WHERE version > 14")
 
     for _ in range(2):  # the second open must be a no-op
@@ -282,5 +282,5 @@ async def test_v14_database_upgrades_on_open(tmp_path):
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         versions = [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
     assert SCHEMA_VERSION >= 15
-    assert {"consumers", "audit"} <= tables
+    assert {"consumers", "audit", "relays", "relay_bindings", "relay_routes"} <= tables
     assert versions == list(range(1, SCHEMA_VERSION + 1))

@@ -52,6 +52,9 @@ OPT_IN_KINDS = frozenset(
         "consumer.updated",
         "consumer.deleted",
         "consumer.seeked",
+        "relay.created",
+        "relay.updated",
+        "relay.deleted",
     }
 )
 

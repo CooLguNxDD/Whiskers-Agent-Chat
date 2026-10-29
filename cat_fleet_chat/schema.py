@@ -435,6 +435,63 @@ audit = Table(
     Index("idx_audit_target", "target_kind", "target", "id"),
 )
 
+# Schema v15. Relays (``relays.py``): chat-platform bridge processes the hub
+# knows by name. ``config_json`` is the validated relay config; ``version``
+# goes up on every change to the relay, its bindings or its routes, so a
+# relay reloads when its heartbeat reports a new one. ``token_hash`` is the
+# SHA-256 of the relay's scoped ``rly_`` token, never the token.
+relays = Table(
+    "relays",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", Text, nullable=False, unique=True),
+    Column("platform", Text, nullable=False),
+    Column("enabled", Integer, nullable=False, server_default=text("1")),
+    Column("description", Text),
+    Column("config_json", Text, nullable=False, server_default=text("'{}'")),
+    Column("token_hash", Text),
+    Column("version", Integer, nullable=False, server_default=text("1")),
+    Column("last_seen_at", Text),
+    Column("status_json", Text, nullable=False, server_default=text("'{}'")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Index("idx_relays_token_hash", "token_hash"),
+)
+
+# Schema v15. A platform channel or thread bound to a hub channel.
+relay_bindings = Table(
+    "relay_bindings",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("relay_id", Integer, ForeignKey("relays.id"), nullable=False),
+    Column("external_id", Text, nullable=False),
+    Column("kind", Text, nullable=False, server_default=text("'channel'")),
+    Column("parent_external_id", Text),
+    Column("hub_channel", Text, nullable=False),
+    Column("allowed_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("any_channel", Integer, nullable=False, server_default=text("0")),
+    Column("task_id", Integer),
+    Column("direction", Text, nullable=False, server_default=text("'both'")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    UniqueConstraint("relay_id", "external_id", name="uq_relay_bindings_external"),
+)
+
+# Schema v15. A durable consumer delivered by a relay to a platform channel.
+relay_routes = Table(
+    "relay_routes",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("relay_id", Integer, ForeignKey("relays.id"), nullable=False),
+    Column("consumer_id", Integer, ForeignKey("consumers.id"), nullable=False),
+    Column("external_id", Text, nullable=False),
+    Column("format", Text, nullable=False, server_default=text("'line'")),
+    Column("enabled", Integer, nullable=False, server_default=text("1")),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Index("idx_relay_routes_relay", "relay_id"),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (

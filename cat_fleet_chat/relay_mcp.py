@@ -1,4 +1,4 @@
-"""MCP tools for the relay control plane: durable consumers and the audit log.
+"""MCP tools for the relay control plane: durable consumers, relays and the audit log.
 
 Registered by ``mcp_app.build_mcp``. Same envelope as the other tools: the hub
 result as-is, a ``HubError`` returned as ``mcp_body()``.
@@ -153,6 +153,195 @@ async def fleet_audit_list(
         return exc.mcp_body()
 
 
+async def fleet_relay_list() -> dict[str, Any]:
+    """Chat relays (Discord, Slack, Telegram bridges) with ``state`` (online/stale/offline/disabled) and config ``version``."""
+    try:
+        return await _hub().list_relays()
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_relay_get(name: str) -> dict[str, Any]:
+    """One relay with its config, bindings (platform channel <-> hub channel) and routes (event deliveries)."""
+    try:
+        return await _hub().get_relay(name)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_relay_create(
+    actor: str,
+    name: str,
+    platform: str,
+    description: str | None = None,
+    config: dict[str, Any] | None = None,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """Register a relay (``platform``: discord, slack or telegram).
+
+    The relay's scoped token is NOT returned here: an operator rotates it from
+    the portal or ``POST /api/v1/relays/{name}/rotate-token`` and gives it to
+    the relay process. ``config`` keys: prefix, operators, action_users,
+    reactions, ref_webhooks, guilds, mask, status_marks, read_commands.
+    """
+    body = {"name": name, "platform": platform, "description": description, "config": config, "enabled": enabled}
+    try:
+        result = await _hub().create_relay(actor, body)
+    except HubError as exc:
+        return exc.mcp_body()
+    result.pop("token", None)
+    return {**result, "token_note": "rotate the token from the portal to hand it to the relay process"}
+
+
+async def fleet_relay_update(
+    actor: str,
+    name: str,
+    expected_version: int,
+    enabled: bool | None = None,
+    description: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Change a relay. ``expected_version`` is the version you reviewed (``fleet_relay_get``); a stale one is refused.
+
+    ``config`` merges by top-level key. The running relay picks the change up
+    on its next heartbeat.
+    """
+    body = {
+        key: value
+        for key, value in {"enabled": enabled, "description": description, "config": config}.items()
+        if value is not None
+    }
+    try:
+        return await _hub().update_relay(actor, name, body, expected_version=expected_version)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_relay_delete(actor: str, name: str, expected_version: int) -> dict[str, Any]:
+    """Delete a relay with its bindings, routes and their consumers. Needs the reviewed ``expected_version``."""
+    try:
+        return await _hub().delete_relay(actor, name, expected_version=expected_version)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_relay_bind(
+    actor: str,
+    relay: str,
+    external_id: str,
+    hub_channel: str,
+    kind: str = "channel",
+    parent_external_id: str | None = None,
+    allowed: list[str] | None = None,
+    any_channel: bool = False,
+    task_id: int | None = None,
+    direction: str = "both",
+) -> dict[str, Any]:
+    """Bind a platform channel or thread (``external_id``) to a hub channel.
+
+    Inbound messages there post to ``hub_channel``; a ``#channel`` token may
+    pick one of ``allowed`` (or any with ``any_channel``). A ``thread``
+    binding needs ``parent_external_id``; ``task_id`` ties it to one task.
+    ``direction``: in, out or both.
+    """
+    body = {
+        "external_id": external_id,
+        "hub_channel": hub_channel,
+        "kind": kind,
+        "parent_external_id": parent_external_id,
+        "allowed": allowed,
+        "any_channel": any_channel,
+        "task_id": task_id,
+        "direction": direction,
+    }
+    try:
+        return await _hub().add_binding(actor, relay, body)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_relay_unbind(actor: str, relay: str, binding_id: int) -> dict[str, Any]:
+    """Remove a binding."""
+    try:
+        return await _hub().delete_binding(actor, relay, binding_id)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_relay_route_add(
+    actor: str,
+    relay: str,
+    external_id: str,
+    format: str = "line",
+    kinds: list[str] | None = None,
+    topics: list[str] | None = None,
+    channels: list[str] | None = None,
+    task_ids: list[int] | None = None,
+    exclude_authors: list[str] | None = None,
+    start: str | int | None = "now",
+) -> dict[str, Any]:
+    """Deliver matching events to a platform channel through the relay (at-least-once).
+
+    E.g. ``topics=["ci.*.done"]`` routes CI publications to a Discord
+    channel. ``format``: line, embed, or card (cards carry action buttons
+    for proposals, tasks and feed posts).
+    """
+    body = {
+        "external_id": external_id,
+        "format": format,
+        "kinds": kinds,
+        "topics": topics,
+        "channels": channels,
+        "task_ids": task_ids,
+        "exclude_authors": exclude_authors,
+        "start": start,
+    }
+    try:
+        return await _hub().add_route(actor, relay, body)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_relay_route_update(
+    actor: str,
+    relay: str,
+    route_id: int,
+    external_id: str | None = None,
+    format: str | None = None,
+    enabled: bool | None = None,
+    kinds: list[str] | None = None,
+    topics: list[str] | None = None,
+    channels: list[str] | None = None,
+    task_ids: list[int] | None = None,
+    exclude_authors: list[str] | None = None,
+) -> dict[str, Any]:
+    """Change a route. Arguments left as null keep their value; pass ``[]`` to clear a filter."""
+    supplied = {
+        "external_id": external_id,
+        "format": format,
+        "enabled": enabled,
+        "kinds": kinds,
+        "topics": topics,
+        "channels": channels,
+        "task_ids": task_ids,
+        "exclude_authors": exclude_authors,
+    }
+    try:
+        return await _hub().update_route(
+            actor, relay, route_id, {key: value for key, value in supplied.items() if value is not None}
+        )
+    except HubError as exc:
+        return exc.mcp_body()
+
+
+async def fleet_relay_route_remove(actor: str, relay: str, route_id: int) -> dict[str, Any]:
+    """Remove a route and its consumer."""
+    try:
+        return await _hub().delete_route(actor, relay, route_id)
+    except HubError as exc:
+        return exc.mcp_body()
+
+
 RELAY_TOOLS = (
     fleet_consumer_create,
     fleet_consumer_list,
@@ -162,4 +351,14 @@ RELAY_TOOLS = (
     fleet_consumer_ack,
     fleet_consumer_seek,
     fleet_audit_list,
+    fleet_relay_list,
+    fleet_relay_get,
+    fleet_relay_create,
+    fleet_relay_update,
+    fleet_relay_delete,
+    fleet_relay_bind,
+    fleet_relay_unbind,
+    fleet_relay_route_add,
+    fleet_relay_route_update,
+    fleet_relay_route_remove,
 )
