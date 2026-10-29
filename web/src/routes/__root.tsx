@@ -29,7 +29,7 @@ export function RootLayout(props: ParentProps) {
         <header class="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3">
           <A href="/" class="font-display text-xl tracking-tight text-cream">Cat Fleet</A>
           <span class="text-sm text-cream-dim">#{ui.activeChannel()}</span>
-          <nav class="flex items-center gap-3 text-sm">
+          <nav class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
             <A href="/" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Chat</A>
             <A href="/tasks" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Tasks</A>
             <A href="/feed" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Feed</A>
@@ -39,6 +39,7 @@ export function RootLayout(props: ParentProps) {
             <A href="/pubsub" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Pub/Sub</A>
             <A href="/search" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Search</A>
             <A href="/webhooks" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Webhooks</A>
+            <A href="/relays" inactiveClass="text-cream-dim hover:text-cream" activeClass="text-brass">Relays</A>
           </nav>
           <div class="ml-auto flex flex-wrap items-center gap-2">
             <ConnectionPill />
