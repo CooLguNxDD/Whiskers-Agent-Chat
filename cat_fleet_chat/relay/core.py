@@ -161,7 +161,7 @@ class RelayCore:
         try:
             out["adapter"] = self.adapter.status()
         except Exception:  # noqa: BLE001 - status is best effort
-            pass
+            logger.debug("relay %s: adapter status failed", self.name, exc_info=True)
         return out
 
     async def _heartbeat_loop(self) -> None:
