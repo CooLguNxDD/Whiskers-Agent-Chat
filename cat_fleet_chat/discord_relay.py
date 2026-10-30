@@ -42,94 +42,32 @@ from typing import Any
 
 import httpx
 
-from cat_fleet_chat.evolve import parse_command
+from cat_fleet_chat.relay.routing import (  # re-exported: shared with cat-fleet-relay
+    TARGET_RE,
+    MapEntry,
+    author_handle,
+    parse_map,
+    parse_target,
+)
+from cat_fleet_chat.relays import (
+    ALT_FAIL_REACTION,
+    ALT_OK_REACTION,
+    ANSWER_RE,
+    DEFAULT_REACTIONS,
+    FAIL_REACTION,
+    MAX_ACTION_REACTIONS,
+    OK_REACTION,
+    check_reaction,
+)
+from cat_fleet_chat.relays import bare as _bare
 from cat_fleet_chat.validate import CHANNEL_RE, HANDLE_RE
 
 DEFAULT_URL = "http://127.0.0.1:8787"
 DEFAULT_PREFIX = "dc-"
-OK_REACTION = "✅"
-FAIL_REACTION = "❌"
-# Delivery marks used instead when ✅/❌ are reaction actions, so a delivered
-# message never reads as both approved and rejected. Reserved: never actions.
-ALT_OK_REACTION = "📨"
-ALT_FAIL_REACTION = "⚠️"
 ATTEMPTS = 3
 RETRY_DELAY = 2.0
 
 Forward = Callable[[dict[str, Any]], Awaitable[tuple[bool, str]]]
-
-
-@dataclass(frozen=True)
-class MapEntry:
-    """Where one Discord channel may post in the hub.
-
-    ``default`` takes every message with no ``#channel`` token. A token may
-    only pick a channel in ``allowed``, or any channel when ``any_channel`` is
-    set, so a Discord channel cannot reach hub channels you did not list.
-    """
-
-    default: str
-    allowed: frozenset[str]
-    any_channel: bool = False
-
-
-def parse_map(items: list[str]) -> dict[int, MapEntry]:
-    """``["123=fleet,ops", "456=*"]`` into per-channel entries. The first name is the default.
-
-    ``*`` lets a ``#token`` pick any hub channel. Rejects malformed entries.
-    """
-    mapping: dict[int, MapEntry] = {}
-    for item in items:
-        left, sep, right = item.partition("=")
-        names = [part.strip() for part in right.split(",") if part.strip()]
-        valid = sep and left.strip().isdigit() and names
-        if not valid or not CHANNEL_RE.fullmatch(names[0]):
-            raise ValueError(
-                f"--map expects <discord_channel_id>=<hub_channel>[,<more channels>|*], got {item!r}"
-            )
-        any_channel = "*" in names[1:]
-        extras = [name for name in names[1:] if name != "*"]
-        if not all(CHANNEL_RE.fullmatch(name) for name in extras):
-            raise ValueError(f"--map has an invalid hub channel name in {item!r}")
-        mapping[int(left.strip())] = MapEntry(names[0], frozenset([names[0], *extras]), any_channel)
-    if not mapping:
-        raise ValueError("at least one --map is required")
-    return mapping
-
-
-# A hub channel written as #name, standing alone: not part of a word, a URL
-# fragment or another token.
-TARGET_RE = re.compile(r"(?<![\w#/])#([a-z0-9][a-z0-9_-]{0,63})(?![\w-])")
-
-
-def parse_target(
-    text: str, entry: MapEntry, known: frozenset[str] | set[str] | None
-) -> tuple[str, str, str | None]:
-    """Pick the hub channel for ``text``. Returns ``(channel, text, note)``.
-
-    The first ``#name`` that is a hub channel becomes the target and is removed
-    from the text. A ``#name`` the hub does not have is left alone (it may be a
-    Discord channel). A hub channel this Discord channel may not reach keeps
-    the default and returns a note. With no channel list (``known`` is None)
-    nothing is targeted.
-    """
-    if known is None:
-        return entry.default, text, None
-    for match in TARGET_RE.finditer(text):
-        name = match.group(1)
-        if name not in known:
-            continue
-        if not (entry.any_channel or name in entry.allowed):
-            return entry.default, text, f"#{name} is not allowed from this Discord channel"
-        cleaned = re.sub(r"[ \t]{2,}", " ", text[: match.start()] + text[match.end() :]).strip()
-        return name, cleaned or text, None
-    return entry.default, text, None
-
-
-def author_handle(display_name: str, prefix: str = DEFAULT_PREFIX) -> str:
-    """A hub handle for a Discord user. Always starts with ``prefix`` so hooks can filter on it."""
-    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", display_name).strip("-_")
-    return (prefix + (slug or "user"))[:64].rstrip("-_")
 
 
 def message_text(message: Any) -> str:
@@ -280,19 +218,12 @@ async def handle_message(
     return "sent" if ok else "failed"
 
 
-# Reaction configuration belongs to the optional relay, not the hub Settings.
-DEFAULT_REACTIONS = {
-    "✅": "approve {P}", "❌": "reject {P} via Discord reaction",
-    "⏸️": "pause evolve", "▶️": "resume evolve",
-    **{chr(0x1F1E6 + n): "{step} answer: (" + chr(97 + n) + ")" for n in range(5)},
-    "👍": "+1", "👎": "-1",
-}
+# Reaction configuration belongs to the relay, not the hub Settings. The
+# grammar and defaults live in ``relays.py`` so hub-stored configs share them.
 PROPOSAL_RE = re.compile(r"\bP[1-9][0-9]{0,17}\b", re.IGNORECASE)
 STEP_RE = re.compile(r"\[(S[0-9]{2,}(?:-[A-Za-z0-9_-]+)?)\]")
 OPTION_RE = re.compile(r"\(([a-e])\)", re.IGNORECASE)
-ANSWER_RE = re.compile(r"\{step\} answer: \(([a-e])\)")
 REF_PREFIX = "cat-fleet-ref:"
-MAX_ACTION_REACTIONS = 12
 
 
 def parse_reactions(raw: str | None) -> dict[str, str]:
@@ -304,6 +235,7 @@ def parse_reactions(raw: str | None) -> dict[str, str]:
     Literal proposal ids, unknown placeholders, duplicates and empty entries
     are errors. Unicode emoji keys may be remapped; at most 12 actions.
     ``📨`` and ``⚠️`` are reserved for delivery status (``status_reactions``).
+    The grammar is ``relays.check_reaction``, shared with hub-stored configs.
     """
     if raw is None or not raw.strip():
         return dict(DEFAULT_REACTIONS)
@@ -311,33 +243,16 @@ def parse_reactions(raw: str | None) -> dict[str, str]:
     for item in raw.split(";"):
         emoji, sep, template = item.partition("=")
         emoji, template = emoji.strip(), template.strip()
-        command = parse_command(template.replace("{P}", "P1"))
-        valid_command = command is not None and (
-            command.number is None or (
-                re.match(r"[/!]?(approve|reject|edit)[ \t]+\{P\}(?:[ \t]|$)", template, re.IGNORECASE)
-                and template.count("{P}") == 1 and "{step}" not in template
-            )
-        )
-        valid = template in {"+1", "-1"} or ANSWER_RE.fullmatch(template) or valid_command
-        # Only supported literal placeholders; str.format conversions and
-        # attribute/index traversal are deliberately not part of this grammar.
-        remainder = template.replace("{P}", "").replace("{step}", "")
-        if (not sep or not emoji or len(emoji) > 16 or not any(ord(c) > 0x2000 for c in emoji)
-                or any(c.isspace() for c in emoji)
-                or _bare(emoji) in {_bare(ALT_OK_REACTION), _bare(ALT_FAIL_REACTION)}
-                or any(_bare(key) == _bare(emoji) for key in result)
-                or not valid or "{" in remainder or "}" in remainder
-                or "\n" in template or "\r" in template):
-            raise ValueError(f"CAT_FLEET_DISCORD_REACTIONS: invalid entry {item!r}")
+        try:
+            if not sep:
+                raise ValueError("missing '='")
+            check_reaction(emoji, template, result)
+        except ValueError:
+            raise ValueError(f"CAT_FLEET_DISCORD_REACTIONS: invalid entry {item!r}") from None
         result[emoji] = template
     if len(result) > MAX_ACTION_REACTIONS:
         raise ValueError("CAT_FLEET_DISCORD_REACTIONS: at most 12 actions are allowed")
     return result
-
-
-def _bare(emoji: str) -> str:
-    """Discord may omit the optional variation selector (pause/play, warning)."""
-    return emoji.replace("\ufe0f", "")
 
 
 def status_reactions(reactions: dict[str, str], users: frozenset[int]) -> tuple[str, str]:

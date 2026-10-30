@@ -23,6 +23,7 @@ const FeedPage = lazy(() => import("@/components/FeedPage"))
 const KnowledgePage = lazy(() => import("@/components/KnowledgePage"))
 const ProposalsPage = lazy(() => import("@/components/ProposalsPage"))
 const PubSubPage = lazy(() => import("@/components/PubSubPage"))
+const RelayPage = lazy(() => import("@/components/RelayPage"))
 const root = document.getElementById("root")
 if (!root) throw new Error("root element missing")
 applyAppearance(prefs.theme(), prefs.accent())
@@ -43,6 +44,7 @@ render(
           <Route path="/knowledge" component={KnowledgePage} />
           <Route path="/proposals" component={ProposalsPage} />
           <Route path="/pubsub" component={PubSubPage} />
+          <Route path="/relays" component={RelayPage} />
         </Router>
       </FleetStreamProvider>
     </QueryClientProvider>

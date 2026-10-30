@@ -57,7 +57,10 @@ Rules:
   is not the publisher. Without an `agent` every publication is returned.
 - Subscriptions are read on every scan, so subscribing while a wait is parked
   takes effect for the next publish. Delivery is from the caller's event
-  cursor; there is no per-subscription cursor.
+  cursor; a subscription has no cursor of its own. For a hub-kept cursor
+  with ack and replay, use a durable consumer with `topics`
+  ([consumers.md](consumers.md)); a relay route delivers one to a Discord,
+  Slack or Telegram channel ([relay.md](relay.md)).
 - The publish result lists `subscribers`: the handles whose patterns matched at
   publish time (publisher excluded).
 - `client_request_id` makes a retry return the original publication. The same

@@ -17,6 +17,7 @@ from cat_fleet_chat.hub import Hub
 from cat_fleet_chat.mcp_app import build_mcp, set_dispatcher, set_hub
 from cat_fleet_chat.rest_app import Guard, api_routes, hook_routes, internal_error_handler
 from cat_fleet_chat.waiters import WaitHub
+from cat_fleet_chat.relay_rest import relay_api_routes
 from cat_fleet_chat.web_app import spa_routes
 from cat_fleet_chat.webhooks import WebhookDispatcher
 
@@ -113,6 +114,7 @@ def create_app(
     app = Starlette(
         routes=[
             *api_routes(),
+            *relay_api_routes(),
             *hook_routes(),
             Mount("/mcp", app=mcp_http),
             *spa_routes(),

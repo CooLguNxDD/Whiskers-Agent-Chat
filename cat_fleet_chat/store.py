@@ -24,7 +24,9 @@ from cat_fleet_chat.schema import (
     SEARCH_KIND_CODES,
     SEARCH_ROWID_STRIDE,
     attachments,
+    audit,
     channels,
+    consumers,
     embeddings,
     events,
     evolve_state,
@@ -41,6 +43,9 @@ from cat_fleet_chat.schema import (
     proposals,
     publications,
     reactions,
+    relay_bindings,
+    relay_routes,
+    relays,
     run,
     search_rowid,
     task_events,
@@ -1927,3 +1932,283 @@ async def set_evolve_state(
     }
     stmt = sqlite_insert(evolve_state).values(id=1, **values)
     await run(conn, stmt.on_conflict_do_update(index_elements=[evolve_state.c.id], set_=values))
+
+
+# ---- durable consumers and audit (schema v15) ------------------------------
+
+_CONSUMER_LISTS = ("kinds", "topics", "channels", "task_ids", "destinations", "exclude_authors")
+
+
+def _consumer_row(row: aiosqlite.Row) -> dict[str, Any]:
+    body = dict(row)
+    for name in _CONSUMER_LISTS:
+        body[name] = json.loads(body.pop(f"{name}_json"))
+    return body
+
+
+def _consumer_values(values: dict[str, Any]) -> dict[str, Any]:
+    row = dict(values)
+    for name in _CONSUMER_LISTS:
+        if name in row:
+            row[f"{name}_json"] = json.dumps(row.pop(name), separators=(",", ":"))
+    return row
+
+
+async def insert_consumer(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(consumers).values(**_consumer_values(values)))
+    return int(cursor.lastrowid)
+
+
+async def get_consumer(conn: aiosqlite.Connection, ident: int | str) -> dict[str, Any] | None:
+    """One consumer by numeric id or by name."""
+    column = consumers.c.id if isinstance(ident, int) else consumers.c.name
+    row = await fetch_one(conn, select(consumers).where(column == ident))
+    return None if row is None else _consumer_row(row)
+
+
+async def list_consumers(
+    conn: aiosqlite.Connection,
+    *,
+    owner: str | None = None,
+    relay_id: int | None = None,
+) -> list[dict[str, Any]]:
+    stmt = select(consumers)
+    if owner is not None:
+        stmt = stmt.where(consumers.c.owner == owner)
+    if relay_id is not None:
+        stmt = stmt.where(consumers.c.relay_id == relay_id)
+    rows = await fetch_all(conn, stmt.order_by(consumers.c.id.asc()))
+    return [_consumer_row(row) for row in rows]
+
+
+async def count_consumers(conn: aiosqlite.Connection) -> int:
+    row = await fetch_one(conn, select(func.count().label("n")).select_from(consumers))
+    return int(row["n"])
+
+
+async def update_consumer(conn: aiosqlite.Connection, consumer_id: int, values: dict[str, Any]) -> None:
+    await run(
+        conn,
+        update(consumers).where(consumers.c.id == consumer_id).values(**_consumer_values(values)),
+    )
+
+
+async def advance_consumer(
+    conn: aiosqlite.Connection, consumer_id: int, *, expected: int, cursor: int
+) -> bool:
+    """Move the cursor only if it still holds ``expected``, so a skip never undoes a seek."""
+    result = await run(
+        conn,
+        update(consumers)
+        .where(consumers.c.id == consumer_id, consumers.c.cursor == expected)
+        .values(cursor=cursor),
+    )
+    return result.rowcount > 0
+
+
+async def delete_consumer(conn: aiosqlite.Connection, consumer_id: int) -> None:
+    await run(conn, delete(consumers).where(consumers.c.id == consumer_id))
+
+
+async def event_id_before(conn: aiosqlite.Connection, at: str) -> int:
+    """The newest event id created strictly before ``at`` (ISO text), or 0."""
+    row = await fetch_one(
+        conn,
+        select(func.coalesce(func.max(events.c.id), 0).label("n")).where(events.c.created_at < at),
+    )
+    return int(row["n"])
+
+
+async def insert_audit(
+    conn: aiosqlite.Connection, values: dict[str, Any], *, keep: int
+) -> int:
+    """Append an audit row, then drop rows older than the newest ``keep``."""
+    cursor = await run(conn, insert(audit).values(**values))
+    new_id = int(cursor.lastrowid)
+    if new_id > keep:
+        await run(conn, delete(audit).where(audit.c.id <= new_id - keep))
+    return new_id
+
+
+def _audit_row(row: aiosqlite.Row) -> dict[str, Any]:
+    body = dict(row)
+    for name in ("before", "after"):
+        raw = body.pop(f"{name}_json")
+        body[name] = None if raw is None else json.loads(raw)
+    return body
+
+
+async def list_audit(
+    conn: aiosqlite.Connection,
+    *,
+    target_kind: str | None,
+    target: str | None,
+    actor: str | None,
+    before_id: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Newest first."""
+    stmt = select(audit)
+    if target_kind is not None:
+        stmt = stmt.where(audit.c.target_kind == target_kind)
+    if target is not None:
+        stmt = stmt.where(audit.c.target == target)
+    if actor is not None:
+        stmt = stmt.where(audit.c.actor == actor)
+    if before_id is not None:
+        stmt = stmt.where(audit.c.id < before_id)
+    rows = await fetch_all(conn, stmt.order_by(audit.c.id.desc()).limit(limit))
+    return [_audit_row(row) for row in rows]
+
+
+# ---- relays, bindings and routes (schema v15) ------------------------------
+
+
+def _relay_row(row: aiosqlite.Row) -> dict[str, Any]:
+    """Full relay including ``token_hash``. Use ``relays.public_relay`` for API output."""
+    body = dict(row)
+    body["config"] = json.loads(body.pop("config_json"))
+    body["status"] = json.loads(body.pop("status_json"))
+    body["enabled"] = bool(body["enabled"])
+    return body
+
+
+def _relay_values(values: dict[str, Any]) -> dict[str, Any]:
+    row = dict(values)
+    for name in ("config", "status"):
+        if name in row:
+            row[f"{name}_json"] = json.dumps(row.pop(name), separators=(",", ":"))
+    return row
+
+
+async def insert_relay(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(relays).values(**_relay_values(values)))
+    return int(cursor.lastrowid)
+
+
+async def get_relay(conn: aiosqlite.Connection, ident: int | str) -> dict[str, Any] | None:
+    """One relay by numeric id or by name."""
+    column = relays.c.id if isinstance(ident, int) else relays.c.name
+    row = await fetch_one(conn, select(relays).where(column == ident))
+    return None if row is None else _relay_row(row)
+
+
+async def find_relay_by_token_hash(conn: aiosqlite.Connection, digest: str) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(relays).where(relays.c.token_hash == digest))
+    return None if row is None else _relay_row(row)
+
+
+async def list_relays(conn: aiosqlite.Connection) -> list[dict[str, Any]]:
+    rows = await fetch_all(conn, select(relays).order_by(relays.c.id.asc()))
+    return [_relay_row(row) for row in rows]
+
+
+async def update_relay(conn: aiosqlite.Connection, relay_id: int, values: dict[str, Any]) -> None:
+    await run(conn, update(relays).where(relays.c.id == relay_id).values(**_relay_values(values)))
+
+
+async def bump_relay(conn: aiosqlite.Connection, relay_id: int, updated_at: str) -> None:
+    """Raise the relay's config version by one."""
+    await run(
+        conn,
+        update(relays)
+        .where(relays.c.id == relay_id)
+        .values(version=relays.c.version + 1, updated_at=updated_at),
+    )
+
+
+async def delete_relay(conn: aiosqlite.Connection, relay_id: int) -> None:
+    await run(conn, delete(relay_routes).where(relay_routes.c.relay_id == relay_id))
+    await run(conn, delete(relay_bindings).where(relay_bindings.c.relay_id == relay_id))
+    await run(conn, delete(relays).where(relays.c.id == relay_id))
+
+
+def _binding_row(row: aiosqlite.Row) -> dict[str, Any]:
+    body = dict(row)
+    body["allowed"] = json.loads(body.pop("allowed_json"))
+    body["any_channel"] = bool(body["any_channel"])
+    return body
+
+
+def _binding_values(values: dict[str, Any]) -> dict[str, Any]:
+    row = dict(values)
+    if "allowed" in row:
+        row["allowed_json"] = json.dumps(row.pop("allowed"), separators=(",", ":"))
+    return row
+
+
+async def insert_binding(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(relay_bindings).values(**_binding_values(values)))
+    return int(cursor.lastrowid)
+
+
+async def get_binding(conn: aiosqlite.Connection, binding_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(relay_bindings).where(relay_bindings.c.id == binding_id))
+    return None if row is None else _binding_row(row)
+
+
+async def find_binding(
+    conn: aiosqlite.Connection, relay_id: int, external_id: str
+) -> dict[str, Any] | None:
+    row = await fetch_one(
+        conn,
+        select(relay_bindings).where(
+            relay_bindings.c.relay_id == relay_id, relay_bindings.c.external_id == external_id
+        ),
+    )
+    return None if row is None else _binding_row(row)
+
+
+async def list_bindings(conn: aiosqlite.Connection, relay_id: int) -> list[dict[str, Any]]:
+    rows = await fetch_all(
+        conn,
+        select(relay_bindings)
+        .where(relay_bindings.c.relay_id == relay_id)
+        .order_by(relay_bindings.c.id.asc()),
+    )
+    return [_binding_row(row) for row in rows]
+
+
+async def update_binding(conn: aiosqlite.Connection, binding_id: int, values: dict[str, Any]) -> None:
+    await run(
+        conn,
+        update(relay_bindings)
+        .where(relay_bindings.c.id == binding_id)
+        .values(**_binding_values(values)),
+    )
+
+
+async def delete_binding(conn: aiosqlite.Connection, binding_id: int) -> None:
+    await run(conn, delete(relay_bindings).where(relay_bindings.c.id == binding_id))
+
+
+def _route_row(row: aiosqlite.Row) -> dict[str, Any]:
+    body = dict(row)
+    body["enabled"] = bool(body["enabled"])
+    return body
+
+
+async def insert_route(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(relay_routes).values(**values))
+    return int(cursor.lastrowid)
+
+
+async def get_route(conn: aiosqlite.Connection, route_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(relay_routes).where(relay_routes.c.id == route_id))
+    return None if row is None else _route_row(row)
+
+
+async def list_routes(conn: aiosqlite.Connection, relay_id: int) -> list[dict[str, Any]]:
+    rows = await fetch_all(
+        conn,
+        select(relay_routes).where(relay_routes.c.relay_id == relay_id).order_by(relay_routes.c.id.asc()),
+    )
+    return [_route_row(row) for row in rows]
+
+
+async def update_route(conn: aiosqlite.Connection, route_id: int, values: dict[str, Any]) -> None:
+    await run(conn, update(relay_routes).where(relay_routes.c.id == route_id).values(**values))
+
+
+async def delete_route(conn: aiosqlite.Connection, route_id: int) -> None:
+    await run(conn, delete(relay_routes).where(relay_routes.c.id == route_id))

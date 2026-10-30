@@ -1,8 +1,8 @@
 import type { SseEvent } from "./stream"
 
-export type RefreshKey = "messages" | "channels" | "tasks" | "agents" | "mail" | "feed" | "knowledge" | "proposals" | "pubsub"
+export type RefreshKey = "messages" | "channels" | "tasks" | "agents" | "mail" | "feed" | "knowledge" | "proposals" | "pubsub" | "relay"
 
-export const REFRESH_KEYS: readonly RefreshKey[] = ["messages", "channels", "tasks", "agents", "mail", "feed", "knowledge", "proposals", "pubsub"]
+export const REFRESH_KEYS: readonly RefreshKey[] = ["messages", "channels", "tasks", "agents", "mail", "feed", "knowledge", "proposals", "pubsub", "relay"]
 
 /** Bounded event bookkeeping: only query families, never message payloads. */
 export class EventRefresh {
@@ -55,6 +55,9 @@ export class EventRefresh {
     } else if (event.event === "topic.published" || event.event === "topic.subscribed" || event.event === "topic.unsubscribed") {
       // The Pub/Sub page: publication history and the subscription table.
       this.dirty.add("pubsub")
+    } else if (event.event.startsWith("relay.") || event.event.startsWith("consumer.")) {
+      // The Relay page: relays, bindings, routes and their consumers' cursors.
+      this.dirty.add("relay")
     }
     this.cursor = id
   }

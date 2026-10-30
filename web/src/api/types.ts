@@ -461,3 +461,102 @@ export interface TopicSubscription {
   pattern: string
   created_at: string
 }
+
+/** Chat platforms a relay bridges. Mirrors `relays.PLATFORMS` on the hub. */
+export const RELAY_PLATFORMS = ["discord", "slack", "telegram"] as const
+export type RelayPlatform = (typeof RELAY_PLATFORMS)[number]
+export type RelayState = "online" | "stale" | "offline" | "disabled"
+export type RouteFormat = "line" | "embed" | "card"
+
+/** A relay's validated config (`relays.config` on the hub). Ids are platform user or channel ids. */
+export interface RelayConfig {
+  prefix: string
+  operators: string[]
+  action_users: string[]
+  reactions: Record<string, string>
+  ref_webhooks: string[]
+  guilds: string[]
+  mask: boolean
+  status_marks: boolean
+  read_commands: "bound" | "operators"
+}
+
+/** A relay as the hub returns it. The token is never part of this: it is shown once, on create or rotate. */
+export interface Relay {
+  id: number
+  name: string
+  platform: RelayPlatform
+  enabled: boolean
+  description: string | null
+  config: RelayConfig
+  version: number
+  last_seen_at: string | null
+  status: Record<string, unknown>
+  has_token: boolean
+  state: RelayState
+  created_at: string
+  updated_at: string
+}
+
+export interface RelayBinding {
+  id: number
+  relay_id: number
+  external_id: string
+  kind: "channel" | "thread"
+  parent_external_id: string | null
+  hub_channel: string
+  allowed: string[]
+  any_channel: boolean
+  task_id: number | null
+  direction: "in" | "out" | "both"
+}
+
+/** A durable event-log reader with its own cursor (`consumers.py`). */
+export interface Consumer {
+  id: number
+  name: string
+  owner: string
+  description: string | null
+  kinds: string[]
+  topics: string[]
+  channels: string[]
+  task_ids: number[]
+  destinations: string[]
+  exclude_authors: string[]
+  cursor: number
+  lease_until: string | null
+  acked_at: string | null
+  relay_id: number | null
+  armed: boolean
+  behind?: number
+}
+
+export interface RelayRoute {
+  id: number
+  relay_id: number
+  consumer_id: number
+  external_id: string
+  format: RouteFormat
+  enabled: boolean
+  consumer: Consumer | null
+}
+
+/** `GET /api/v1/relays/{name}`: the relay with its bindings and routes at one version. */
+export interface RelaySnapshot {
+  relay: Relay
+  bindings: RelayBinding[]
+  routes: RelayRoute[]
+  replies_consumer: string | null
+  version: number
+}
+
+export interface AuditRow {
+  id: number
+  at: string
+  actor: string
+  action: string
+  target_kind: string
+  target: string
+  before: unknown
+  after: unknown
+}

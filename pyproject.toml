@@ -19,15 +19,20 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]
-# Only the Discord relay (cat-fleet-discord) needs this; the hub itself does not.
+# Only the relays need these; the hub itself does not. Telegram needs nothing extra.
 discord = [
     "discord.py>=2.4",
+]
+slack = [
+    "slack_sdk>=3.27",
+    "aiohttp>=3.9",
 ]
 
 [project.scripts]
 cat-fleet-chat = "run:main"
 cat-fleet-listen = "cat_fleet_chat.listen:main"
 cat-fleet-discord = "cat_fleet_chat.discord_relay:main"
+cat-fleet-relay = "cat_fleet_chat.relay.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -35,7 +40,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["run"]
-packages = ["cat_fleet_chat"]
+packages = ["cat_fleet_chat", "cat_fleet_chat.relay"]
 
 [tool.setuptools.package-data]
 cat_fleet_chat = ["static/**"]

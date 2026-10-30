@@ -21,7 +21,7 @@ from cat_fleet_chat import schema
 
 logger = logging.getLogger("cat_fleet_chat.db")
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 READ_POOL_SIZE = 4
 
@@ -200,11 +200,18 @@ class Database:
             raise RuntimeError("database is not open")
         conn = await self._read_q.get()
         try:
+            # A cancelled read (a dropped SSE stream: anyio re-cancels at every
+            # await, the rollback included) can hand a connection back mid-
+            # transaction. Close that transaction before starting a new one.
+            if conn.in_transaction:
+                await conn.rollback()
             await conn.execute("BEGIN")
             try:
                 return await fn(conn)
             finally:
-                await conn.rollback()
+                # Shielded so a repeated cancel still lets the rollback run;
+                # aiosqlite queues it ahead of the next user's BEGIN.
+                await asyncio.shield(conn.rollback())
         finally:
             self._read_q.put_nowait(conn)
 

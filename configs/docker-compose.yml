@@ -22,6 +22,36 @@ services:
     networks:
       - whiskers-network
 
+  # Optional chat relay (docs/relay.md). Start it with `--profile relay`.
+  # Create the relay first (portal Relay page, or `cat-fleet-relay seed`)
+  # and put its rly_ token in CAT_FLEET_RELAY_TOKEN; the relay never needs
+  # the fleet token. Set the platform's own token for the one you run.
+  cat-fleet-relay:
+    profiles: ["relay"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        EXTRAS: "[discord,slack]"
+    command: ["cat-fleet-relay", "--platform", "${CAT_FLEET_RELAY_PLATFORM:-discord}", "--name", "${CAT_FLEET_RELAY_NAME:-main}"]
+    depends_on:
+      - cat-fleet-chat
+    environment:
+      CAT_FLEET_URL: http://cat-fleet-chat:8787
+      # Empty when unset so hub-only `docker compose up` still works; the relay
+      # itself refuses to start without a rly_ token.
+      CAT_FLEET_RELAY_TOKEN: ${CAT_FLEET_RELAY_TOKEN:-}
+      CAT_FLEET_RELAY_STATE: /relay-state
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+    volumes:
+      - relay-state:/relay-state
+    networks:
+      - whiskers-network
+    restart: unless-stopped
+
 networks:
   whiskers-network:
     external: true
@@ -29,3 +59,4 @@ networks:
 
 volumes:
   fleet-data:
+  relay-state:

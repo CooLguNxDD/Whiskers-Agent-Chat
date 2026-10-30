@@ -11,7 +11,8 @@ from typing import Any
 
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
-from cat_fleet_chat import embed, evolve, feed, knowledge, mailbox, proposals, pubsub, store, validate
+from cat_fleet_chat.relay_hub import RelayHubMixin
+from cat_fleet_chat import embed, evolve, feed, knowledge, mailbox, proposals, pubsub, relays, store, validate
 from cat_fleet_chat import search as search_rules
 from cat_fleet_chat.validate import (
     CHANNEL_RE,
@@ -111,7 +112,7 @@ def agent_relevant(
     return kind.startswith("channel.")
 
 
-class Hub:
+class Hub(RelayHubMixin):
     def __init__(self, db: Database, waiters: WaitHub) -> None:
         self.db = db
         self.waiters = waiters
@@ -510,9 +511,22 @@ class Hub:
     ) -> tuple[str | None, list[str]]:
         """The outbound hook a new message goes to, plus warnings for the poster.
 
-        An explicit name must be an enabled outbound hook. Otherwise a reply
-        inherits the destination of the Discord channel its thread started in.
+        An explicit name must be an enabled outbound hook or ``relay:<name>``.
+        Otherwise a reply inherits the destination of the platform channel its
+        thread started in: the relay it came in through, else the outbound hook
+        attached to that Discord channel.
         """
+        if explicit is not None and explicit.startswith(relays.DESTINATION_PREFIX):
+            relay = await store.get_relay(conn, explicit[len(relays.DESTINATION_PREFIX):])
+            if relay is None:
+                raise HubError(
+                    "destination_not_found", f"destination {explicit} is not a relay", 404, {"destination": explicit}
+                )
+            if not relay["enabled"]:
+                raise HubError(
+                    "destination_disabled", f"destination {explicit} is disabled", 409, {"destination": explicit}
+                )
+            return explicit, []
         if explicit is not None:
             hook = await store.get_webhook(conn, explicit)
             if hook is None or hook["direction"] != "out":
@@ -548,10 +562,16 @@ class Hub:
             current = await store.get_message(conn, reply_to) if reply_to else None
         if origin_found is None:
             return None, []
+        # A message that came in through a relay answers through that relay,
+        # which can post into the thread it came from.
+        if origin_found.get("relay"):
+            relay = await store.get_relay(conn, origin_found["relay"])
+            if relay is not None and relay["enabled"]:
+                return relays.destination(relay["name"]), []
         hook = await store.find_destination_hook(conn, origin_found["channel_id"])
         if hook is None:
             return None, [
-                f"no destination is attached for Discord channel {origin_found['channel_id']}; "
+                f"no destination is attached for {origin_found['source']} channel {origin_found['channel_id']}; "
                 "this reply stays in the hub"
             ]
         return hook["name"], []
@@ -2944,21 +2964,39 @@ class Hub:
         return str(channel_id) if channel_id else None
 
     async def list_destinations(self) -> dict[str, Any]:
-        """Outbound hooks agents can address by name. No URL, no secret."""
+        """Outbound hooks and enabled relays agents can address by name. No URL, no secret.
+
+        A relay is addressed as ``relay:<name>``; it posts into the platform
+        thread the conversation came from, or the hub channel's bound channel.
+        """
 
         async def op(conn):
-            return await store.list_webhooks(conn, direction="out", enabled_only=True)
+            hooks = await store.list_webhooks(conn, direction="out", enabled_only=True)
+            return hooks, [relay for relay in await store.list_relays(conn) if relay["enabled"]]
 
+        hooks, enabled_relays = await self.db.read(op)
         return {
             "destinations": [
-                {
-                    "name": hook["name"],
-                    "description": hook["description"],
-                    "format": hook["format"],
-                    "discord_channel_id": hook["discord_channel_id"],
-                    "directed_only": hook["directed_only"],
-                }
-                for hook in await self.db.read(op)
+                *(
+                    {
+                        "name": hook["name"],
+                        "description": hook["description"],
+                        "format": hook["format"],
+                        "discord_channel_id": hook["discord_channel_id"],
+                        "directed_only": hook["directed_only"],
+                    }
+                    for hook in hooks
+                ),
+                *(
+                    {
+                        "name": relays.destination(relay["name"]),
+                        "description": relay["description"],
+                        "format": relay["platform"],
+                        "discord_channel_id": None,
+                        "directed_only": True,
+                    }
+                    for relay in enabled_relays
+                ),
             ]
         }
 

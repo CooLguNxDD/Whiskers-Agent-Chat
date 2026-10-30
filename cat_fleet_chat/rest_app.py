@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import logging
+import re
 from typing import Any
 
 from starlette.requests import Request
@@ -13,6 +14,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from cat_fleet_chat.config import Settings, allowed_hostnames, allowed_origins
+from cat_fleet_chat import relays
 from cat_fleet_chat.errors import INTERNAL_ERROR, HubError
 from cat_fleet_chat.hub import Hub, SSE_BATCH, agent_relevant
 from cat_fleet_chat.validate import channel_name, event_kinds, handle, optional_id
@@ -49,6 +51,48 @@ def _forbidden(message: str) -> JSONResponse:
     )
 
 
+_SEG = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+# (method, path) pairs a relay token may use. ``relay`` must be its own name;
+# ``consumer`` must be one of its own route or replies consumers.
+RELAY_ALLOWED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        ("GET", rf"/api/v1/relays/(?P<relay>{_SEG})"),
+        ("GET", rf"/api/v1/relays/(?P<relay>{_SEG})/config"),
+        ("POST", rf"/api/v1/relays/(?P<relay>{_SEG})/heartbeat"),
+        ("GET", rf"/api/v1/relays/(?P<relay>{_SEG})/reply-target/[0-9]+"),
+        ("POST", rf"/api/v1/relays/(?P<relay>{_SEG})/bindings"),
+        ("PATCH", rf"/api/v1/relays/(?P<relay>{_SEG})/bindings/[0-9]+"),
+        ("DELETE", rf"/api/v1/relays/(?P<relay>{_SEG})/bindings/[0-9]+"),
+        ("POST", rf"/api/v1/relays/(?P<relay>{_SEG})/routes"),
+        ("PATCH", rf"/api/v1/relays/(?P<relay>{_SEG})/routes/[0-9]+"),
+        ("DELETE", rf"/api/v1/relays/(?P<relay>{_SEG})/routes/[0-9]+"),
+        ("GET", rf"/api/v1/consumers/(?P<consumer>{_SEG})/wait"),
+        ("POST", rf"/api/v1/consumers/(?P<consumer>{_SEG})/ack"),
+        ("POST", r"/api/v1/messages"),
+        ("PUT", r"/api/v1/feed/posts/[0-9]+/reactions/[a-z0-9_+-]{1,32}"),
+        ("GET", r"/api/v1/feed/posts/[0-9]+"),
+        ("GET", r"/api/v1/channels"),
+        ("GET", r"/api/v1/tasks"),
+        ("POST", r"/api/v1/tasks/[0-9]+/claim"),
+        ("POST", r"/api/v1/tasks/[0-9]+/status"),
+        ("GET", r"/api/v1/proposals"),
+        ("GET", r"/api/v1/proposals/[A-Za-z0-9]{1,24}"),
+        ("GET", r"/api/v1/agents"),
+        ("GET", r"/api/v1/evolve/state"),
+        ("GET", r"/api/v1/destinations"),
+    )
+)
+
+
+# What a disabled relay's token can still do: report in and read its config.
+RELAY_DISABLED_ALLOWED = tuple(
+    (method, pattern)
+    for method, pattern in RELAY_ALLOWED
+    if pattern.pattern.endswith(("/heartbeat", "/config"))
+)
+
+
 class Guard:
     """Bearer auth plus browser Origin/Host checks.
 
@@ -71,14 +115,57 @@ class Guard:
         path = scope.get("path", "")
         if path.startswith("/api/") or path.startswith("/mcp"):
             request = Request(scope)
-            denied = self._denied(request)
+            denied = await self._relay_denied(request, scope)
+            if denied is None and "relay" not in scope.get("state", {}):
+                denied = self._denied(request)
+            elif denied is None:
+                denied = self._denied(request, auth=False)
             if denied is not None:
                 await denied(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
-    def _denied(self, request: Request) -> JSONResponse | None:
-        if self.settings.token:
+    async def _relay_denied(self, request: Request, scope) -> JSONResponse | None:
+        """Authenticate a scoped ``Bearer rly_…`` relay token and hold it to its allowlist.
+
+        A relay token is not the fleet token: it reaches only its own relay's
+        config, heartbeat, bindings, routes and consumers, posting messages
+        with its own ``origin.relay``, reactions, and the reads its chat
+        commands need. On success the relay name is put in ``scope["state"]``.
+        """
+        presented = request.headers.get("authorization", "")
+        if not presented.startswith("Bearer " + relays.TOKEN_PREFIX):
+            return None
+        hub = getattr(request.app.state, "hub", None)
+        relay = await hub.relay_by_token(presented[len("Bearer "):]) if hub is not None else None
+        if relay is None:
+            return _unauthorized()
+        state = scope.setdefault("state", {})
+        state["relay"] = relay["name"]
+        # Handles a relay token may act as: its own prefix (``dc-``, ``sl-``, …).
+        state["relay_prefix"] = (relay.get("config") or {}).get("prefix") or ""
+        method = request.method.upper()
+        path = request.url.path
+        allowed = RELAY_ALLOWED
+        if not relay["enabled"]:
+            # Disabled: only learn it (heartbeat answers enabled=false), nothing else.
+            allowed = RELAY_DISABLED_ALLOWED
+            if not any(m == method and p.fullmatch(path) for m, p in allowed):
+                return _unauthorized()
+        for allowed_method, pattern in allowed:
+            match = pattern.fullmatch(path)
+            if match is None or method != allowed_method:
+                continue
+            if match.groupdict().get("relay") not in (None, relay["name"]):
+                break
+            consumer = match.groupdict().get("consumer")
+            if consumer is not None and not await hub.relay_owns_consumer(relay["name"], consumer):
+                break
+            return None
+        return _forbidden("a relay token cannot use this route")
+
+    def _denied(self, request: Request, *, auth: bool = True) -> JSONResponse | None:
+        if auth and self.settings.token:
             presented = request.headers.get("authorization", "")
             expected = f"Bearer {self.settings.token}"
             if not hmac.compare_digest(presented, expected):
@@ -165,9 +252,32 @@ async def list_messages(request: Request) -> JSONResponse:
         return _json_error(exc)
 
 
+def _relay_caller(request: Request) -> str | None:
+    """The relay a scoped ``rly_`` token authenticated, if any."""
+    return request.scope.get("state", {}).get("relay")
+
+
+def _require_relay_handle(request: Request, value: Any, field: str) -> None:
+    """A relay token acts only as its own ``<prefix><name>`` handles, never as an agent or listed human."""
+    relay = _relay_caller(request)
+    if relay is None:
+        return
+    prefix = request.scope.get("state", {}).get("relay_prefix") or ""
+    if not prefix or not isinstance(value, str) or not value.startswith(prefix):
+        raise HubError("forbidden", f"a relay token acts only as {prefix}* handles ({field})", 403, {"field": field})
+
+
 async def post_message(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
+        relay = _relay_caller(request)
+        if relay is not None:
+            origin = body.get("origin")
+            if not isinstance(origin, dict) or origin.get("relay") != relay:
+                raise HubError("forbidden", f"a relay token posts only with origin.relay={relay}", 403)
+            if body.get("destination") not in (None, ""):
+                raise HubError("forbidden", "a relay token cannot address a destination", 403)
+            _require_relay_handle(request, _author(body), "author")
         result = await _hub(request).post_message(
             body.get("channel"),
             _author(body),
@@ -431,6 +541,7 @@ async def create_task(request: Request) -> JSONResponse:
 async def claim_task(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
+        _require_relay_handle(request, _author(body, "actor"), "actor")
         result = await _hub(request).claim_task(
             request.path_params["task_id"],
             _author(body, "actor"),
@@ -444,6 +555,7 @@ async def claim_task(request: Request) -> JSONResponse:
 async def update_task_status(request: Request) -> JSONResponse:
     try:
         body = await _body(request)
+        _require_relay_handle(request, _author(body, "actor"), "actor")
         result = await _hub(request).update_task_status(
             request.path_params["task_id"],
             body.get("status"),
@@ -693,6 +805,7 @@ async def feed_reaction(request: Request) -> JSONResponse:
         if request.method.upper() == "DELETE":
             return JSONResponse(await hub.unreact(_caller(request, {}, "handle"), post_id, kind))
         body = await _body(request)
+        _require_relay_handle(request, _caller(request, body, "handle"), "handle")
         result = await hub.react(_caller(request, body, "handle"), post_id, kind)
         return JSONResponse(result, status_code=200 if result.get("idempotent") else 201)
     except HubError as exc:
