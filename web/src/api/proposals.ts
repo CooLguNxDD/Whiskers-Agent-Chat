@@ -31,6 +31,24 @@ export function updateProposal(id: string | number, actor: string, changes: Prop
   })
 }
 
+export interface NewProposal {
+  author: string
+  project: string
+  title: string
+  summary: string
+  weight: number
+  evidence?: string[]
+  client_request_id?: string
+}
+
+/** Propose a piece of work. The hub validates every field and opens a feed thread for votes. */
+export function createProposal(body: NewProposal) {
+  return api<{ proposal: Proposal; idempotent?: boolean }>("/api/v1/proposals", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
 /** The evolve pause flag. Read-only: pausing is a human chat command. */
 export function getEvolveState(signal?: AbortSignal) {
   return api<EvolveState>("/api/v1/evolve/state", { signal })

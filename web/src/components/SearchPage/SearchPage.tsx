@@ -1,9 +1,8 @@
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js"
-import { useNavigate } from "@solidjs/router"
+import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
+import { useNavigate, useSearchParams } from "@solidjs/router"
 import { getAttachment } from "@/api/fleet"
 import { SEARCH_KINDS, type SearchHit, type SearchKind, type SearchMode, type SearchQuery } from "@/api/types"
 import { selectClass, Snippet } from "@/components/RichText"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useChannels } from "@/hooks/useChannels"
@@ -12,6 +11,9 @@ import { useUIStore } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { effectiveMode, isEmbedderError, searchModeOptions } from "@/utils/searchModes"
 import { formatStamp } from "@/utils/time"
+import { PageHeader } from "@/components/ui/page"
+import { Icon } from "@/components/ui/icons"
+import { relativeTime } from "@/utils/fleetStatus"
 
 const PAGE = 20
 
@@ -19,9 +21,12 @@ const PAGE = 20
 export default function SearchPage() {
   const status = useSearchStatus()
   const channels = useChannels()
-  const [q, setQ] = createSignal("")
+  // "All history" from the chat find bar arrives as ?q=…&channel=…
+  const [params] = useSearchParams()
+  const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] : value) ?? ""
+  const [q, setQ] = createSignal(param(params.q))
   const [kind, setKind] = createSignal<SearchKind | "">("")
-  const [channel, setChannel] = createSignal("")
+  const [channel, setChannel] = createSignal(param(params.channel))
   const [author, setAuthor] = createSignal("")
   const [since, setSince] = createSignal("")
   const [mode, setMode] = createSignal<SearchMode>("bm25")
@@ -55,64 +60,84 @@ export default function SearchPage() {
     })
   }
 
+  // Follow ?q= / ?channel= when the URL changes (e.g. "All history" from chat), including their removal.
+  createEffect(on(() => [param(params.q), param(params.channel)] as const, ([nextQ, nextChannel]) => {
+    setQ(nextQ)
+    setChannel(nextChannel)
+    if (nextQ.trim()) run()
+    else setSubmitted(null)
+  }))
+
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
-      <div class="mx-auto max-w-4xl">
-        <h1 class="font-display text-xl text-cream">Search</h1>
-        <form class="mt-3 flex flex-col gap-3" role="search" onSubmit={(event) => { event.preventDefault(); run() }}>
-          <div class="flex gap-2">
-            <Input aria-label="Search query" placeholder="Search messages, tasks, files and knowledge" value={q()} onInput={(event) => setQ(event.currentTarget.value)} />
-            <Button type="submit">Search</Button>
+    <div class="page min-h-0 flex-1 overflow-y-auto">
+      <div class="mx-auto max-w-5xl">
+        <PageHeader eyebrow="One search, the whole fleet" title="Find the useful bit." description="Search conversations, tasks, files and knowledge in one place." />
+        <form class="flex flex-col gap-3" role="search" onSubmit={(event) => { event.preventDefault(); run() }}>
+          <div class="flex gap-3">
+            <div class="search-field flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line px-4">
+              <Icon name="search" class="size-4 text-cream-dim" />
+              <input class="h-12 min-w-0 flex-1 bg-transparent text-[15px] text-cream outline-none placeholder:text-cream-dim" aria-label="Search query" placeholder="Search messages, tasks, files and knowledge" value={q()} onInput={(event) => setQ(event.currentTarget.value)} />
+            </div>
+            <Button type="submit" class="h-12 px-5">Search ↗</Button>
           </div>
           <div class="flex flex-wrap items-center gap-2 text-sm">
             <select class={selectClass} aria-label="Kind" value={kind()} onChange={(event) => setKind(event.currentTarget.value as SearchKind | "")}>
-              <option value="">All kinds</option>
+              <option value="">All types</option>
               <For each={SEARCH_KINDS}>{(item) => <option value={item}>{item}</option>}</For>
             </select>
             <select class={selectClass} aria-label="Channel" value={channel()} onChange={(event) => setChannel(event.currentTarget.value)}>
               <option value="">All channels</option>
               <For each={channels.data?.channels ?? []}>{(item) => <option value={item.name}>#{item.name}</option>}</For>
             </select>
-            <Input class="w-36" aria-label="Author" placeholder="Author" value={author()} onInput={(event) => setAuthor(event.currentTarget.value)} />
-            <Input class="w-28" aria-label="Since" placeholder="Since (24h)" value={since()} onInput={(event) => setSince(event.currentTarget.value)} />
-            <div role="radiogroup" aria-label="Search mode" class="ml-auto flex overflow-hidden rounded-lg border border-line">
+            <Input class="w-36" aria-label="Author" placeholder="Any author" value={author()} onInput={(event) => setAuthor(event.currentTarget.value)} />
+            <select class={selectClass} aria-label="Since" value={since()} onChange={(event) => setSince(event.currentTarget.value)}>
+              <option value="">Any time</option>
+              <option value="24h">Last 24 hours</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+            </select>
+          </div>
+          <Show when={hint()}><p class="text-xs text-cream-dim" role="note">{hint()}</p></Show>
+        </form>
+
+        <section class="mt-7" aria-live="polite">
+          <div class="mb-1 flex flex-wrap items-center gap-3 text-[13px] text-cream-dim">
+            <span>
+              <Show when={results.isFetching} fallback={
+                <Show when={results.data} fallback={<>Type a query and press Enter.</>}>
+                  {(page) => <>About {page().total_estimate} result{page().total_estimate === 1 ? "" : "s"} for “{submitted()?.q}”<Show when={page().degraded}> · embedder failed, showing keyword results</Show></>}
+                </Show>
+              }>Searching…</Show>
+            </span>
+            <div role="radiogroup" aria-label="Search mode" class="segmented ml-auto flex rounded-lg border border-line p-0.5">
               <For each={options()}>
                 {(option) => (
                   <button
                     type="button"
                     role="radio"
                     aria-checked={activeMode() === option.mode}
+                    aria-pressed={activeMode() === option.mode}
                     disabled={!option.enabled}
                     title={option.hint ?? undefined}
-                    class="px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-40"
-                    classList={{ "bg-brass text-on-accent": activeMode() === option.mode, "text-cream-dim hover:text-cream": activeMode() !== option.mode }}
+                    class="rounded-md px-2.5 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={() => { setMode(option.mode); if (submitted()) run(0, option.mode) }}
                   >
-                    {option.mode}
+                    {MODE_LABEL[option.mode]}
                   </button>
                 )}
               </For>
             </div>
           </div>
-          <Show when={hint()}><p class="text-xs text-cream-dim" role="note">{hint()}</p></Show>
-        </form>
-
-        <section class="mt-5" aria-live="polite">
-          <Show when={results.isFetching}><p class="text-sm text-cream-dim">Searching…</p></Show>
-          <Show when={results.isError}><p class="text-sm text-rust">{getErrorMessage(results.error, "Search failed.")}</p></Show>
+          <Show when={results.isError}><p class="mt-3 text-sm text-rust">{getErrorMessage(results.error, "Search failed.")}</p></Show>
           <Show when={results.data}>
             {(page) => (
               <>
-                <p class="mb-2 text-xs text-cream-dim">
-                  About {page().total_estimate} results · {page().mode}
-                  <Show when={page().degraded}> · embedder failed, showing BM25 results</Show>
-                </p>
-                <Show when={page().results.length > 0} fallback={<p class="text-sm text-cream-dim">No results.</p>}>
-                  <ol class="flex flex-col gap-2">
+                <Show when={page().results.length > 0} fallback={<p class="mt-6 text-sm text-cream-dim">No results. Try fewer words or another type.</p>}>
+                  <ol class="flex flex-col">
                     <For each={page().results}>{(hit) => <HitRow hit={hit} />}</For>
                   </ol>
                 </Show>
-                <div class="mt-3 flex gap-2">
+                <div class="mt-4 flex gap-2">
                   <Show when={page().offset > 0}>
                     <Button type="button" variant="outline" size="sm" onClick={() => run(Math.max(0, page().offset - PAGE))}>Previous</Button>
                   </Show>
@@ -128,6 +153,8 @@ export default function SearchPage() {
     </div>
   )
 }
+
+const MODE_LABEL: Record<SearchMode, string> = { bm25: "Keyword", vector: "Semantic", hybrid: "Hybrid" }
 
 function HitRow(props: { hit: SearchHit }) {
   const ui = useUIStore()
@@ -169,18 +196,20 @@ function HitRow(props: { hit: SearchHit }) {
     return hit.channel ? `#${hit.channel}` : ""
   }
   return (
-    <li class="rounded-lg border border-line p-3">
-      <div class="flex flex-wrap items-center gap-2 text-xs text-cream-dim">
-        <Badge>{props.hit.kind}</Badge>
-        <span>{where()}</span>
-        <Show when={props.hit.author}><span>{props.hit.author}</span></Show>
-        <span title={props.hit.created_at}>{formatStamp(props.hit.created_at)}</span>
-        <span class="ml-auto font-mono" title="score">{props.hit.score.toPrecision(3)}</span>
-      </div>
-      <p class="mt-1 text-sm text-cream"><Snippet text={props.hit.snippet} /></p>
-      <button type="button" class="mt-1 text-xs text-brass hover:underline" onClick={() => void open()}>
-        Open {props.hit.kind} #{props.hit.id}
+    <li class="list-row py-5">
+      <p class="field-label">{props.hit.kind}</p>
+      <button type="button" class="hit-title mt-1.5 text-left text-[15.5px] font-semibold leading-snug text-cream hover:text-brass" onClick={() => void open()} title={`Open ${props.hit.kind} #${props.hit.id}`}>
+        <Snippet text={props.hit.snippet} /> <span class="text-cream-dim" aria-hidden="true">↗</span>
       </button>
+      <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-cream-dim">
+        <Show when={where()}><span>{where()}</span></Show>
+        <Show when={props.hit.author}><span>{props.hit.author}</span></Show>
+        <span title={props.hit.created_at}>{relativeTime(props.hit.created_at) || formatStamp(props.hit.created_at)}</span>
+        <button type="button" class="text-brass hover:underline" onClick={() => void open()}>
+          Open {props.hit.kind} #{props.hit.id}
+        </button>
+        <span class="ml-auto font-mono opacity-70" title="Relevance score">{props.hit.score.toPrecision(3)}</span>
+      </div>
       <Show when={openError()}><p class="mt-1 text-xs text-rust">{openError()}</p></Show>
     </li>
   )

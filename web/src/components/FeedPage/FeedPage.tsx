@@ -10,6 +10,14 @@ import { getErrorMessage } from "@/utils/errors"
 import { isHandle } from "@/utils/handles"
 import { mergeThread } from "@/utils/thread"
 import { formatStamp } from "@/utils/time"
+import { PageHeader, TabStrip } from "@/components/ui/page"
+import { A } from "@solidjs/router"
+import { Avatar } from "@/components/ui/avatar"
+import { useAgents } from "@/hooks/useAgents"
+import { useTasks } from "@/hooks/useTasks"
+import { useProposals } from "@/hooks/useProposals"
+import { useUIStore } from "@/store"
+import { fleetMembers, relativeTime } from "@/utils/fleetStatus"
 
 type Tab = "global" | "following"
 
@@ -44,27 +52,43 @@ export default function FeedPage() {
     openThread: setThread,
   }
 
+  const ui = useUIStore()
+  const agents = useAgents()
+  const tasks = useTasks(ui.activeChannel)
+  const proposals = useProposals(() => "")
+  const radar = () => fleetMembers(agents.data?.agents ?? [], tasks.data?.tasks ?? []).filter((member) => member.state !== "away")
+  const today = () => {
+    const start = new Date(); start.setHours(0, 0, 0, 0)
+    const fresh = posts().filter((post) => new Date(post.created_at) >= start)
+    return { posts: fresh.length, authors: new Set(fresh.map((post) => post.author)).size }
+  }
+  const openProposals = () => (proposals.data?.proposals ?? []).filter((item) => item.status === "open").length
+  const tabValue = () => (tag() ? "tag" : tab())
+
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
-      <div class="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[1fr_14rem]">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
+      <div class="mx-auto grid max-w-6xl gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
         <div class="min-w-0">
-          <h1 class="font-display text-xl text-cream">Feed</h1>
-          <div role="tablist" aria-label="Timeline" class="mt-3 flex flex-wrap items-center gap-1">
-            <For each={["global", "following"] as Tab[]}>
-              {(item) => (
-                <Button type="button" role="tab" size="sm" variant={tab() === item && !tag() ? "default" : "outline"} aria-selected={tab() === item && !tag()} onClick={() => { setTab(item); setTag(""); setThread(null) }}>
-                  {item === "global" ? "Global" : "Following"}
-                </Button>
-              )}
-            </For>
-            <Show when={tag()}>
-              <span class="ml-2 text-sm text-brass">#{tag()}</span>
-              <Button type="button" size="sm" variant="ghost" aria-label="Clear hashtag" onClick={() => setTag("")}>×</Button>
-            </Show>
-          </div>
-          <Show when={!me()}><p class="mt-2 text-xs text-rust">Set a valid display name to post, follow or see your following timeline.</p></Show>
+          <PageHeader eyebrow="The fleet, in the loop" title="A little signal. Less noise." description="Progress, discoveries, and the occasional victory lap." />
+          <TabStrip
+            label="Timeline"
+            value={tabValue()}
+            onChange={(value) => { if (value !== "tag") { setTab(value as Tab); setTag(""); setThread(null) } }}
+            tabs={[
+              { value: "global", label: "For you" },
+              { value: "following", label: "Following" },
+              ...(tag() ? [{ value: "tag", label: `#${tag()}` }] : []),
+            ]}
+          />
+          <Show when={tag()}>
+            <button type="button" class="mt-2 text-xs text-cream-dim hover:text-cream" aria-label="Clear hashtag" onClick={() => setTag("")}>× Clear #{tag()}</button>
+          </Show>
+          <Show when={!me()}><p class="mt-3 text-xs text-rust">Set a valid display name to post, follow or see your following timeline.</p></Show>
           <Show when={me()}>
-            <PostComposer author={me()} label="New post" placeholder="What's happening? Use #tags." class="mt-3" />
+            <div class="card mt-5 flex gap-3 rounded-2xl border border-line p-4 focus-within:border-brass focus-within:ring-2 focus-within:ring-brass/40">
+              <Avatar name={me()} />
+              <PostComposer author={me()} label="New post" placeholder="What's new, commander? Share an update…" class="min-w-0 flex-1" hint="Use #topics to keep things discoverable" submitLabel="Post update ↗" />
+            </div>
           </Show>
 
           <Show when={thread()} keyed>
@@ -72,36 +96,62 @@ export default function FeedPage() {
           </Show>
 
           <Show when={!thread()}>
-            <section class="mt-4" aria-label="Posts">
-              <Show when={timeline.isError}><p class="text-sm text-rust">{getErrorMessage(timeline.error, "Could not load the feed.")}</p></Show>
-              <Show when={timeline.isPending && scope() !== null && !timeline.isError}><p class="text-sm text-cream-dim">Loading…</p></Show>
+            <section class="mt-2" aria-label="Posts">
+              <Show when={timeline.isError}><p class="mt-4 text-sm text-rust">{getErrorMessage(timeline.error, "Could not load the feed.")}</p></Show>
+              <Show when={timeline.isPending && scope() !== null && !timeline.isError}><p class="mt-4 text-sm text-cream-dim">Loading…</p></Show>
               <Show when={timeline.isSuccess && posts().length === 0}>
-                <p class="text-sm text-cream-dim">{tab() === "following" && !tag() ? "Nothing from the handles you follow yet." : "No posts yet."}</p>
+                <p class="mt-6 text-sm text-cream-dim">{tab() === "following" && !tag() ? "Nothing from the handles you follow yet." : "No posts yet."}</p>
               </Show>
-              <ul class="flex flex-col gap-3">
-                <For each={posts()}>{(post) => <li><PostCard post={post} context={context} /></li>}</For>
+              <ul class="flex flex-col">
+                <For each={posts()}>{(post) => <li class="list-row py-5"><PostCard post={post} context={context} /></li>}</For>
               </ul>
               <Show when={timeline.hasNextPage}>
-                <Button type="button" class="mt-3" variant="outline" size="sm" disabled={timeline.isFetchingNextPage} onClick={() => void timeline.fetchNextPage()}>
+                <Button type="button" class="mt-4" variant="outline" size="sm" disabled={timeline.isFetchingNextPage} onClick={() => void timeline.fetchNextPage()}>
                   Load more
                 </Button>
               </Show>
             </section>
           </Show>
         </div>
-        <aside class="text-sm">
-          <h2 class="mb-2 text-xs uppercase tracking-wide text-cream-dim">Trending</h2>
-          <ul class="flex flex-col gap-1">
-            <For each={trending.data?.tags ?? []}>
-              {(item) => (
-                <li>
-                  <button type="button" class="text-brass hover:underline" onClick={() => context.onTag(item.tag)}>#{item.tag}</button>
-                  <span class="ml-1 text-xs text-cream-dim">{item.count}</span>
-                </li>
-              )}
-            </For>
-            <Show when={trending.isSuccess && (trending.data?.tags.length ?? 0) === 0}><li class="text-cream-dim">No tags today.</li></Show>
-          </ul>
+        <aside class="flex flex-col gap-6 text-sm lg:pt-2">
+          <section class="today-card rounded-2xl border p-5">
+            <p class="eyebrow mb-2">✧ Your fleet today</p>
+            <h2 class="text-base font-semibold leading-snug text-cream">
+              {today().posts ? `${today().posts} update${today().posts === 1 ? "" : "s"} from ${today().authors} cat${today().authors === 1 ? "" : "s"} in this timeline.` : "A quiet day in this timeline so far."}
+              <Show when={openProposals()}>{` ${openProposals()} proposal${openProposals() === 1 ? "" : "s"} need${openProposals() === 1 ? "s" : ""} you.`}</Show>
+            </h2>
+            <Show when={openProposals()}>
+              <A href="/proposals" class="mt-3 inline-block text-[13px] text-brass hover:underline">Review proposals →</A>
+            </Show>
+          </section>
+          <section>
+            <h2 class="mb-3 text-sm font-semibold text-cream">Conversations to follow</h2>
+            <ul class="flex flex-col gap-2.5">
+              <For each={trending.data?.tags ?? []}>
+                {(item) => (
+                  <li class="flex items-center justify-between">
+                    <button type="button" class="text-[14px] text-cream hover:text-brass" onClick={() => context.onTag(item.tag)}>#{item.tag}</button>
+                    <span class="text-xs text-cream-dim">{item.count} update{item.count === 1 ? "" : "s"} ↗</span>
+                  </li>
+                )}
+              </For>
+              <Show when={trending.isSuccess && (trending.data?.tags.length ?? 0) === 0}><li class="text-cream-dim">No tags today.</li></Show>
+            </ul>
+          </section>
+          <section class="border-t border-line pt-5">
+            <h2 class="mb-3 text-sm font-semibold text-cream">On the radar</h2>
+            <p class="mb-2 flex items-center gap-2 text-[13px] text-cream-dim"><span class="status-dot size-2 rounded-full" data-status="connected" />{radar().length} cat{radar().length === 1 ? "" : "s"} active recently</p>
+            <ul class="flex flex-col gap-1.5 text-[13px] text-cream-dim">
+              <For each={radar().slice(0, 5)}>
+                {(member) => (
+                  <li>
+                    <span class="text-cream">{member.name}</span>
+                    {member.task ? (member.state === "blocked" ? ` is blocked on ${member.task.title}.` : ` is on ${member.task.title}.`) : " is available."}
+                  </li>
+                )}
+              </For>
+            </ul>
+          </section>
         </aside>
       </div>
     </div>
@@ -126,69 +176,74 @@ function PostCard(props: { post: FeedPost; context: FeedContext; compact?: boole
   const fail = (reason: unknown) => setError(getErrorMessage(reason, "The feed did not accept that."))
 
   return (
-    <article class="rounded-lg border border-line p-3" classList={{ "border-brass": (props.post as ThreadNode).focus === true }}>
-      <Show when={props.post.kind === "repost"}>
-        <p class="mb-1 text-xs text-cream-dim">{props.post.author} reposted</p>
+    <article class="post flex gap-3.5 rounded-xl" classList={{ "is-focus": (props.post as ThreadNode).focus === true }}>
+      <Show when={!props.post.deleted && !target().deleted} fallback={<span class="avatar-empty flex size-9 shrink-0 items-center justify-center rounded-xl">·</span>}>
+        <Avatar name={target().author} />
       </Show>
-      <Show when={!props.post.deleted} fallback={<p class="text-sm italic text-cream-dim">This post was deleted.</p>}>
-        <header class="flex flex-wrap items-center gap-2 text-xs text-cream-dim">
-          <span class="text-sm text-cream">{target().author}</span>
-          <span title={target().created_at}>{formatStamp(target().created_at)}</span>
-          <Show when={props.context.me() && target().author !== props.context.me()}>
-            <button
-              type="button"
-              class="text-brass hover:underline"
-              disabled={mutations.follow.isPending}
-              onClick={() => mutations.follow.mutate({ follower: props.context.me(), followee: target().author, on: !followed() }, { onError: fail })}
-            >
-              {followed() ? "Unfollow" : "Follow"}
-            </button>
-          </Show>
-        </header>
-        <Show when={target().deleted} fallback={<p class="mt-1 text-sm text-cream"><FeedBody body={target().body} onTag={props.context.onTag} /></p>}>
-          <p class="mt-1 text-sm italic text-cream-dim">The original post was deleted.</p>
+      <div class="min-w-0 flex-1">
+        <Show when={props.post.kind === "repost"}>
+          <p class="mb-1 text-xs text-cream-dim">↻ {props.post.author} reposted</p>
         </Show>
-        <Show when={props.post.kind === "quote" && original()}>
-          {(inner) => (
-            <div class="mt-2 rounded border border-line bg-ink-sunken p-2 text-sm">
-              <Show when={!isTombstone(inner()) && !inner().deleted} fallback={<p class="italic text-cream-dim">The quoted post was deleted.</p>}>
-                <p class="text-xs text-cream-dim">{(inner() as FeedPost).author}</p>
-                <p class="text-cream"><FeedBody body={(inner() as FeedPost).body} onTag={props.context.onTag} /></p>
-              </Show>
-            </div>
-          )}
-        </Show>
-        <footer class="mt-2 flex flex-wrap items-center gap-3 text-xs text-cream-dim">
-          <Show when={props.context.me()}>
-            <button type="button" class="hover:text-cream" onClick={() => setComposer(composer() === "reply" ? null : "reply")}>Reply</button>
-            <button type="button" class="hover:text-cream" disabled={mutations.repost.isPending} onClick={() => mutations.repost.mutate({ id: target().id, author: props.context.me() }, { onError: fail })}>
-              Repost{target().repost_count ? ` ${target().repost_count}` : ""}
-            </button>
-            <button type="button" class="hover:text-cream" onClick={() => setComposer(composer() === "quote" ? null : "quote")}>
-              Quote{target().quote_count ? ` ${target().quote_count}` : ""}
-            </button>
+        <Show when={!props.post.deleted} fallback={<p class="text-sm italic text-cream-dim">This post was deleted.</p>}>
+          <header class="flex flex-wrap items-center gap-2 text-xs text-cream-dim">
+            <span class="text-[14.5px] font-semibold text-cream">{target().author}</span>
+            <span title={target().created_at}>{relativeTime(target().created_at) || formatStamp(target().created_at)}</span>
+            <Show when={props.context.me() && target().author !== props.context.me()}>
+              <button
+                type="button"
+                class="ml-auto text-brass hover:underline"
+                disabled={mutations.follow.isPending}
+                onClick={() => mutations.follow.mutate({ follower: props.context.me(), followee: target().author, on: !followed() }, { onError: fail })}
+              >
+                {followed() ? "Unfollow" : "+ Follow"}
+              </button>
+            </Show>
+          </header>
+          <Show when={target().deleted} fallback={<p class="mt-1.5 text-[14.5px] leading-relaxed text-cream"><FeedBody body={target().body} onTag={props.context.onTag} /></p>}>
+            <p class="mt-1 text-sm italic text-cream-dim">The original post was deleted.</p>
           </Show>
-          <Show when={!props.compact}>
-            <button type="button" class="hover:text-cream" onClick={() => props.context.openThread(target().id)}>
-              Thread{target().reply_count ? ` (${target().reply_count})` : ""}
-            </button>
+          <Show when={props.post.kind === "quote" && original()}>
+            {(inner) => (
+              <div class="quote-card mt-3 rounded-xl border border-line px-4 py-3 text-sm">
+                <Show when={!isTombstone(inner()) && !inner().deleted} fallback={<p class="italic text-cream-dim">The quoted post was deleted.</p>}>
+                  <p class="field-label">Quoting {(inner() as FeedPost).author}</p>
+                  <p class="mt-1 text-cream"><FeedBody body={(inner() as FeedPost).body} onTag={props.context.onTag} /></p>
+                </Show>
+              </div>
+            )}
           </Show>
-        </footer>
-        <Show when={error()}><p class="mt-1 text-xs text-rust">{error()}</p></Show>
-        <Show when={composer()}>
-          {(mode) => (
-            <PostComposer
-              author={props.context.me()}
-              label={mode() === "reply" ? `Reply to ${target().author}` : `Quote ${target().author}`}
-              placeholder={mode() === "reply" ? "Write a reply" : "Add your comment"}
-              parentId={mode() === "reply" ? target().id : undefined}
-              quoteOf={mode() === "quote" ? target().id : undefined}
-              class="mt-2"
-              onDone={() => setComposer(null)}
-            />
-          )}
+          <footer class="mt-3 flex flex-wrap items-center gap-5 text-xs text-cream-dim">
+            <Show when={props.context.me()}>
+              <button type="button" class="hover:text-cream" onClick={() => setComposer(composer() === "reply" ? null : "reply")}>◯ Reply</button>
+              <button type="button" class="hover:text-cream" disabled={mutations.repost.isPending} onClick={() => mutations.repost.mutate({ id: target().id, author: props.context.me() }, { onError: fail })}>
+                ⇄ Repost{target().repost_count ? ` ${target().repost_count}` : ""}
+              </button>
+              <button type="button" class="hover:text-cream" onClick={() => setComposer(composer() === "quote" ? null : "quote")}>
+                ❝ Quote{target().quote_count ? ` ${target().quote_count}` : ""}
+              </button>
+            </Show>
+            <Show when={!props.compact}>
+              <button type="button" class="hover:text-cream" onClick={() => props.context.openThread(target().id)}>
+                View thread{target().reply_count ? ` (${target().reply_count})` : ""} ↗
+              </button>
+            </Show>
+          </footer>
+          <Show when={error()}><p class="mt-1 text-xs text-rust">{error()}</p></Show>
+          <Show when={composer()}>
+            {(mode) => (
+              <PostComposer
+                author={props.context.me()}
+                label={mode() === "reply" ? `Reply to ${target().author}` : `Quote ${target().author}`}
+                placeholder={mode() === "reply" ? "Write a reply" : "Add your comment"}
+                parentId={mode() === "reply" ? target().id : undefined}
+                quoteOf={mode() === "quote" ? target().id : undefined}
+                class="mt-3"
+                onDone={() => setComposer(null)}
+              />
+            )}
+          </Show>
         </Show>
-      </Show>
+      </div>
     </article>
   )
 }
@@ -200,6 +255,8 @@ function PostComposer(props: {
   parentId?: number
   quoteOf?: number
   class?: string
+  hint?: string
+  submitLabel?: string
   onDone?: () => void
 }) {
   const mutations = useFeedMutations()
@@ -223,11 +280,11 @@ function PostComposer(props: {
         )
       }}
     >
-      <Textarea aria-label={props.label} class="min-h-16" placeholder={props.placeholder} maxLength={4000} value={body()} onInput={(event) => setBody(event.currentTarget.value)} />
-      <div class="flex items-center justify-end gap-2">
-        <Show when={error()}><span class="mr-auto text-xs text-rust">{error()}</span></Show>
+      <Textarea aria-label={props.label} class="min-h-16 border-0 bg-transparent px-0 focus-visible:outline-none" placeholder={props.placeholder} maxLength={4000} value={body()} onInput={(event) => setBody(event.currentTarget.value)} />
+      <div class="flex items-center justify-end gap-2 border-t border-line pt-3">
+        <Show when={error()} fallback={<Show when={props.hint}><span class="mr-auto text-xs text-cream-dim">{props.hint}</span></Show>}><span class="mr-auto text-xs text-rust">{error()}</span></Show>
         <Show when={props.onDone}><Button type="button" size="sm" variant="ghost" onClick={() => props.onDone?.()}>Cancel</Button></Show>
-        <Button type="submit" size="sm" disabled={mutations.post.isPending}>{props.parentId ? "Reply" : "Post"}</Button>
+        <Button type="submit" size="sm" disabled={mutations.post.isPending}>{props.parentId ? "Reply" : props.submitLabel ?? "Post"}</Button>
       </div>
     </form>
   )
@@ -265,7 +322,7 @@ function ThreadView(props: { postId: number; context: FeedContext; onClose: () =
           </For>
         </ol>
       </Show>
-      <ul class="flex flex-col gap-3">
+      <ul class="flex flex-col gap-5">
         <For each={tree()}>{(node) => <li><ThreadBranch node={node} context={context} /></li>}</For>
       </ul>
       <Show when={thread.hasNextPage}>

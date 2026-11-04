@@ -1,5 +1,5 @@
 import { createMutation, createQuery, useQueryClient } from "@tanstack/solid-query"
-import { getEvolveState, listProposals, listReactions, react, unreact, updateProposal } from "@/api/proposals"
+import { createProposal, getEvolveState, listProposals, listReactions, react, unreact, updateProposal, type NewProposal } from "@/api/proposals"
 import type { PostReactions, ProposalChanges, ReactionState, VoteKind } from "@/api/types"
 
 /** The board's page size: the hub's largest page. */
@@ -109,6 +109,10 @@ export function useProposalMutations() {
     update: createMutation(() => ({
       mutationFn: ({ id, actor, changes }: { id: string; actor: string; changes: ProposalChanges }) =>
         updateProposal(id, actor, changes),
+      onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["proposals", "list"] }),
+    })),
+    create: createMutation(() => ({
+      mutationFn: (body: NewProposal) => createProposal(body),
       onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["proposals", "list"] }),
     })),
   }
