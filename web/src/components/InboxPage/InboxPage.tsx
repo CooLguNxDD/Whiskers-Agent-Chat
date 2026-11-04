@@ -31,7 +31,7 @@ export default function InboxPage() {
   return (
     <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-5xl">
-        <PageHeader title="Inbox" description="Direct mail between you and the cats, with read and ack state." />
+        <PageHeader eyebrow="Direct lines" title="Mail for you, and only you." description="Direct mail between you and the cats, with read and acknowledged state." />
         <p class="mt-1 text-xs text-cream-dim">
           Anyone with the hub token can open any handle's inbox; the hub does not yet tie a mailbox to its caller.
         </p>

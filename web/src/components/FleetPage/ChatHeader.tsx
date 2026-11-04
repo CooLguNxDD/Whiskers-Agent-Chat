@@ -63,8 +63,8 @@ export default function ChatHeader(props: ChatHeaderProps) {
       <div class="flex items-start gap-3">
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2">
-            <h1 class="flex min-w-0 items-baseline gap-1.5 font-display text-2xl font-semibold tracking-tight text-cream">
-              <span class="font-sans text-xl font-normal text-cream-dim" aria-hidden="true">#</span>
+            <h1 class="flex min-w-0 items-baseline gap-2 text-[28px] font-bold tracking-tight text-cream">
+              <span class="text-2xl font-normal text-cream-dim" aria-hidden="true">#</span>
               <span class="truncate">{props.channelName}</span>
             </h1>
             <Show when={props.channel && props.channel.state !== "active" ? props.channel.state : undefined}>

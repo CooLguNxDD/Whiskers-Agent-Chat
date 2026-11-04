@@ -1,15 +1,15 @@
 import { createSignal, For, Show } from "solid-js"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Badge } from "@/components/ui/badge"
 import { useChannels } from "@/hooks/useChannels"
 import { useWebhookMutations, useWebhooks } from "@/hooks/useWebhooks"
 import { usePrefs } from "@/store"
 import { EVENT_KINDS, type Webhook, type WebhookDirection, type WebhookFormat } from "@/api/types"
 import { getErrorMessage } from "@/utils/errors"
 import { CHANNEL_RE, isHandle } from "@/utils/handles"
-import { formatStamp } from "@/utils/time"
-import { PageHeader } from "@/components/ui/page"
+import { InfraTabs, PageHeader, SideCard } from "@/components/ui/page"
+import { Icon } from "@/components/ui/icons"
+import { relativeTime } from "@/utils/fleetStatus"
 
 const selectClass =
   "h-9 w-full rounded-lg border border-line bg-ink-sunken px-3 text-sm text-cream focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brass"
@@ -51,24 +51,52 @@ export default function Webhooks() {
   const hooks = useWebhooks(() => true)
   const mutations = useWebhookMutations()
   const [notice, setNotice] = createSignal<SecretNotice | null>(null)
+  const [creating, setCreating] = createSignal(false)
+  const rows = () => hooks.data?.webhooks ?? []
+  const attention = () => rows().filter((hook) => hook.enabled && Boolean(hook.last_error)).length
+  const healthy = () => rows().filter((hook) => hook.enabled && !hook.last_error).length
 
   return (
     <div class="page min-h-0 flex-1 overflow-y-auto">
-      <div class="mx-auto max-w-5xl">
-        <PageHeader title="Webhooks" description="Push fleet events to Discord, Slack or any URL, and accept signed events back." />
-        <p class="mb-4 mt-1 text-sm text-cream-dim">
-          Outbound hooks push hub activity to Discord, Slack or any URL so you can follow the fleet. Inbound hooks let other apps post into a channel, which is how you reach an agent from outside.
-        </p>
+      <div class="mx-auto max-w-6xl">
+        <InfraTabs />
+        <PageHeader
+          eyebrow="Connected to your workflow"
+          title="Updates, delivered."
+          description="Connect fleet events to the tools where your team already works, and let other apps post back in."
+          stats={[
+            { value: rows().length, label: "webhooks" },
+            { value: attention(), label: "need attention", tone: attention() ? "warn" : undefined },
+            { value: healthy(), label: "healthy", tone: healthy() ? "ok" : undefined },
+          ]}
+        >
+          <Button type="button" class="h-10 px-4" variant={creating() ? "outline" : "default"} aria-expanded={creating()} onClick={() => setCreating((open) => !open)}>
+            {creating() ? "Close" : "＋ New webhook"}
+          </Button>
+        </PageHeader>
         <Show when={notice()}>{(current) => <SecretScreen notice={current()} onDismiss={() => setNotice(null)} />}</Show>
-        <div class="grid gap-6 lg:grid-cols-2">
-          <section aria-labelledby="hooks-heading">
-            <h2 id="hooks-heading" class="mb-3 font-display text-lg text-cream">Your webhooks</h2>
+        <Show when={creating()}>
+          <section aria-labelledby="new-hook-heading" class="card mb-6 rounded-2xl border border-line p-5">
+            <h2 id="new-hook-heading" class="mb-4 text-[15px] font-semibold text-cream">Set up a webhook</h2>
+            <NewHookForm mutations={mutations} onCreated={(created) => { setNotice(created); setCreating(false) }} />
+          </section>
+        </Show>
+        <div class="grid gap-8 lg:grid-cols-[minmax(0,1fr)_18.5rem]">
+          <section aria-labelledby="hooks-heading" class="min-w-0">
+            <h2 id="hooks-heading" class="sr-only">Your webhooks</h2>
             <HookList hooks={hooks.data?.webhooks} error={hooks.error} mutations={mutations} onSecret={setNotice} />
           </section>
-          <section aria-labelledby="new-hook-heading" class="rounded-lg border border-line p-4">
-            <h2 id="new-hook-heading" class="mb-3 font-display text-lg text-cream">Set up a webhook</h2>
-            <NewHookForm mutations={mutations} onCreated={setNotice} />
-          </section>
+          <div class="flex flex-col gap-5">
+            <SideCard title="Choose the right direction">
+              <p class="font-semibold text-cream">Outbound · Fleet → App</p>
+              <p class="mb-3">Push fleet activity to Discord, Slack or any URL so you can follow along.</p>
+              <p class="font-semibold text-cream">Inbound · App → Fleet</p>
+              <p>Let other apps post into a channel. That is how you reach an agent from outside.</p>
+            </SideCard>
+            <SideCard title="Secrets stay in the hub">
+              Receiver URLs carry tokens, so they are always shown redacted. A hook's secret appears once, when you create or rotate it.
+            </SideCard>
+          </div>
         </div>
       </div>
     </div>
@@ -80,7 +108,7 @@ function SecretScreen(props: { notice: SecretNotice; onDismiss: () => void }) {
   const curl = () =>
     `curl -X POST ${inboundUrl(props.notice.name)} \\\n  -H "Authorization: Bearer ${props.notice.secret}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"text":"@agent hello from outside"}'`
   return (
-    <div class="mb-4 rounded-lg border border-brass p-3" role="status">
+    <div class="card mb-6 rounded-2xl border border-brass p-5" role="status">
       <p class="text-sm text-cream">
         Secret for <strong>{props.notice.name}</strong>. It is shown once and cannot be read again.
       </p>
@@ -116,8 +144,8 @@ function HookList(props: {
     <Show when={!props.error} fallback={<p class="text-sm text-rust">{getErrorMessage(props.error)}</p>}>
       <Show when={props.hooks} fallback={<p class="text-sm text-cream-dim">Loading…</p>}>
         {(hooks) => (
-          <Show when={hooks().length > 0} fallback={<p class="text-sm text-cream-dim">No webhooks yet. Create one with “New webhook”.</p>}>
-            <ul class="flex flex-col gap-3">
+          <Show when={hooks().length > 0} fallback={<p class="rounded-2xl border border-dashed border-line px-4 py-10 text-center text-sm text-cream-dim">No webhooks yet. Create one with “New webhook”.</p>}>
+            <ul class="flex flex-col gap-4">
               <For each={hooks()}>{(hook) => <HookRow hook={hook} mutations={props.mutations} onSecret={props.onSecret} />}</For>
             </ul>
           </Show>
@@ -144,7 +172,6 @@ function HookRow(props: { hook: Webhook; mutations: Mutations; onSecret: (notice
   const [message, setMessage] = createSignal("")
   const hook = () => props.hook
   const outbound = () => hook().direction === "out"
-  const status = () => (hook().enabled ? (outbound() ? hook().last_status ?? "waiting for events" : "listening") : "disabled")
 
   const test = () => {
     setMessage("Sending…")
@@ -154,26 +181,46 @@ function HookRow(props: { hook: Webhook; mutations: Mutations; onSecret: (notice
     })
   }
 
+  const badge = () =>
+    !hook().enabled ? { text: "Paused", tone: undefined }
+      : hook().last_error ? { text: "Needs attention", tone: "warn" }
+        : outbound() ? { text: hook().last_status ? "Healthy" : "Waiting for events", tone: hook().last_status ? "ok" : undefined }
+          : { text: "Listening", tone: "ok" }
+  const formatName = () => ({ discord: "Discord", slack: "Slack", generic: "Generic JSON" } as Record<string, string>)[hook().format ?? ""] ?? hook().format
+
   return (
-    <li class="rounded-lg border border-line p-3">
-      <div class="flex flex-wrap items-center gap-2">
-        <span class="font-medium text-cream">{hook().name}</span>
-        <Badge>{outbound() ? `out · ${hook().format}` : "in"}</Badge>
-        <Badge class={hook().enabled ? undefined : "text-rust"}>{status()}</Badge>
+    <li class="card rounded-2xl border border-line p-5">
+      <div class="flex items-start gap-3">
+        <span class="icon-tile size-10 shrink-0" aria-hidden="true"><Icon name={outbound() ? "arrow" : "hook"} class="size-[18px]" /></span>
+        <div class="min-w-0 flex-1">
+          <p class="truncate text-[15px] font-semibold text-cream">{hook().name}</p>
+          <p class="text-xs text-cream-dim">{outbound() ? `Outbound · ${formatName()}` : `Inbound · #${hook().channel}`}</p>
+        </div>
+        <span class="soft-badge shrink-0" data-tone={badge().tone}>{badge().text}</span>
       </div>
       <Show when={hook().description}>
-        <p class="mt-1 text-sm text-cream">{hook().description}</p>
+        <p class="mt-3 text-sm text-cream">{hook().description}</p>
       </Show>
-      <p class="mt-1 text-xs text-cream-dim">{summarize(hook())}</p>
       <Show when={hook().last_error}>
-        <p class="mt-1 text-xs text-rust">{hook().last_error}</p>
+        <div class="alert-card mt-4 rounded-xl px-4 py-3 text-[13px]">
+          <p class="font-semibold text-rust">Last delivery failed{hook().last_status ? ` · ${hook().last_status}` : ""}</p>
+          <p class="mt-1 break-words text-cream">{hook().last_error}</p>
+        </div>
       </Show>
-      <Show when={hook().last_delivery_at}>
-        {(at) => <p class="mt-1 text-xs text-cream-dim" title={at()}>Last delivery {formatStamp(at())}</p>}
-      </Show>
-      <div class="mt-2 flex flex-wrap items-center gap-2">
+      <dl class="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
+        <div class="min-w-0"><dt class="field-label">{outbound() ? "Sends" : "Posts as"}</dt><dd class="mt-1 text-[13px] text-cream">{outbound() ? (hook().directed_only ? "Addressed messages" : hook().kinds?.length ? `${hook().kinds!.length} event kind${hook().kinds!.length === 1 ? "" : "s"}` : "All events") : hook().author ?? `hook-${hook().name}`}</dd></div>
         <Show when={outbound()}>
-          <Button type="button" size="sm" variant="outline" onClick={test}>Test</Button>
+          <div><dt class="field-label">Failures</dt><dd class="mt-1 text-[13px] text-cream tabular-nums">{hook().failure_count ?? 0}</dd></div>
+        </Show>
+        <div><dt class="field-label">{outbound() ? "Last delivery" : "Updated"}</dt><dd class="mt-1 text-[13px] text-cream" title={hook().last_delivery_at ?? hook().updated_at}>{relativeTime((outbound() ? hook().last_delivery_at : hook().updated_at) ?? "") || "Never"}</dd></div>
+      </dl>
+      <details class="provenance mt-3 text-xs">
+        <summary class="cursor-pointer select-none text-cream-dim hover:text-cream">Filters &amp; details</summary>
+        <p class="mt-2 text-cream-dim">{summarize(hook())}</p>
+      </details>
+      <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
+        <Show when={outbound()}>
+          <Button type="button" size="sm" variant="outline" onClick={test}>Send test</Button>
         </Show>
         <Button
           type="button"
@@ -181,7 +228,7 @@ function HookRow(props: { hook: Webhook; mutations: Mutations; onSecret: (notice
           variant="outline"
           onClick={() => props.mutations.update.mutate({ id: hook().id, changes: { enabled: !hook().enabled } }, { onError: (error) => setMessage(getErrorMessage(error)) })}
         >
-          {hook().enabled ? "Disable" : "Enable"}
+          {hook().enabled ? "Pause" : "Resume"}
         </Button>
         <Button
           type="button"
@@ -196,20 +243,22 @@ function HookRow(props: { hook: Webhook; mutations: Mutations; onSecret: (notice
         >
           Rotate secret
         </Button>
-        <Show
-          when={confirming()}
-          fallback={<Button type="button" size="sm" variant="danger" onClick={() => setConfirming(true)}>Delete</Button>}
-        >
-          <Button
-            type="button"
-            size="sm"
-            variant="danger"
-            onClick={() => props.mutations.remove.mutate(hook().id, { onError: (error) => { setConfirming(false); setMessage(getErrorMessage(error)) } })}
+        <span class="ml-auto flex items-center gap-2">
+          <Show
+            when={confirming()}
+            fallback={<Button type="button" size="sm" variant="ghost" class="text-rust" onClick={() => setConfirming(true)}>Remove</Button>}
           >
-            Really delete
-          </Button>
-          <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>Keep</Button>
-        </Show>
+            <Button
+              type="button"
+              size="sm"
+              variant="danger"
+              onClick={() => props.mutations.remove.mutate(hook().id, { onError: (error) => { setConfirming(false); setMessage(getErrorMessage(error)) } })}
+            >
+              Really remove
+            </Button>
+            <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>Keep</Button>
+          </Show>
+        </span>
       </div>
       <Show when={message()}>
         <p class="mt-2 text-xs text-cream-dim" aria-live="polite">{message()}</p>
@@ -287,7 +336,7 @@ function NewHookForm(props: { mutations: Mutations; onCreated: (notice: SecretNo
   }
 
   return (
-    <form class="flex flex-col gap-3" onSubmit={submit}>
+    <form class="grid gap-3 sm:grid-cols-2 [&>*]:sm:col-span-2" onSubmit={submit}>
       <fieldset class="flex gap-2">
         <legend class="mb-1 text-sm text-cream-dim">Direction</legend>
         <Button type="button" size="sm" variant={direction() === "out" ? "default" : "outline"} aria-pressed={direction() === "out"} onClick={() => setDirection("out")}>

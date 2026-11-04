@@ -2,8 +2,7 @@ import { createEffect, createSignal, For, Show } from "solid-js"
 import { useSearchParams } from "@solidjs/router"
 import { exportFacts } from "@/api/knowledge"
 import { FACT_STATUSES, type FactStatus, type KnowledgeFact } from "@/api/types"
-import { Snippet } from "@/components/RichText"
-import { Avatar } from "@/components/ui/avatar"
+import { selectClass, Snippet } from "@/components/RichText"
 import { MessageBody } from "@/components/MessageRow/MessageRow"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -63,10 +62,10 @@ export default function KnowledgePage() {
   return (
     <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-6xl">
-        <PageHeader title="Knowledge" description="Durable facts the fleet has learned, by project and topic. Agents read these before they start work.">
-          <Button type="button" variant="outline" onClick={() => void download()}>Export JSONL</Button>
-          <Button type="button" variant={adding() ? "outline" : "default"} aria-expanded={adding()} onClick={() => setAdding((open) => !open)}>
-            {adding() ? "Close" : "＋ Add fact"}
+        <PageHeader eyebrow="Fleet knowledge" title="Remember what matters." description="Useful lessons, with the context and sources to trust them. Agents read these before they start work.">
+          <Button type="button" variant="outline" class="h-10 px-4" onClick={() => void download()}>Export JSONL ↓</Button>
+          <Button type="button" class="h-10 px-4" variant={adding() ? "outline" : "default"} aria-expanded={adding()} onClick={() => setAdding((open) => !open)}>
+            {adding() ? "Close" : "＋ Add a fact"}
           </Button>
         </PageHeader>
         <Show when={exportError()}><p class="mb-3 text-sm text-rust">{exportError()}</p></Show>
@@ -74,18 +73,24 @@ export default function KnowledgePage() {
           <div class="mb-6"><AddFact project={project()} topic={topic()} onDone={() => setAdding(false)} /></div>
         </Show>
 
-        <form class="search-field flex items-center gap-2 rounded-xl border border-line px-3" role="search" onSubmit={(event) => { event.preventDefault(); setSubmittedQuery(query().trim()) }}>
+        <div class="flex gap-3">
+        <form class="search-field flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line px-3" role="search" onSubmit={(event) => { event.preventDefault(); setSubmittedQuery(query().trim()) }}>
           <span aria-hidden="true" class="text-cream-dim">⌕</span>
           <input
             class="h-11 min-w-0 flex-1 bg-transparent text-sm text-cream outline-none placeholder:text-cream-dim"
             aria-label="Search facts"
-            placeholder="Search active facts across every project"
+            placeholder="Search lessons, runbooks, and decisions…"
             value={query()}
             onInput={(event) => setQuery(event.currentTarget.value)}
           />
           <Show when={submittedQuery()}><Button type="button" size="sm" variant="ghost" onClick={() => { setQuery(""); setSubmittedQuery("") }}>Clear</Button></Show>
           <Button type="submit" size="sm">Search</Button>
         </form>
+        <select class={`${selectClass} h-auto rounded-xl px-3`} aria-label="Status" value={status()} onChange={(event) => setStatus(event.currentTarget.value as FactStatus | "")}>
+          <For each={FACT_STATUSES}>{(item) => <option value={item}>{item}</option>}</For>
+          <option value="">any status</option>
+        </select>
+        </div>
 
         <Show when={submittedQuery()}>
           <section class="mt-4" aria-label="Fact search results">
@@ -108,7 +113,7 @@ export default function KnowledgePage() {
           </section>
         </Show>
 
-        <div class="mt-6 grid gap-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
+        <div class="mt-7 grid gap-8 lg:grid-cols-[13rem_minmax(0,1fr)]">
           <nav aria-label="Projects" class="text-sm">
             <h2 class="side-label mb-2 px-1">Projects</h2>
             <ul class="flex gap-1 overflow-x-auto lg:flex-col lg:overflow-visible">
@@ -133,38 +138,38 @@ export default function KnowledgePage() {
               <Input class="h-8 text-xs" aria-label="Open project" placeholder="Open project…" value={projectDraft()} onInput={(event) => setProjectDraft(event.currentTarget.value)} />
               <Button type="submit" size="sm" variant="outline">Go</Button>
             </form>
+            <Show when={project()}>
+              <h2 class="side-label mb-2 mt-7 px-1">Topics</h2>
+              <ul class="flex flex-wrap gap-1 lg:flex-col" role="group" aria-label="Topics">
+                <li>
+                  <button type="button" class="project-row flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left" classList={{ "is-active font-medium text-cream": !topic(), "text-cream-dim hover:bg-ink-raised hover:text-cream": !!topic() }} aria-pressed={!topic()} onClick={() => setParams({ topic: undefined })}>
+                    All topics <span class="text-xs opacity-70">{topicTotal() || ""}</span>
+                  </button>
+                </li>
+                <For each={topics.data?.topics ?? []}>
+                  {(item) => (
+                    <li>
+                      <button type="button" class="project-row flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left" classList={{ "is-active font-medium text-cream": topic() === item.topic, "text-cream-dim hover:bg-ink-raised hover:text-cream": topic() !== item.topic }} aria-pressed={topic() === item.topic} onClick={() => setParams({ topic: item.topic })}>
+                        {item.topic} <span class="text-xs opacity-70">{item.count}</span>
+                      </button>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
           </nav>
 
           <section aria-label="Facts" class="min-w-0">
             <Show when={project()} fallback={<p class="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-cream-dim">Pick a project to see its facts.</p>}>
-              <div class="mb-3 flex flex-wrap items-center gap-3">
-                <h2 class="font-display text-xl font-semibold text-cream">{project()}</h2>
-                <Show when={topicTotal()}><span class="count-pill">{topicTotal()} facts</span></Show>
-                <div class="segmented ml-auto flex rounded-lg border border-line p-0.5 text-xs" role="group" aria-label="Status">
-                  <For each={[...FACT_STATUSES, ""] as const}>
-                    {(item) => (
-                      <button type="button" class="rounded-md px-2.5 py-1 capitalize" aria-pressed={status() === item} onClick={() => setStatus(item as FactStatus | "")}>
-                        {item || "any"}
-                      </button>
-                    )}
-                  </For>
-                </div>
-              </div>
-              <div class="mb-4 flex flex-wrap gap-1.5" role="group" aria-label="Topics">
-                <button type="button" class="filter-chip" aria-pressed={!topic()} onClick={() => setParams({ topic: undefined })}>All topics</button>
-                <For each={topics.data?.topics ?? []}>
-                  {(item) => (
-                    <button type="button" class="filter-chip" aria-pressed={topic() === item.topic} onClick={() => setParams({ topic: item.topic })}>
-                      {item.topic} <span class="ml-1 opacity-70">{item.count}</span>
-                    </button>
-                  )}
-                </For>
+              <div class="mb-3 flex items-center justify-between text-[13px] text-cream-dim">
+                <h2><span class="font-semibold text-cream">{rows().length}{facts.hasNextPage ? "+" : ""} facts</span> · {project()}{topic() ? ` / ${topic()}` : ""}</h2>
+                <span>Newest first · {status() || "any status"}</span>
               </div>
               <Show when={facts.isError}><p class="text-sm text-rust">{getErrorMessage(facts.error, "Could not load facts.")}</p></Show>
               <Show when={facts.isSuccess && rows().length === 0}>
                 <p class="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-cream-dim">No {status() || ""} facts here yet.</p>
               </Show>
-              <ul class="flex flex-col gap-2">
+              <ul class="flex flex-col gap-3">
                 <For each={rows()}>{(fact) => <FactRow fact={fact} showTopic={!topic()} />}</For>
               </ul>
               <Show when={facts.hasNextPage}>
@@ -182,31 +187,52 @@ export default function KnowledgePage() {
 
 const STATUS_ACTION: Record<FactStatus, string> = { active: "Reactivate", superseded: "Supersede", rejected: "Reject" }
 
+/** First sentence as a headline, the rest as body. A one-sentence fact is all headline. */
+export function splitFact(text: string): { title: string; body: string } {
+  const match = /^(.{12,160}?[.!?])\s+(\S[\s\S]*)$/.exec(text.trim())
+  return match ? { title: match[1], body: match[2] } : { title: text.trim(), body: "" }
+}
+
 function FactRow(props: { fact: KnowledgeFact; showTopic: boolean }) {
   const prefs = usePrefs()
   const mutations = useKnowledgeMutations()
   const [error, setError] = createSignal("")
   const actor = () => (isHandle(prefs.displayName().trim()) ? prefs.displayName().trim() : "")
+  const parts = () => splitFact(props.fact.fact)
   const source = () => [props.fact.source_run, props.fact.source_step].filter(Boolean).join(" · ")
   return (
-    <li class="card fact-card group rounded-xl border border-line px-4 py-3" data-status={props.fact.status}>
-      <div class="flex items-start gap-3">
-        <div class="min-w-0 flex-1 break-words text-[14.5px] leading-relaxed text-cream" classList={{ "line-through decoration-cream-dim/60": props.fact.status !== "active" }}><MessageBody text={props.fact.fact} mentions={[]} /></div>
-        <span class="fact-status shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-semibold capitalize" data-status={props.fact.status}>{props.fact.status}</span>
+    <li class="card fact-card rounded-2xl border border-line px-5 py-4" data-status={props.fact.status}>
+      <div class="flex items-start justify-between gap-3">
+        <span class="text-xs text-cream-dim">{props.fact.topic}</span>
+        <span class="fact-status shrink-0 rounded-md px-2 py-0.5 text-[11px] font-semibold capitalize" data-status={props.fact.status}>{props.fact.status}</span>
       </div>
-      <div class="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-cream-dim">
-        <span class="flex items-center gap-1.5"><Avatar name={props.fact.author} size="sm" /><span class="font-medium text-cream">{props.fact.author}</span></span>
-        <Show when={props.showTopic}><span class="chip text-[11px]">{props.fact.topic}</span></Show>
-        <span title={props.fact.created_at}>{relativeTime(props.fact.created_at) || formatStamp(props.fact.created_at)}</span>
-        <Show when={source()}><span class="font-mono" title="Source run · step">{source()}</span></Show>
-        <Show when={actor()}>
-          <div class="ml-auto flex gap-1 opacity-70 transition group-hover:opacity-100 focus-within:opacity-100">
+      <h3 class="mt-1.5 text-[15.5px] font-semibold leading-snug text-cream" classList={{ "line-through decoration-cream-dim/60": props.fact.status !== "active" }}>
+        <MessageBody text={parts().title} mentions={[]} />
+      </h3>
+      <Show when={parts().body}>
+        <div class="mt-1.5 text-[14px] leading-relaxed text-cream-dim"><MessageBody text={parts().body} mentions={[]} /></div>
+      </Show>
+      <p class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-cream-dim">
+        <Show when={source()}><span class="font-mono" title="Source run · step">▤ {source()}</span></Show>
+        <span>by <span class="text-cream">{props.fact.author}</span></span>
+        <span title={props.fact.created_at}>{formatStamp(props.fact.created_at)}</span>
+      </p>
+      <details class="provenance mt-3 text-xs">
+        <summary class="cursor-pointer select-none text-cream-dim hover:text-cream">Provenance &amp; actions</summary>
+        <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-cream-dim">
+          <dt>Project</dt><dd class="text-cream">{props.fact.project}</dd>
+          <dt>Run</dt><dd class="font-mono text-cream">{props.fact.source_run ?? "—"}</dd>
+          <dt>Step</dt><dd class="font-mono text-cream">{props.fact.source_step ?? "—"}</dd>
+          <dt>Updated</dt><dd class="text-cream">{relativeTime(props.fact.updated_at) || formatStamp(props.fact.updated_at)}</dd>
+        </dl>
+        <Show when={actor()} fallback={<p class="mt-2 text-cream-dim">Set a display name to change a fact's status.</p>}>
+          <div class="mt-3 flex gap-1.5">
             <For each={FACT_STATUSES.filter((item) => item !== props.fact.status)}>
               {(next) => (
                 <Button
                   type="button"
                   size="sm"
-                  variant={next === "rejected" ? "danger" : "ghost"}
+                  variant={next === "rejected" ? "danger" : "outline"}
                   class="h-7"
                   disabled={mutations.status.isPending}
                   onClick={() => { setError(""); mutations.status.mutate({ id: props.fact.id, status: next, actor: actor() }, { onError: (reason) => setError(getErrorMessage(reason)) }) }}
@@ -217,7 +243,7 @@ function FactRow(props: { fact: KnowledgeFact; showTopic: boolean }) {
             </For>
           </div>
         </Show>
-      </div>
+      </details>
       <Show when={error()}><p class="mt-1 text-xs text-rust">{error()}</p></Show>
     </li>
   )

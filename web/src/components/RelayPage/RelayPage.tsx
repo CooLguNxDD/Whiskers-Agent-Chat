@@ -9,7 +9,9 @@ import { usePrefs } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { CHANNEL_RE, isHandle } from "@/utils/handles"
 import { formatStamp } from "@/utils/time"
-import { PageHeader } from "@/components/ui/page"
+import { InfraTabs, PageHeader, SideCard } from "@/components/ui/page"
+import { Icon } from "@/components/ui/icons"
+import { relativeTime } from "@/utils/fleetStatus"
 
 const selectClass =
   "h-9 w-full rounded-lg border border-line bg-ink-sunken px-3 text-sm text-cream focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brass"
@@ -60,35 +62,46 @@ export default function RelayPage() {
   return (
     <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-6xl">
-        <PageHeader title="Relays" />
-        <p class="mb-4 mt-1 text-sm text-cream-dim">
-          A relay bridges a Discord, Slack or Telegram bot to the fleet. Its bindings, routes and allowlists live here and take effect on the bot's next heartbeat, without a restart. Run it with <code>cat-fleet-relay --platform … --name …</code> and its token.
-        </p>
+        <InfraTabs />
+        <PageHeader
+          eyebrow="Bridge your conversations"
+          title="One fleet. Wherever you chat."
+          description={<>Connect Discord, Slack or Telegram channels to your fleet. Bindings, routes and allowlists apply on the bot's next heartbeat, without a restart. Run it with <code class="font-mono text-[13px]">cat-fleet-relay --platform … --name …</code> and its token.</>}
+          stats={[
+            { value: relays.data?.relays.length ?? 0, label: "relays" },
+            { value: (relays.data?.relays ?? []).filter((relay) => relay.state === "online").length, label: "online", tone: "ok" },
+            { value: (relays.data?.relays ?? []).filter((relay) => relay.state === "stale" || relay.state === "offline").length, label: "need a look", tone: "warn" },
+          ]}
+        >
+          <Button type="button" class="h-10 px-4" onClick={() => document.querySelector<HTMLInputElement>('input[aria-label="Relay name"]')?.focus()}>＋ New relay</Button>
+        </PageHeader>
         <Show when={notice()}>{(shown) => <TokenScreen notice={shown()} onDismiss={() => setNotice(null)} />}</Show>
-        <div class="grid gap-6 lg:grid-cols-[18rem_1fr]">
+        <div class="grid gap-8 lg:grid-cols-[18.5rem_minmax(0,1fr)]">
           <aside aria-label="Relays" class="flex flex-col gap-3">
             <Show when={relays.error}>
               <p class="text-sm text-rust">{getErrorMessage(relays.error)}</p>
             </Show>
             <ul class="flex flex-col gap-2">
-              <For each={relays.data?.relays} fallback={<li class="text-sm text-cream-dim">No relays yet.</li>}>
+              <For each={relays.data?.relays} fallback={<li class="rounded-2xl border border-dashed border-line px-4 py-6 text-center text-sm text-cream-dim">No relays yet.</li>}>
                 {(relay) => (
                   <li>
                     <button
                       type="button"
-                      class={`w-full rounded-lg border p-3 text-left ${current() === relay.name ? "border-brass" : "border-line"}`}
+                      class={`card relay-pick flex w-full items-center gap-3 rounded-2xl border p-4 text-left ${current() === relay.name ? "border-brass" : "border-line"}`}
                       onClick={() => setSelected(relay.name)}
                       aria-pressed={current() === relay.name}
                     >
-                      <div class="flex items-center gap-2">
-                        <span class="font-medium text-cream">{relay.name}</span>
-                        <Badge>{relay.platform}</Badge>
-                        <span class={`ml-auto text-xs ${STATE_CLASS[relay.state]}`} data-testid={`state-${relay.name}`}>● {relay.state}</span>
-                      </div>
-                      <p class="mt-1 text-xs text-cream-dim">
-                        v{relay.version}
-                        {relay.last_seen_at ? ` · seen ${formatStamp(relay.last_seen_at)}` : " · never seen"}
-                      </p>
+                      <span class="icon-tile size-10 shrink-0" aria-hidden="true"><Icon name="relay" /></span>
+                      <span class="min-w-0 flex-1">
+                        <span class="flex items-center gap-2">
+                          <span class="truncate text-[15px] font-semibold text-cream">{relay.name}</span>
+                          <span class={`ml-auto shrink-0 text-xs ${STATE_CLASS[relay.state]}`} data-testid={`state-${relay.name}`}>● {relay.state}</span>
+                        </span>
+                        <span class="mt-0.5 block text-xs text-cream-dim">
+                          <span class="capitalize">{relay.platform}</span> · v{relay.version}
+                          {relay.last_seen_at ? ` · seen ${relativeTime(relay.last_seen_at) || formatStamp(relay.last_seen_at)}` : " · never seen"}
+                        </span>
+                      </span>
                     </button>
                   </li>
                 )}
@@ -97,7 +110,15 @@ export default function RelayPage() {
             <NewRelayForm mutations={mutations} onCreated={(created) => { setNotice(created); setSelected(created.name) }} />
           </aside>
           {/* keyed: each relay gets a fresh tree, so a draft for one relay can't be saved to another */}
-          <Show when={current()} keyed fallback={<p class="text-sm text-cream-dim">Create a relay to configure it.</p>}>
+          <Show when={current()} keyed fallback={
+            <SideCard title="Three small steps">
+              <ol class="flex flex-col gap-3">
+                <li><p class="font-semibold text-cream">01 · Create a relay</p><p>Choose a name and a platform. You get its token once.</p></li>
+                <li><p class="font-semibold text-cream">02 · Map your channels</p><p>Bind platform channels to hub channels, and route events back out.</p></li>
+                <li><p class="font-semibold text-cream">03 · Connect your bot</p><p>Run <code class="font-mono">cat-fleet-relay</code> with the token; its heartbeat picks up every change.</p></li>
+              </ol>
+            </SideCard>
+          }>
             {(name) => <RelayDetail name={name} mutations={mutations} onToken={setNotice} onDeleted={() => setSelected(null)} />}
           </Show>
         </div>
@@ -108,8 +129,8 @@ export default function RelayPage() {
 
 function TokenScreen(props: { notice: TokenNotice; onDismiss: () => void }) {
   return (
-    <section role="alert" class="mb-4 rounded-lg border border-brass p-4">
-      <h2 class="font-display text-lg text-cream">Token for {props.notice.name}</h2>
+    <section role="alert" class="card mb-6 rounded-2xl border border-brass p-5">
+      <h2 class="text-[15px] font-semibold text-cream">Token for {props.notice.name}</h2>
       <p class="mt-1 text-sm text-cream-dim">
         Shown once. Give it to the relay as <code>CAT_FLEET_RELAY_TOKEN</code>. It only reaches this relay's own config, bindings, routes and posts; it is not the fleet token.
       </p>
@@ -128,7 +149,7 @@ function NewRelayForm(props: { mutations: Mutations; onCreated: (notice: TokenNo
   const [error, setError] = createSignal("")
   return (
     <form
-      class="flex flex-col gap-2 rounded-lg border border-line p-3"
+      class="card flex flex-col gap-2 rounded-2xl border border-line p-4"
       aria-label="New relay"
       onSubmit={(event) => {
         event.preventDefault()
@@ -144,7 +165,7 @@ function NewRelayForm(props: { mutations: Mutations; onCreated: (notice: TokenNo
         )
       }}
     >
-      <h2 class="font-display text-base text-cream">New relay</h2>
+      <h2 class="text-[15px] font-semibold text-cream">New relay</h2>
       <Input aria-label="Relay name" placeholder="main" value={name()} onInput={(event) => setName(event.currentTarget.value.trim())} />
       <select class={selectClass} aria-label="Platform" value={platform()} onChange={(event) => setPlatform(event.currentTarget.value as RelayPlatform)}>
         <For each={RELAY_PLATFORMS}>{(item) => <option value={item}>{item}</option>}</For>
@@ -203,9 +224,10 @@ function RelayHeader(props: { snapshot: RelaySnapshot; mutations: Mutations; onT
   const lastError = () => (relay().status as Record<string, unknown>).last_error as string | undefined
   const needActor = () => { if (!actor()) setMessage("Set a valid Name in the header first."); return Boolean(actor()) }
   return (
-    <div class="rounded-lg border border-line p-4">
+    <div class="card rounded-2xl border border-line p-5">
       <div class="flex flex-wrap items-center gap-2">
-        <h2 class="font-display text-lg text-cream">{relay().name}</h2>
+        <span class="icon-tile mr-1 size-10 shrink-0" aria-hidden="true"><Icon name="relay" /></span>
+        <h2 class="text-lg font-semibold text-cream">{relay().name}</h2>
         <Badge>{relay().platform}</Badge>
         <Badge class={STATE_CLASS[relay().state]}>{relay().state}</Badge>
         <Badge>v{props.snapshot.version}</Badge>
@@ -270,7 +292,7 @@ function Bindings(props: { snapshot: RelaySnapshot; mutations: Mutations }) {
   const name = () => props.snapshot.relay.name
   return (
     <section aria-labelledby="bindings-heading" class="rounded-lg border border-line p-4">
-      <h3 id="bindings-heading" class="font-display text-base text-cream">Bindings</h3>
+      <h3 id="bindings-heading" class="text-[15px] font-semibold text-cream">Bindings</h3>
       <p class="text-xs text-cream-dim">Platform channel or thread → hub channel. A thread with no binding of its own uses its channel's.</p>
       <ul class="mt-2 flex flex-col gap-2">
         <For each={props.snapshot.bindings} fallback={<li class="text-sm text-cream-dim">Nothing bound: the relay relays nothing.</li>}>
@@ -352,7 +374,7 @@ function Routes(props: { snapshot: RelaySnapshot; mutations: Mutations }) {
   const name = () => props.snapshot.relay.name
   return (
     <section aria-labelledby="routes-heading" class="rounded-lg border border-line p-4">
-      <h3 id="routes-heading" class="font-display text-base text-cream">Routes</h3>
+      <h3 id="routes-heading" class="text-[15px] font-semibold text-cream">Routes</h3>
       <p class="text-xs text-cream-dim">Events delivered to a platform channel, at least once, from a durable consumer. Cards carry action buttons.</p>
       <ul class="mt-2 flex flex-col gap-2">
         <For each={props.snapshot.routes} fallback={<li class="text-sm text-cream-dim">No routes.</li>}>
@@ -468,7 +490,7 @@ function ConfigEditor(props: { snapshot: RelaySnapshot; mutations: Mutations }) 
         )
       }}
     >
-      <h3 class="font-display text-base text-cream">Who may do what</h3>
+      <h3 class="text-[15px] font-semibold text-cream">Who may do what</h3>
       <div class="mt-2 grid gap-3 sm:grid-cols-2">
         <label class="flex flex-col gap-1 text-xs text-cream-dim">Operators (platform user ids: bind, routes, threads)
           <Input value={operators() ?? config().operators.join(", ")} onInput={(event) => setOperators(event.currentTarget.value)} />

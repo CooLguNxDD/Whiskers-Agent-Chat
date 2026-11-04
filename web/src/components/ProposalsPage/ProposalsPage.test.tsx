@@ -68,7 +68,15 @@ const counts = (postId: number, plus: string[], minus: string[], handle?: string
 
 let container: HTMLDivElement
 let dispose: (() => void) | undefined
-const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 20)) }
+const settle = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  // These tests read the whole board: switch to the "All" tab, which groups every status.
+  const all = container.querySelector<HTMLButtonElement>('[role="tab"][data-value="all"]')
+  if (all && all.getAttribute("aria-selected") !== "true") {
+    all.click()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
 const card = (id: string) => container.querySelector(`[data-proposal="${id}"]`) as HTMLElement
 const column = (status: string) => container.querySelector(`[data-status="${status}"]`) as HTMLElement
 const button = (root: HTMLElement, label: string) =>
