@@ -38,7 +38,7 @@ export default function PubSubPage() {
           stats={[
             { value: `${rows().length}${publications.hasNextPage ? "+" : ""}`, label: "publications" },
             { value: subscriptions.data?.subscriptions.length ?? 0, label: "subscriptions" },
-            { value: topicCount(), label: "topics" },
+            { value: topicCount(), label: "topics in loaded events" },
           ]}
         >
           <Button type="button" class="h-10 px-4" variant={publishing() ? "outline" : "default"} aria-expanded={publishing()} onClick={() => setPublishing((open) => !open)}>
@@ -119,7 +119,7 @@ function PublicationRow(props: { item: Publication; subscriptions: TopicSubscrip
         </div>
         <p class="mt-0.5 text-xs text-cream-dim">
           Published by {props.item.publisher} · #{props.item.id}
-          <Show when={receivers().length > 0}> · delivered to {receivers().join(", ")}</Show>
+          <Show when={receivers().length > 0}> · currently matched by {receivers().join(", ")}</Show>
         </p>
         <details class="provenance mt-2 text-xs">
           <summary class="cursor-pointer select-none text-cream-dim hover:text-cream">View payload</summary>

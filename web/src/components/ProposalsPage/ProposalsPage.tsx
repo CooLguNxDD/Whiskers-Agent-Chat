@@ -57,6 +57,8 @@ export default function ProposalsPage() {
   const evolve = useEvolveState()
   // Projects seen on the unfiltered board, so the filter row doesn't collapse to one chip after picking.
   const [knownProjects, setKnownProjects] = createSignal<string[]>([])
+  // The board shows the newest proposals only; an older project can still be typed in.
+  const [projectDraft, setProjectDraft] = createSignal("")
   createEffect(() => {
     const seen = new Set(knownProjects())
     for (const item of proposals.data?.proposals ?? []) seen.add(item.project)
@@ -105,13 +107,16 @@ export default function ProposalsPage() {
         onChange={setTab}
         tabs={[...LANE_ORDER.map((status) => ({ value: status as Tab, label: LABEL[status], count: byStatus(status).length })), { value: "all" as Tab, label: "All", count: all().length }]}
       />
-      <Show when={knownProjects().length > 1 || project()}>
+      <Show when={knownProjects().length > 0 || project()}>
         <div class="mt-4 flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by project">
           <span class="mr-1 text-xs text-cream-dim">Project</span>
           <button type="button" class="filter-chip" aria-pressed={!project()} onClick={() => setProject("")}>All</button>
           <For each={knownProjects()}>
             {(name) => <button type="button" class="filter-chip" aria-pressed={project() === name} onClick={() => setProject(name)}>{name}</button>}
           </For>
+          <form class="ml-1" onSubmit={(event) => { event.preventDefault(); const value = projectDraft().trim().toLowerCase(); if (value) { setProject(value); setProjectDraft("") } }}>
+            <input class="h-7 w-32 rounded-full border border-line bg-ink-sunken px-3 text-xs text-cream outline-none placeholder:text-cream-dim focus-visible:border-brass" aria-label="Other project" placeholder="Other project…" value={projectDraft()} onInput={(event) => setProjectDraft(event.currentTarget.value)} />
+          </form>
         </div>
       </Show>
       <Show when={proposals.isError}><p class="mt-4 text-sm text-rust">{getErrorMessage(proposals.error, "Could not load proposals.")}</p></Show>
@@ -154,7 +159,9 @@ function NewProposalForm(props: { defaultProject: string; onDone: () => void }) 
   const [weight, setWeight] = createSignal(3)
   const [evidence, setEvidence] = createSignal("")
   const [error, setError] = createSignal("")
-  const [requestId] = createSignal(crypto.randomUUID())
+  // Same payload → same id, so a retry is idempotent; any edit gets a fresh id.
+  const [requestId, setRequestId] = createSignal(crypto.randomUUID())
+  const changed = <T,>(set: (value: T) => void) => (value: T) => { set(value); setRequestId(crypto.randomUUID()) }
   const author = () => (isHandle(prefs.displayName().trim()) ? prefs.displayName().trim() : "")
   return (
     <form
@@ -164,7 +171,7 @@ function NewProposalForm(props: { defaultProject: string; onDone: () => void }) 
         event.preventDefault()
         setError("")
         if (!author()) { setError("Set a valid display name first."); return }
-        if (!project().trim() || !title().trim()) { setError("A project and a title are required."); return }
+        if (!project().trim() || !title().trim() || !summary().trim()) { setError("A project, a title and a summary are required."); return }
         mutations.create.mutate(
           {
             author: author(),
@@ -180,13 +187,13 @@ function NewProposalForm(props: { defaultProject: string; onDone: () => void }) 
       }}
     >
       <h2 class="text-sm font-semibold text-cream sm:col-span-2">New proposal</h2>
-      <Input aria-label="Project" placeholder="project" value={project()} onInput={(event) => setProjectDraft(event.currentTarget.value)} />
+      <Input aria-label="Project" placeholder="project" value={project()} onInput={(event) => changed(setProjectDraft)(event.currentTarget.value)} />
       <label class="flex items-center gap-2 text-xs text-cream-dim">Weight
-        <Input type="number" min="1" max="10" aria-label="Weight" value={String(weight())} onInput={(event) => setWeight(Number(event.currentTarget.value) || 1)} />
+        <Input type="number" min="1" max="10" aria-label="Weight" value={String(weight())} onInput={(event) => changed(setWeight)(Number(event.currentTarget.value) || 1)} />
       </label>
-      <Input class="sm:col-span-2" aria-label="Proposal title" placeholder="What should the fleet do?" maxLength={200} value={title()} onInput={(event) => setTitle(event.currentTarget.value)} />
-      <Textarea class="sm:col-span-2" aria-label="Summary" placeholder="Why it matters, and what changes" maxLength={4000} value={summary()} onInput={(event) => setSummary(event.currentTarget.value)} />
-      <Textarea class="min-h-14 sm:col-span-2" aria-label="Evidence" placeholder="Evidence: one link or reference per line (optional)" value={evidence()} onInput={(event) => setEvidence(event.currentTarget.value)} />
+      <Input class="sm:col-span-2" aria-label="Proposal title" placeholder="What should the fleet do?" maxLength={200} value={title()} onInput={(event) => changed(setTitle)(event.currentTarget.value)} />
+      <Textarea class="sm:col-span-2" aria-label="Summary" placeholder="Why it matters, and what changes" maxLength={3000} required value={summary()} onInput={(event) => changed(setSummary)(event.currentTarget.value)} />
+      <Textarea class="min-h-14 sm:col-span-2" aria-label="Evidence" placeholder="Evidence: one link or reference per line (optional)" value={evidence()} onInput={(event) => changed(setEvidence)(event.currentTarget.value)} />
       <div class="flex items-center justify-end gap-2 sm:col-span-2">
         <Show when={error()}><span class="mr-auto text-xs text-rust">{error()}</span></Show>
         <Button type="button" variant="ghost" onClick={props.onDone}>Cancel</Button>

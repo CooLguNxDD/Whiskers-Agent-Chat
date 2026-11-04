@@ -54,7 +54,8 @@ export default function Webhooks() {
   const [creating, setCreating] = createSignal(false)
   const rows = () => hooks.data?.webhooks ?? []
   const attention = () => rows().filter((hook) => hook.enabled && Boolean(hook.last_error)).length
-  const healthy = () => rows().filter((hook) => hook.enabled && !hook.last_error).length
+  // Outbound only, and only after a confirmed delivery: failures record a retry:/disabled: status with an error.
+  const healthy = () => rows().filter((hook) => hook.enabled && hook.direction === "out" && delivered(hook)).length
 
   return (
     <div class="page min-h-0 flex-1 overflow-y-auto">
@@ -155,6 +156,12 @@ function HookList(props: {
   )
 }
 
+/** A delivery the receiver accepted: a status recorded with no error and no retry/disable marker. */
+function delivered(hook: Webhook): boolean {
+  const status = hook.last_status ?? ""
+  return Boolean(status) && !hook.last_error && !/^(retry|disabled):/.test(status)
+}
+
 function summarize(hook: Webhook): string {
   if (hook.direction === "in") {
     return `posts to #${hook.channel} as ${hook.author}${hook.allow_override ? " (caller may override)" : ""}`
@@ -184,7 +191,7 @@ function HookRow(props: { hook: Webhook; mutations: Mutations; onSecret: (notice
   const badge = () =>
     !hook().enabled ? { text: "Paused", tone: undefined }
       : hook().last_error ? { text: "Needs attention", tone: "warn" }
-        : outbound() ? { text: hook().last_status ? "Healthy" : "Waiting for events", tone: hook().last_status ? "ok" : undefined }
+        : outbound() ? { text: delivered(hook()) ? "Healthy" : "Waiting for events", tone: delivered(hook()) ? "ok" : undefined }
           : { text: "Listening", tone: "ok" }
   const formatName = () => ({ discord: "Discord", slack: "Slack", generic: "Generic JSON" } as Record<string, string>)[hook().format ?? ""] ?? hook().format
 

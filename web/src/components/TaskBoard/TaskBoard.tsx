@@ -49,12 +49,18 @@ export default function TaskBoard() {
       (!needle || `${task.title} ${task.description} #${task.id}`.toLowerCase().includes(needle)) &&
       (!who() || (who() === "-" ? !task.assignee : task.assignee === who())))
   }
-  const lanes = () => (showAll() ? ALL_LANES : MAIN_LANES)
+  // A task opened from chat stays visible even when its lane is folded away.
+  const focusedStatus = () => rows().find((task) => task.id === ui.expandedTaskId())?.status
+  const lanes = () => {
+    if (showAll()) return ALL_LANES
+    const focused = focusedStatus()
+    return focused && !MAIN_LANES.includes(focused) ? ALL_LANES.filter((lane) => MAIN_LANES.includes(lane) || lane === focused) : MAIN_LANES
+  }
+  const listed = () => visible().filter((task) => lanes().includes(task.status))
   const live = () => rows().filter((task) => ["open", "claimed", "in_progress", "blocked"].includes(task.status))
   const openComposer = () => { setComposing(true); queueMicrotask(() => document.querySelector<HTMLInputElement>('input[aria-label="Title"]')?.focus()) }
-  const cardProps = () => ({
-    actor: actor(),
-    busy: claim.isPending || update.isPending,
+  const busy = () => claim.isPending || update.isPending
+  const handlers = {
     onClaim: (item: Parameters<typeof claim.mutate>[0]["task"]) => {
       setConflict("")
       claim.mutate({ task: item, actor: actor() }, {
@@ -71,7 +77,7 @@ export default function TaskBoard() {
         },
       })
     },
-  })
+  }
 
   return (
     <div class="page min-h-0 flex-1 overflow-y-auto">
@@ -150,7 +156,7 @@ export default function TaskBoard() {
               <tr class="list-row"><th class="field-label px-4 py-3">Task</th><th class="field-label px-4 py-3">Status</th><th class="field-label px-4 py-3">Assignee</th><th class="field-label px-4 py-3">Updated</th></tr>
             </thead>
             <tbody>
-              <For each={visible().filter((task) => lanes().includes(task.status))}>
+              <For each={listed()}>
                 {(task) => (
                   <tr class="list-row last:border-0" data-task={task.id}>
                     <td class="px-4 py-3"><span class="mr-2 font-mono text-xs text-cream-dim">#{task.id}</span><span class="font-medium text-cream">{task.title}</span></td>
@@ -162,7 +168,7 @@ export default function TaskBoard() {
               </For>
             </tbody>
           </table>
-          <Show when={tasks.isSuccess && visible().length === 0}><p class="px-4 py-8 text-center text-sm text-cream-dim">No tasks match.</p></Show>
+          <Show when={tasks.isSuccess && listed().length === 0}><p class="px-4 py-8 text-center text-sm text-cream-dim">No tasks match.</p></Show>
         </div>
       }>
         <div class="lanes grid gap-4">
@@ -179,7 +185,7 @@ export default function TaskBoard() {
                       <button type="button" class="icon-btn ml-auto size-7 min-w-7" title="New task" aria-label="New task" onClick={openComposer}><Icon name="plus" class="size-4" /></button>
                     </Show>
                   </h2>
-                  <For each={items()}>{(task) => <TaskCard task={task} {...cardProps()} />}</For>
+                  <For each={items()}>{(task) => <TaskCard task={task} actor={actor()} busy={busy()} onClaim={handlers.onClaim} onStatus={handlers.onStatus} />}</For>
                   <Show when={status === "open"}>
                     <button type="button" class="flex items-center gap-1.5 px-1 text-[13px] text-cream-dim hover:text-cream" onClick={openComposer}><Icon name="plus" class="size-3.5" />Add task</button>
                   </Show>

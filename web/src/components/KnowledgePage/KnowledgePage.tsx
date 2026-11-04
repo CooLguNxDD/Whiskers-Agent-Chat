@@ -36,14 +36,14 @@ export default function KnowledgePage() {
   const rows = () => facts.data?.pages.flatMap((page) => page.facts) ?? []
   const pickProject = (value: string) => setParams({ project: value || undefined, topic: undefined })
 
-  const download = async () => {
+  const download = async (scope: string | undefined) => {
     setExportError("")
     try {
-      const text = await exportFacts({ project: project() || undefined, status: status() || "all" })
+      const text = await exportFacts({ project: scope, status: status() || "all" })
       const url = URL.createObjectURL(new Blob([text], { type: "application/x-ndjson" }))
       const link = document.createElement("a")
       link.href = url
-      link.download = `knowledge-${project() || "all"}.jsonl`
+      link.download = `knowledge-${scope || "all"}.jsonl`
       link.click()
       URL.revokeObjectURL(url)
     } catch (reason) {
@@ -63,7 +63,7 @@ export default function KnowledgePage() {
     <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-6xl">
         <PageHeader eyebrow="Fleet knowledge" title="Remember what matters." description="Useful lessons, with the context and sources to trust them. Agents read these before they start work.">
-          <Button type="button" variant="outline" class="h-10 px-4" onClick={() => void download()}>Export JSONL ↓</Button>
+          <Button type="button" variant="outline" class="h-10 px-4" title="Every project, with the status filter applied" onClick={() => void download(undefined)}>Export all ↓</Button>
           <Button type="button" class="h-10 px-4" variant={adding() ? "outline" : "default"} aria-expanded={adding()} onClick={() => setAdding((open) => !open)}>
             {adding() ? "Close" : "＋ Add a fact"}
           </Button>
@@ -163,7 +163,9 @@ export default function KnowledgePage() {
             <Show when={project()} fallback={<p class="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-cream-dim">Pick a project to see its facts.</p>}>
               <div class="mb-3 flex items-center justify-between text-[13px] text-cream-dim">
                 <h2><span class="font-semibold text-cream">{rows().length}{facts.hasNextPage ? "+" : ""} facts</span> · {project()}{topic() ? ` / ${topic()}` : ""}</h2>
-                <span>Newest first · {status() || "any status"}</span>
+                <span class="flex items-center gap-3">Newest first · {status() || "any status"}
+                  <button type="button" class="text-brass hover:underline" onClick={() => void download(project())}>Export {project()} ↓</button>
+                </span>
               </div>
               <Show when={facts.isError}><p class="text-sm text-rust">{getErrorMessage(facts.error, "Could not load facts.")}</p></Show>
               <Show when={facts.isSuccess && rows().length === 0}>

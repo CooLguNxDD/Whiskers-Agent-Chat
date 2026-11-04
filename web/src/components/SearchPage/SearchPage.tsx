@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
 import { useNavigate, useSearchParams } from "@solidjs/router"
 import { getAttachment } from "@/api/fleet"
 import { SEARCH_KINDS, type SearchHit, type SearchKind, type SearchMode, type SearchQuery } from "@/api/types"
@@ -60,7 +60,13 @@ export default function SearchPage() {
     })
   }
 
-  if (q().trim()) queueMicrotask(() => run())
+  // Follow ?q= / ?channel= when the URL changes (e.g. "All history" from chat), including their removal.
+  createEffect(on(() => [param(params.q), param(params.channel)] as const, ([nextQ, nextChannel]) => {
+    setQ(nextQ)
+    setChannel(nextChannel)
+    if (nextQ.trim()) run()
+    else setSubmitted(null)
+  }))
 
   return (
     <div class="page min-h-0 flex-1 overflow-y-auto">

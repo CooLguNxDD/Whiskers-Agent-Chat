@@ -85,9 +85,10 @@ export function avatarHue(name: string): number {
 /** Up to two letters: "fleet-librarian" → "FL", "cat-3" → "C3", "claude" → "CL". */
 export function initials(name: string): string {
   const parts = name.split(/[-_.\s]+/).filter(Boolean)
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+  // Array.from splits by code point, so an emoji or astral character stays whole.
+  if (parts.length >= 2) return (Array.from(parts[0])[0] + Array.from(parts[1])[0]).toUpperCase()
   const word = parts[0] ?? "?"
-  return word.slice(0, 2).toUpperCase()
+  return Array.from(word).slice(0, 2).join("").toUpperCase()
 }
 
 /** Agent handles look like bots; used only to pick a badge, never for permissions. */

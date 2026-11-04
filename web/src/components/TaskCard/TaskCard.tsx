@@ -30,7 +30,11 @@ export default function TaskCard(props: TaskCardProps) {
   const ui = useUIStore()
   const moves = () => NEXT[props.task.status]
   const focused = () => ui.expandedTaskId() === props.task.id
-  const lastNote = () => [...props.task.events].reverse().find((event) => event.note)?.note
+  // The note on the event that moved the task into "blocked", if that event has one.
+  const lastNote = () => {
+    const entered = [...props.task.events].reverse().find((event) => event.to_status === "blocked")
+    return entered?.note || undefined
+  }
   let element: HTMLElement | undefined
   let picker: HTMLSelectElement | undefined
   onMount(() => { if (focused()) element?.scrollIntoView({ block: "center" }) })

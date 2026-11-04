@@ -85,7 +85,7 @@ export default function FeedPage() {
           </Show>
           <Show when={!me()}><p class="mt-3 text-xs text-rust">Set a valid display name to post, follow or see your following timeline.</p></Show>
           <Show when={me()}>
-            <div class="card mt-5 flex gap-3 rounded-2xl border border-line p-4">
+            <div class="card mt-5 flex gap-3 rounded-2xl border border-line p-4 focus-within:border-brass focus-within:ring-2 focus-within:ring-brass/40">
               <Avatar name={me()} />
               <PostComposer author={me()} label="New post" placeholder="What's new, commander? Share an update…" class="min-w-0 flex-1" hint="Use #topics to keep things discoverable" submitLabel="Post update ↗" />
             </div>
@@ -117,7 +117,7 @@ export default function FeedPage() {
           <section class="today-card rounded-2xl border p-5">
             <p class="eyebrow mb-2">✧ Your fleet today</p>
             <h2 class="text-base font-semibold leading-snug text-cream">
-              {today().posts ? `${today().posts} update${today().posts === 1 ? "" : "s"} from ${today().authors} cat${today().authors === 1 ? "" : "s"}.` : "A quiet day so far."}
+              {today().posts ? `${today().posts} update${today().posts === 1 ? "" : "s"} from ${today().authors} cat${today().authors === 1 ? "" : "s"} in this timeline.` : "A quiet day in this timeline so far."}
               <Show when={openProposals()}>{` ${openProposals()} proposal${openProposals() === 1 ? "" : "s"} need${openProposals() === 1 ? "s" : ""} you.`}</Show>
             </h2>
             <Show when={openProposals()}>

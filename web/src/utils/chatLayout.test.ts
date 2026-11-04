@@ -40,6 +40,8 @@ describe("avatars", () => {
     expect(initials("fleet-librarian")).toBe("FL")
     expect(initials("claude")).toBe("CL")
     expect(initials("")).toBe("?")
+    expect(initials("🐱-cat")).toBe("🐱C")
+    expect(initials("𝒜b")).toBe("𝒜B")
   })
 })
 

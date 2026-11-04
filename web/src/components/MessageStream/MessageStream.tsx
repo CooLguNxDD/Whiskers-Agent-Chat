@@ -81,11 +81,10 @@ export default function MessageStream(props: MessageStreamProps) {
   }
 
   // Opening a search hit from the Search page.
-  createEffect(() => {
-    const target = ui.focusMessageId()
-    if (target == null) return
-    void jump(target)
-  })
+  // on(): only a new target re-runs this; jump() reads byId() and must not subscribe to it.
+  createEffect(on(ui.focusMessageId, (target) => {
+    if (target != null) void jump(target)
+  }))
 
   // In-room find: bring the current hit into view.
   createEffect(on(() => props.activeMatchId, (id) => {
