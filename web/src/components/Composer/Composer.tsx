@@ -34,6 +34,9 @@ export default function Composer(props: ComposerProps) {
     queueMicrotask(() => box?.focus())
   })
 
+  // Shrink the auto-grown box back once the draft is cleared.
+  createEffect(() => { if (text() === "" && box) box.style.height = "" })
+
   const send = createMutation(() => ({
     mutationFn: postMessage,
     onSuccess: async (_result, submitted) => {
@@ -66,27 +69,34 @@ export default function Composer(props: ComposerProps) {
 
   return (
     <form
-      class="border-t border-line bg-ink-sunken/80 p-3"
+      class="composer px-3 pb-3 pt-1 sm:px-5"
       onSubmit={(event) => { event.preventDefault(); if (canSend()) submit() }}
     >
-      <div class="mx-auto flex max-w-3xl flex-col gap-2">
+      <div class="composer-card mx-auto flex max-w-5xl flex-col rounded-2xl border border-line bg-ink-raised/95 shadow-lg backdrop-blur focus-within:border-brass">
         {props.replyTo && (
-          <div class="flex items-center justify-between text-xs text-cream-dim">
-            <span>Replying to {props.replyTo.author}</span>
+          <div class="flex items-center gap-2 border-b border-line px-3 py-1.5 text-xs text-cream-dim">
+            <span class="h-4 w-0.5 rounded bg-brass" aria-hidden="true" />
+            <span class="min-w-0 flex-1 truncate">Replying to <span class="font-semibold text-cream">{props.replyTo.author}</span> · {props.replyTo.text.slice(0, 120)}</span>
             <button type="button" class="text-brass" onClick={props.onClearReply} disabled={Boolean(unconfirmed())}>Cancel</button>
           </div>
         )}
         <Textarea
           ref={(element) => { box = element }}
+          class="max-h-60 min-h-12 resize-none border-0 bg-transparent px-3.5 py-3 focus-visible:outline-none"
+          rows={1}
           value={text()}
           readOnly={Boolean(unconfirmed()) || send.isPending || archived()}
           aria-label="Message"
           placeholder={
             archived()
               ? `#${ui.activeChannel()} is archived and read-only`
-              : nameOk() ? `Message #${ui.activeChannel()}` : "Set a display name before posting"
+              : nameOk() ? `Message #${ui.activeChannel()}` : "Set a display name (top right) before posting"
           }
-          onInput={(event) => setText(event.currentTarget.value)}
+          onInput={(event) => {
+            setText(event.currentTarget.value)
+            event.currentTarget.style.height = "auto"
+            event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 240)}px`
+          }}
           onKeyDown={(event) => {
             if (event.isComposing || event.key === "Process") return
             if (event.key === "Enter" && !event.shiftKey) {
@@ -95,12 +105,14 @@ export default function Composer(props: ComposerProps) {
             }
           }}
         />
-        <div class="flex items-center justify-between gap-3">
-          <p class="text-xs text-cream-dim">Enter to send · Shift+Enter for a new line</p>
-          <Button type="submit" disabled={!canSend()}>{send.isPending ? "Sending…" : unconfirmed() ? "Retry original send" : "Send"}</Button>
+        <div class="flex items-center justify-between gap-3 px-3 pb-2">
+          <p class="hidden text-[11px] text-cream-dim sm:block"><kbd class="kbd">Enter</kbd> send · <kbd class="kbd">Shift Enter</kbd> new line · <kbd class="kbd">Ctrl K</kbd> find</p>
+          <Button type="submit" size="sm" class="ml-auto whitespace-nowrap rounded-full px-4" disabled={!canSend()}>{send.isPending ? "Sending…" : unconfirmed() ? "Retry original send" : "Send ➤"}</Button>
         </div>
-        {error() && <p class="text-sm text-rust">{error()}</p>}
-        {unconfirmed() && !send.isPending && <p class="text-sm text-cream-dim">Confirm the original send to #{unconfirmed()!.channel} before editing this draft.</p>}
+      </div>
+      <div class="mx-auto max-w-5xl">
+        {error() && <p class="mt-1 text-sm text-rust">{error()}</p>}
+        {unconfirmed() && !send.isPending && <p class="mt-1 text-sm text-cream-dim">Confirm the original send to #{unconfirmed()!.channel} before editing this draft.</p>}
       </div>
     </form>
   )

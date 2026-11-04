@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest"
 import { render } from "solid-js/web"
 import Appearance from "@/components/Appearance"
-import { prefs } from "@/store/prefsSlice"
+import { chatBackgrounds, prefs } from "@/store/prefsSlice"
 import { applyAppearance, accents } from "./appearance"
 import { buildRegistry, themeList, themeRegistry, resolveThemeVars } from "./registry"
 
@@ -37,7 +37,7 @@ it("persists identity and appearance together and tolerates blocked storage", ()
   prefs.setDisplayName("ada")
   prefs.setTheme("latte")
   prefs.setAccent("violet")
-  expect(JSON.parse(localStorage.getItem("cat-fleet-prefs")!).state).toEqual({ displayName: "ada", theme: "latte", accent: "violet" })
+  expect(JSON.parse(localStorage.getItem("cat-fleet-prefs")!).state).toEqual({ displayName: "ada", theme: "latte", accent: "violet", chatBackground: "paws" })
   vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("blocked") })
   expect(() => prefs.setTheme("paper")).not.toThrow()
   expect(prefs.theme()).toBe("paper")
@@ -70,7 +70,10 @@ it("renders registry choices and applies picker selections", () => {
   document.body.append(container)
   const close = vi.fn()
   dispose = render(() => <Appearance open={true} onOpenChange={close} />, container)
-  expect(container.querySelectorAll("button[aria-pressed]").length).toBe(themeList.length + accents.length)
+  expect(container.querySelectorAll("button[aria-pressed]").length).toBe(themeList.length + accents.length + chatBackgrounds.length)
+  const dots = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "dots") as HTMLButtonElement
+  dots.click()
+  expect(prefs.chatBackground()).toBe("dots")
   const cyan = container.querySelector('[aria-label="cyan accent"]') as HTMLButtonElement
   cyan.click()
   expect(prefs.accent()).toBe("cyan")

@@ -3,6 +3,7 @@ import { Modal } from "@/components/ui/dialog"
 import { usePrefs } from "@/store"
 import { themeList } from "@/themes/registry"
 import { accents } from "@/themes/appearance"
+import { chatBackgrounds } from "@/store/prefsSlice"
 
 /** Theme previews and accent swatches with immediate, device-local persistence. */
 export default function Appearance(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -30,6 +31,17 @@ export default function Appearance(props: { open: boolean; onOpenChange: (open: 
           class="theme-choice flex flex-col items-center gap-1 rounded-lg border border-line p-2 text-xs capitalize">
           <span class="size-7 rounded-full" style={{ background: `var(--accent-${accent})` }} aria-hidden="true" />
           {accent}
+        </button>}</For>
+      </div>
+    </fieldset>
+    <fieldset class="mt-5">
+      <legend class="mb-3 text-sm text-cream-dim">Chat background</legend>
+      <div class="grid grid-cols-3 gap-3 sm:grid-cols-5">
+        <For each={chatBackgrounds}>{bg => <button type="button" aria-pressed={prefs.chatBackground() === bg}
+          onClick={() => prefs.setChatBackground(bg)}
+          class="theme-choice flex flex-col items-center gap-1 rounded-lg border border-line p-2 text-xs capitalize">
+          <span class="chat-surface block h-12 w-full rounded-md border border-line" data-bg={bg} aria-hidden="true" />
+          {bg}
         </button>}</For>
       </div>
     </fieldset>

@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js"
-import { useNavigate } from "@solidjs/router"
+import { useNavigate, useSearchParams } from "@solidjs/router"
 import { getAttachment } from "@/api/fleet"
 import { SEARCH_KINDS, type SearchHit, type SearchKind, type SearchMode, type SearchQuery } from "@/api/types"
 import { selectClass, Snippet } from "@/components/RichText"
@@ -19,9 +19,12 @@ const PAGE = 20
 export default function SearchPage() {
   const status = useSearchStatus()
   const channels = useChannels()
-  const [q, setQ] = createSignal("")
+  // "All history" from the chat find bar arrives as ?q=…&channel=…
+  const [params] = useSearchParams()
+  const param = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] : value) ?? ""
+  const [q, setQ] = createSignal(param(params.q))
   const [kind, setKind] = createSignal<SearchKind | "">("")
-  const [channel, setChannel] = createSignal("")
+  const [channel, setChannel] = createSignal(param(params.channel))
   const [author, setAuthor] = createSignal("")
   const [since, setSince] = createSignal("")
   const [mode, setMode] = createSignal<SearchMode>("bm25")
@@ -54,6 +57,8 @@ export default function SearchPage() {
       offset,
     })
   }
+
+  if (q().trim()) queueMicrotask(() => run())
 
   return (
     <div class="min-h-0 flex-1 overflow-y-auto p-4">

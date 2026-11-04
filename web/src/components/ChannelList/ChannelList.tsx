@@ -50,9 +50,12 @@ export default function ChannelList() {
     setExisting(null)
   }
 
+  const [filter, setFilter] = createSignal("")
   const visible = () =>
     (channels.data?.channels ?? []).filter(
-      (channel) => channel.state !== "archived" || showArchived() || channel.name === ui.activeChannel(),
+      (channel) =>
+        (channel.state !== "archived" || showArchived() || channel.name === ui.activeChannel()) &&
+        (!filter().trim() || channel.name.includes(filter().trim().toLowerCase()) || channel.name === ui.activeChannel()),
     )
 
   // The picker is uncontrolled while a change is in flight; put it back on failure.
@@ -92,37 +95,48 @@ export default function ChannelList() {
   }
 
   return (
-    <aside class="flex min-h-0 flex-col border-b border-line md:border-b-0 md:border-r">
-      <div class="flex items-center justify-between px-3 py-3">
-        <h2 class="text-xs uppercase tracking-wide text-cream-dim">Channels</h2>
-        <Button type="button" size="sm" variant="outline" onClick={() => setOpen(true)}>New</Button>
+    <aside class="sidebar flex min-h-0 flex-col border-b border-line md:border-b-0 md:border-r">
+      <div class="flex items-center justify-between px-4 pb-2 pt-4">
+        <h2 class="text-[11px] font-semibold uppercase tracking-wider text-cream-dim">Channels</h2>
+        <Button type="button" size="sm" variant="outline" class="h-7 rounded-full px-2.5" onClick={() => setOpen(true)} aria-label="New channel">＋ New</Button>
+      </div>
+      <div class="hidden px-3 pb-2 md:block">
+        <Input
+          class="h-8 rounded-full text-xs"
+          placeholder="Filter channels"
+          aria-label="Filter channels"
+          value={filter()}
+          onInput={(event) => setFilter(event.currentTarget.value)}
+        />
       </div>
       <Show when={channels.isPending}><p class="px-3 text-sm text-cream-dim">Loading…</p></Show>
       <Show when={channels.isError}><p class="px-3 text-sm text-rust">{getErrorMessage(channels.error, "Could not load channels.")}</p></Show>
-      <ul class="flex gap-2 overflow-x-auto px-3 pb-3 md:flex-col md:overflow-visible">
+      <ul class="flex gap-1 overflow-x-auto px-2 pb-3 md:min-h-0 md:flex-1 md:flex-col md:overflow-y-auto md:overflow-x-visible">
         <For each={visible()}>
           {(channel) => (
             <li>
               <button
                 type="button"
                 class={cn(
-                  "w-full rounded-lg px-2 py-1.5 text-left text-sm",
-                  channel.name === ui.activeChannel() ? "bg-ink-raised text-brass" : "text-cream hover:bg-ink-raised",
+                  "channel-row flex w-full min-w-0 items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-left text-sm transition",
+                  channel.name === ui.activeChannel() ? "is-active font-medium text-cream" : "text-cream-dim hover:bg-ink-raised hover:text-cream",
                   channel.state === "archived" && "opacity-60",
                 )}
-                title={channel.state_note || undefined}
+                aria-current={channel.name === ui.activeChannel() ? "page" : undefined}
+                title={channel.topic ? `${channel.name} — ${channel.topic}${channel.state_note ? ` (${channel.state_note})` : ""}` : channel.state_note || channel.name}
                 onClick={() => select(channel.name)}
               >
-                #{channel.name}
+                <span class="text-cream-dim" aria-hidden="true">#</span>
+                <span class="min-w-0 flex-1 truncate">{channel.name}</span>
                 <Show when={channel.state !== "active"}>
-                  <span class="ml-1 text-xs text-cream-dim" data-state={channel.state}>{channel.state}</span>
+                  <span class="state-chip shrink-0 rounded-full px-1.5 text-[9px] font-semibold uppercase tracking-wide" data-state={channel.state}>{channel.state}</span>
                 </Show>
               </button>
             </li>
           )}
         </For>
       </ul>
-      <div class="mt-auto flex flex-col gap-2 border-t border-line px-3 py-3 text-xs">
+      <div class="mt-auto hidden flex-col gap-2 border-t md:flex border-line px-4 py-3 text-xs">
         <label class="flex items-center gap-2 text-cream-dim">
           <input type="checkbox" checked={showArchived()} onChange={(event) => setShowArchived(event.currentTarget.checked)} />
           Show archived
