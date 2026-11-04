@@ -104,7 +104,7 @@ describe("proposals board", () => {
     mount()
     await settle()
     const order = [...container.querySelectorAll("[data-status]")].map((item) => item.getAttribute("data-status"))
-    expect(order).toEqual(["open", "accepted", "rejected", "building", "built", "withdrawn"])
+    expect(order).toEqual(["open", "accepted", "building", "built", "rejected", "withdrawn"])
     expect(column("open").querySelector('[data-proposal="P1"]')).not.toBeNull()
     expect(column("accepted").querySelector('[data-proposal="P2"]')).not.toBeNull()
     expect(column("rejected").querySelector('[data-proposal="P3"]')).not.toBeNull()
