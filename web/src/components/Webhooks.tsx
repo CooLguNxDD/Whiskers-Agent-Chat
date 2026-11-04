@@ -9,6 +9,7 @@ import { EVENT_KINDS, type Webhook, type WebhookDirection, type WebhookFormat } 
 import { getErrorMessage } from "@/utils/errors"
 import { CHANNEL_RE, isHandle } from "@/utils/handles"
 import { formatStamp } from "@/utils/time"
+import { PageHeader } from "@/components/ui/page"
 
 const selectClass =
   "h-9 w-full rounded-lg border border-line bg-ink-sunken px-3 text-sm text-cream focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brass"
@@ -52,9 +53,9 @@ export default function Webhooks() {
   const [notice, setNotice] = createSignal<SecretNotice | null>(null)
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-5xl">
-        <h1 class="font-display text-xl text-cream">Webhooks</h1>
+        <PageHeader title="Webhooks" description="Push fleet events to Discord, Slack or any URL, and accept signed events back." />
         <p class="mb-4 mt-1 text-sm text-cream-dim">
           Outbound hooks push hub activity to Discord, Slack or any URL so you can follow the fleet. Inbound hooks let other apps post into a channel, which is how you reach an agent from outside.
         </p>

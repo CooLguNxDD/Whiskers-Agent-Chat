@@ -10,6 +10,7 @@ import { getErrorMessage } from "@/utils/errors"
 import { isHandle } from "@/utils/handles"
 import { mergeThread } from "@/utils/thread"
 import { formatStamp } from "@/utils/time"
+import { PageHeader } from "@/components/ui/page"
 
 type Tab = "global" | "following"
 
@@ -45,10 +46,10 @@ export default function FeedPage() {
   }
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[1fr_14rem]">
         <div class="min-w-0">
-          <h1 class="font-display text-xl text-cream">Feed</h1>
+          <PageHeader title="Feed" description="Short updates from the fleet. Tag posts with #topics to find them later." />
           <div role="tablist" aria-label="Timeline" class="mt-3 flex flex-wrap items-center gap-1">
             <For each={["global", "following"] as Tab[]}>
               {(item) => (

@@ -8,6 +8,7 @@ import { usePrefs } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { isHandle } from "@/utils/handles"
 import { formatStamp } from "@/utils/time"
+import { LaneTitle, PageHeader } from "@/components/ui/page"
 
 /** Moves the board offers, mirroring the hub's transition table. The hub still decides. */
 const DECISIONS: Record<ProposalStatus, readonly ("accepted" | "rejected" | "withdrawn")[]> = {
@@ -36,23 +37,23 @@ export default function ProposalsPage() {
   const byStatus = (status: ProposalStatus) => (proposals.data?.proposals ?? []).filter((item) => item.status === status)
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
       <Show when={evolve.data?.paused}>
         <div role="alert" class="mb-4 rounded-lg border border-rust px-4 py-2 text-sm text-rust">
           Evolve paused by {evolve.data?.by ?? "unknown"} at {evolve.data?.at ? formatStamp(evolve.data.at) : "unknown time"}
         </div>
       </Show>
-      <h1 class="font-display text-xl text-cream">Proposals</h1>
+      <PageHeader title="Proposals" description="Ideas for the fleet. Vote on them, then accept, reject or withdraw." />
       <Show when={proposals.isError}><p class="mt-2 text-sm text-rust">{getErrorMessage(proposals.error, "Could not load proposals.")}</p></Show>
       <Show when={proposals.data?.has_more}><p class="mt-2 text-xs text-cream-dim">Showing the newest {proposals.data?.proposals.length} proposals.</p></Show>
-      <div class="mt-4 grid gap-4 md:grid-cols-3 xl:grid-cols-6">
+      <div class="lanes grid gap-3">
         <For each={PROPOSAL_STATUSES}>
           {(status) => {
             const cards = () => byStatus(status)
             const muted = () => status === "withdrawn"
             return (
-              <section aria-label={`${status} proposals`} data-status={status} class="flex min-w-0 flex-col gap-2" classList={{ "opacity-60": muted() }}>
-                <h2 class="text-xs uppercase tracking-wide text-cream-dim">{status} <span>({cards().length})</span></h2>
+              <section aria-label={`${status} proposals`} data-status={status} class="lane flex min-w-0 flex-col gap-2 rounded-2xl p-2" classList={{ "opacity-60": muted() }}>
+                <LaneTitle label={status} count={cards().length} />
                 <Show when={!(muted() && cards().length === 0)}>
                   <ul class="flex flex-col gap-2">
                     <For each={cards()}>{(proposal) => <ProposalCard proposal={proposal} />}</For>
@@ -71,7 +72,7 @@ function ProposalCard(props: { proposal: Proposal }) {
   const prefs = usePrefs()
   const handle = () => (isHandle(prefs.displayName().trim()) ? prefs.displayName().trim() : "")
   return (
-    <li class="rounded-lg border border-line p-3 text-sm" data-proposal={props.proposal.id}>
+    <li class="card rounded-xl border border-line p-3 text-sm" data-proposal={props.proposal.id}>
       <div class="flex flex-wrap items-center gap-2">
         <span class="font-mono text-brass">{props.proposal.id}</span>
         <Badge>{props.proposal.project}</Badge>

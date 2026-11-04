@@ -9,6 +9,7 @@ import { usePrefs } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { CHANNEL_RE, isHandle } from "@/utils/handles"
 import { formatStamp } from "@/utils/time"
+import { PageHeader } from "@/components/ui/page"
 
 const selectClass =
   "h-9 w-full rounded-lg border border-line bg-ink-sunken px-3 text-sm text-cream focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brass"
@@ -57,9 +58,9 @@ export default function RelayPage() {
   const current = () => selected() ?? relays.data?.relays[0]?.name ?? null
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-6xl">
-        <h1 class="font-display text-xl text-cream">Relays</h1>
+        <PageHeader title="Relays" />
         <p class="mb-4 mt-1 text-sm text-cream-dim">
           A relay bridges a Discord, Slack or Telegram bot to the fleet. Its bindings, routes and allowlists live here and take effect on the bot's next heartbeat, without a restart. Run it with <code>cat-fleet-relay --platform … --name …</code> and its token.
         </p>

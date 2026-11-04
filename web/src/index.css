@@ -12,7 +12,8 @@
   --color-ink-sunken: var(--theme-bg-sunken);
   --color-line: var(--theme-border);
   --color-cream: var(--theme-fg);
-  --color-cream-dim: var(--theme-fg-muted);
+  /* Secondary text pulled ~15% toward the body colour for contrast on tinted panels. */
+  --color-cream-dim: color-mix(in oklab, var(--theme-fg-muted) 85%, var(--theme-fg));
   --color-brass: var(--selected-accent);
   --color-brass-deep: var(--selected-accent-soft);
   --color-moss: var(--theme-ok);
@@ -37,10 +38,13 @@ body {
   font-family: var(--font-sans);
 }
 
-button,
-input,
-textarea {
-  font: inherit;
+/* Layered so Tailwind's text-* utilities still size buttons and inputs. */
+@layer base {
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
 }
 
 ::selection {
@@ -66,6 +70,7 @@ textarea {
   }
 }
 
+@layer components {
 /* ── Chat redesign ─────────────────────────────────────────────── */
 
 .topbar {
@@ -73,19 +78,15 @@ textarea {
   backdrop-filter: blur(8px);
 }
 .brand-mark { background: color-mix(in oklab, var(--selected-accent) 22%, var(--theme-bg-elevated)); }
-.nav-tabs { scrollbar-width: none; }
-.nav-tab.is-active {
-  background: color-mix(in oklab, var(--selected-accent) 18%, var(--theme-bg-elevated));
-  box-shadow: inset 0 -2px 0 var(--selected-accent);
-}
 
-.sidebar, .roster { background: color-mix(in oklab, var(--theme-bg-sunken) 70%, var(--theme-bg)); }
+.roster { background: color-mix(in oklab, var(--theme-bg-sunken) 55%, var(--theme-bg)); }
 .channel-row.is-active {
   background: color-mix(in oklab, var(--selected-accent) 16%, var(--theme-bg-elevated));
   box-shadow: inset 2px 0 0 var(--selected-accent);
 }
 .roster-card { transition: background-color 120ms ease; }
 .roster-card:hover { background: var(--theme-bg-elevated); }
+.roster-card[data-state="away"] { opacity: 0.75; }
 
 .state-chip { background: var(--theme-bg-elevated); color: var(--theme-fg-muted); border: 1px solid var(--theme-border); }
 .state-chip[data-state="paused"]  { color: var(--theme-warn);   background: var(--theme-warn-soft);   border-color: transparent; }
@@ -157,20 +158,114 @@ textarea {
 }
 .author-name { color: oklch(from var(--theme-fg) l calc(c + 0.06) var(--avatar-hue)); }
 
-/* Bubbles */
-.bubble-other {
-  background: color-mix(in oklab, var(--theme-card) 78%, var(--theme-bg));
-  color: var(--theme-fg);
-  border: 1px solid color-mix(in oklab, var(--theme-border) 70%, transparent);
+/* Messages: one left-aligned timeline. Humans get a tinted card, agents a plain row. */
+.msg { animation: fade-in 140ms ease-out; border-radius: 12px; }
+.msg:hover { background: color-mix(in oklab, var(--theme-bg-elevated) 45%, transparent); }
+.msg.is-marked { background: color-mix(in oklab, var(--selected-accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--selected-accent); }
+.human-card {
+  background: color-mix(in oklab, var(--selected-accent) 9%, var(--theme-bg-elevated));
+  border: 1px solid color-mix(in oklab, var(--selected-accent) 22%, var(--theme-border));
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--selected-accent) 70%, transparent);
 }
-.bubble-mine {
-  background: color-mix(in oklab, var(--selected-accent) 24%, var(--theme-bg-elevated));
-  color: var(--theme-fg);
-  border: 1px solid color-mix(in oklab, var(--selected-accent) 35%, transparent);
+.msg.is-human:hover { background: transparent; }
+.msg-text { color: var(--theme-fg); }
+.role-tag {
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--color-cream-dim);
+  background: color-mix(in oklab, var(--theme-bg-sunken) 60%, transparent);
 }
-.msg.is-marked .bubble { box-shadow: 0 0 0 2px var(--selected-accent); }
-.msg { animation: fade-in 140ms ease-out; }
-.msg:hover .bubble-other { border-color: var(--theme-border-strong); }
+.status-chip {
+  display: inline-block;
+  border-radius: 6px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  font-weight: 600;
+  line-height: 1.6;
+  vertical-align: baseline;
+}
+.status-chip[data-tone="ok"]   { color: var(--theme-ok);     background: var(--theme-ok-soft); }
+.status-chip[data-tone="bad"]  { color: var(--theme-danger); background: var(--theme-danger-soft); }
+.status-chip[data-tone="warn"] { color: var(--theme-warn);   background: var(--theme-warn-soft); }
+.status-chip[data-tone="info"] { color: var(--theme-cyan);   background: color-mix(in oklab, var(--theme-cyan) 16%, transparent); }
+:root[data-light="true"] .status-chip[data-tone="ok"]   { color: color-mix(in oklab, var(--theme-ok) 70%, black); }
+:root[data-light="true"] .status-chip[data-tone="warn"] { color: color-mix(in oklab, var(--theme-warn) 60%, black); }
+:root[data-light="true"] .status-chip[data-tone="bad"]  { color: color-mix(in oklab, var(--theme-danger) 80%, black); }
+.facts-card {
+  max-width: 34rem;
+  background: color-mix(in oklab, var(--theme-bg-elevated) 80%, transparent);
+  border: 1px solid var(--theme-border);
+}
+.log-fold { border: 1px solid var(--theme-border); background: color-mix(in oklab, var(--theme-bg-elevated) 70%, transparent); }
+.log-fold > summary { list-style: none; color: var(--color-cream-dim); }
+.log-fold > summary::-webkit-details-marker { display: none; }
+.log-fold > summary:hover { color: var(--theme-fg); }
+.log-fold[open] > summary .log-caret { display: inline-block; transform: rotate(90deg); }
+.log-fold > pre { border-radius: 0 0 8px 8px; border-width: 1px 0 0; }
+.action-btn {
+  border: 1px solid color-mix(in oklab, var(--selected-accent) 45%, var(--theme-border));
+  color: var(--selected-accent-glow, var(--selected-accent));
+  background: color-mix(in oklab, var(--selected-accent) 10%, transparent);
+}
+.action-btn:hover { background: color-mix(in oklab, var(--selected-accent) 20%, transparent); }
+
+/* Header tabs and small controls */
+.tab {
+  position: relative;
+  border-radius: 8px 8px 0 0;
+  padding: 6px 10px 10px;
+  font-size: 0.875rem;
+  color: var(--color-cream-dim);
+}
+.tab:hover { color: var(--theme-fg); }
+.tab[aria-selected="true"] { color: var(--theme-fg); font-weight: 600; }
+.tab[aria-selected="true"]::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px;
+  background: var(--selected-accent);
+}
+.tab-count, .count-pill {
+  margin-left: 6px;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 600;
+  background: color-mix(in oklab, var(--selected-accent) 18%, var(--theme-bg-elevated));
+  color: var(--theme-fg);
+}
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 2rem; height: 2rem; border-radius: 8px; padding: 0 6px;
+  color: var(--color-cream-dim);
+}
+.icon-btn:hover, .icon-btn[aria-pressed="true"] { background: var(--theme-bg-elevated); color: var(--theme-fg); }
+.icon-btn:focus-visible { outline: 2px solid var(--selected-accent); outline-offset: 1px; }
+.side-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-cream-dim); }
+
+/* App shell */
+.app-sidebar { background: var(--theme-bg-sunken); }
+.nav-item.is-active { background: color-mix(in oklab, var(--selected-accent) 16%, var(--theme-bg-elevated)); }
+.profile-card { background: var(--theme-bg-elevated); }
+
+/* Fleet panel states */
+.presence-dot { border-color: var(--theme-bg-sunken); background: var(--theme-fg-subtle, var(--theme-border)); }
+.presence-dot[data-state="working"], .presence-dot[data-state="claimed"] { background: var(--theme-ok); }
+.presence-dot[data-state="blocked"] { background: var(--theme-warn); }
+.presence-dot[data-state="idle"] { background: var(--theme-cyan); }
+.fleet-state { background: var(--theme-bg-elevated); color: var(--color-cream-dim); }
+.fleet-state[data-state="working"], .fleet-state[data-state="claimed"] { background: var(--theme-ok-soft); color: var(--theme-ok); }
+.fleet-state[data-state="blocked"] { background: var(--theme-warn-soft); color: var(--theme-warn); }
+.fleet-state[data-state="idle"] { background: color-mix(in oklab, var(--theme-cyan) 16%, transparent); color: var(--theme-cyan); }
+:root[data-light="true"] .fleet-state[data-state="working"], :root[data-light="true"] .fleet-state[data-state="claimed"] { color: color-mix(in oklab, var(--theme-ok) 65%, black); }
+:root[data-light="true"] .fleet-state[data-state="blocked"] { color: color-mix(in oklab, var(--theme-warn) 55%, black); }
+:root[data-light="true"] .fleet-state[data-state="idle"] { color: color-mix(in oklab, var(--theme-cyan) 60%, black); }
+.task-mini { background: var(--theme-bg-elevated); }
+.state-option.is-selected { border-color: var(--selected-accent); background: color-mix(in oklab, var(--selected-accent) 8%, transparent); }
 
 .reply-quote {
   border-left-color: var(--selected-accent);
@@ -221,3 +316,28 @@ textarea {
   animation: shimmer 1.2s linear infinite;
 }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* ── Pages ─────────────────────────────────────────────────────── */
+.page { padding: 28px 16px 40px; }
+@media (min-width: 640px) { .page { padding: 32px 36px 48px; } }
+.card, .page :where(.rounded-lg.border.border-line, .rounded-xl.border.border-line) {
+  background: color-mix(in oklab, var(--theme-bg-elevated) 85%, var(--theme-bg));
+  box-shadow: 0 1px 2px color-mix(in oklab, black 12%, transparent);
+}
+:root[data-light="true"] .card, :root[data-light="true"] .page :where(.rounded-lg.border.border-line, .rounded-xl.border.border-line) {
+  background: color-mix(in oklab, white 70%, var(--theme-bg-elevated));
+}
+.page :where(.text-xs.uppercase.tracking-wide) { font-weight: 700; letter-spacing: 0.08em; }
+.lanes { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); align-items: start; }
+.lane { background: color-mix(in oklab, var(--theme-bg-sunken) 60%, transparent); border: 1px solid color-mix(in oklab, var(--theme-border) 50%, transparent); }
+.lane-title { padding-top: 4px; padding-bottom: 4px; }
+.lane-count {
+  min-width: 1.5rem; border-radius: 999px; padding: 0 7px; text-align: center;
+  font-size: 11px; background: var(--theme-bg-elevated); color: var(--theme-fg);
+}
+.lane[data-status="in_progress"] .lane-count { background: var(--theme-ok-soft); color: var(--theme-ok); }
+.lane[data-status="blocked"] .lane-count { background: var(--theme-warn-soft); color: var(--theme-warn); }
+.task-card.is-focused { box-shadow: 0 0 0 2px var(--selected-accent); }
+.task-card details > summary { list-style: none; }
+.task-card details > summary::-webkit-details-marker { display: none; }
+}

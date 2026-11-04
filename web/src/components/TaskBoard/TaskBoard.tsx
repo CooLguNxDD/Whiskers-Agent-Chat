@@ -9,6 +9,7 @@ import { useClaimTask, useCreateTask, useTasks, useUpdateTaskStatus } from "@/ho
 import { usePrefs, useUIStore } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { isHandle } from "@/utils/handles"
+import { LaneTitle, PageHeader } from "@/components/ui/page"
 
 export type TaskBoardProps = Record<string, never>
 const COLUMNS: TaskStatus[] = ["open", "claimed", "in_progress", "blocked", "done", "cancelled"]
@@ -29,11 +30,18 @@ export default function TaskBoard() {
   const [error, setError] = createSignal("")
   const [conflict, setConflict] = createSignal("")
   const rows = () => tasks.data?.tasks ?? []
+  const [composing, setComposing] = createSignal(false)
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
+      <PageHeader title={`Tasks in #${ui.activeChannel()}`} description="Claim work, move it across the board, and see who is on what.">
+        <Button type="button" variant={composing() ? "outline" : "default"} onClick={() => setComposing((open) => !open)} aria-expanded={composing()}>
+          {composing() ? "Close" : "＋ New task"}
+        </Button>
+      </PageHeader>
+      <Show when={composing()}>
       <form
-        class="mx-auto mb-6 grid max-w-3xl gap-2"
+        class="card mb-6 grid max-w-3xl gap-2 rounded-xl border border-line p-4"
         onSubmit={(event) => {
           event.preventDefault()
           setError("")
@@ -54,26 +62,31 @@ export default function TaskBoard() {
                 setDescription("")
                 setAssignee("")
                 setRequestId(crypto.randomUUID())
+                setComposing(false)
               },
               onError: (reason) => setError(getErrorMessage(reason, "The task was not created. Your draft is still here.")),
             },
           )
         }}
       >
-        <h2 class="font-display text-2xl">Tasks in #{ui.activeChannel()}</h2>
+        <h2 class="text-sm font-semibold text-cream">New task</h2>
         <Input aria-label="Title" placeholder="Title" value={title()} onInput={(event) => setTitle(event.currentTarget.value)} maxLength={200} />
         <Textarea aria-label="Description" placeholder="Description" value={description()} onInput={(event) => setDescription(event.currentTarget.value)} />
         <Input aria-label="Assignee" placeholder="Assignee (optional)" value={assignee()} onInput={(event) => setAssignee(event.currentTarget.value)} />
         <div class="flex justify-end"><Button type="submit" disabled={create.isPending}>Add task</Button></div>
         <Show when={error()}><p class="text-sm text-rust">{error()}</p></Show>
       </form>
+      </Show>
       <Show when={conflict()}><p class="mx-auto mb-4 max-w-6xl text-sm text-brass">{conflict()}</p></Show>
       <Show when={tasks.isError}><p class="text-sm text-rust">{getErrorMessage(tasks.error, "Could not load tasks.")}</p></Show>
-      <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div class="lanes grid gap-3">
         <For each={COLUMNS}>
           {(status) => (
-            <section class="flex flex-col gap-2">
-              <h3 class="text-xs uppercase tracking-wide text-cream-dim">{status.replace("_", " ")}</h3>
+            <section class="lane flex min-w-0 flex-col gap-2 rounded-2xl p-2" data-status={status} aria-label={`${status.replace("_", " ")} tasks`}>
+              <LaneTitle label={status.replace("_", " ")} count={rows().filter((task) => task.status === status).length} />
+              <Show when={tasks.isSuccess && rows().every((task) => task.status !== status)}>
+                <p class="px-1 py-3 text-center text-xs text-cream-dim">Nothing here</p>
+              </Show>
               <For each={rows().filter((task) => task.status === status)}>
                 {(task) => (
                   <TaskCard

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { FleetMessage } from "@/api/types"
-import { avatarHue, blockSegments, buildTranscript, findMatches, initials, inlineSegments, isLong } from "./chatLayout"
+import { avatarHue, blockSegments, messageActions, richBlocks, buildTranscript, findMatches, initials, inlineSegments, isLong } from "./chatLayout"
 
 function msg(id: number, author: string, created_at: string, extra: Partial<FleetMessage> = {}): FleetMessage {
   return { id, channel: "fleet", author, text: `m${id}`, reply_to: null, created_at, mentions: [], ...extra }
@@ -78,5 +78,32 @@ describe("find and segments", () => {
   it("collapses long text", () => {
     expect(isLong("a\n".repeat(20))).toBe(true)
     expect(isLong("short")).toBe(false)
+  })
+})
+
+describe("agent formatting", () => {
+  it("turns status words into chips", () => {
+    const segments = inlineSegments("devops.json PASS, hub OK, pod OOMKilled", [])
+    expect(segments.filter((segment) => segment.kind === "status").map((segment) => segment.kind === "status" && segment.tone)).toEqual(["ok", "ok", "bad"])
+  })
+
+  it("lifts three or more key: value lines into a facts card", () => {
+    expect(richBlocks("Summary\nRestarts: 3 in 2 hours\nLast exit: OOMKilled\nMemory limit: 128 MiB\nThanks")).toEqual([
+      { kind: "para", text: "Summary" },
+      { kind: "facts", rows: [
+        { key: "Restarts", value: "3 in 2 hours" },
+        { key: "Last exit", value: "OOMKilled" },
+        { key: "Memory limit", value: "128 MiB" },
+      ] },
+      { kind: "para", text: "Thanks" },
+    ])
+    expect(richBlocks("Note: one\nTwo: two")).toEqual([{ kind: "para", text: "Note: one\nTwo: two" }])
+  })
+
+  it("only links explicit task and proposal references", () => {
+    expect(messageActions("see task #12 and Task #12, proposal P3; usprod P2 is a priority")).toEqual([
+      { kind: "task", id: 12 },
+      { kind: "proposal", id: 3 },
+    ])
   })
 })

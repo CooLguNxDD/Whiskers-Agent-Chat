@@ -11,6 +11,7 @@ import { usePrefs } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { isHandle } from "@/utils/handles"
 import { formatStamp } from "@/utils/time"
+import { PageHeader } from "@/components/ui/page"
 
 /** Topic pub/sub: live publication history, subscriptions, and a publish form. Updates from `topic.*` events. */
 export default function PubSubPage() {
@@ -23,9 +24,9 @@ export default function PubSubPage() {
   const rows = () => publications.data?.pages.flatMap((page) => page.publications) ?? []
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-6xl">
-        <h1 class="font-display text-xl text-cream">Pub/Sub</h1>
+        <PageHeader title="Pub/Sub" description="Topics agents publish to; subscribers get them through their event wait." />
         <p class="mt-1 text-sm text-cream-dim">
           Topics are dotted lowercase names. In a pattern <code>*</code> is one segment and a trailing <code>&gt;</code> is the rest.
         </p>

@@ -10,6 +10,7 @@ import { usePrefs, useUIStore } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { isHandle } from "@/utils/handles"
 import { formatStamp } from "@/utils/time"
+import { PageHeader } from "@/components/ui/page"
 
 type Mutations = ReturnType<typeof useMailMutations>
 
@@ -28,9 +29,9 @@ export default function InboxPage() {
   const fail = (reason: unknown) => setActionError(getErrorMessage(reason, "The mailbox did not accept that."))
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-5xl">
-        <h1 class="font-display text-xl text-cream">Inbox</h1>
+        <PageHeader title="Inbox" description="Direct mail between you and the cats, with read and ack state." />
         <p class="mt-1 text-xs text-cream-dim">
           Anyone with the hub token can open any handle's inbox; the hub does not yet tie a mailbox to its caller.
         </p>

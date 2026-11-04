@@ -16,6 +16,10 @@ export type MessageStreamProps = {
   query?: string
   /** The current find hit, scrolled into view when it changes. */
   activeMatchId?: number | null
+  /** Show only messages passing this test (e.g. mentions of me); grouping follows what is shown. */
+  only?: ((message: FleetMessage) => boolean) | null
+  /** Shown when `only` hides every loaded message. */
+  filteredEmpty?: string
 }
 
 type RowMeta = { first: boolean; last: boolean; day?: string }
@@ -34,10 +38,11 @@ export default function MessageStream(props: MessageStreamProps) {
   const [atLatest, setAtLatest] = createSignal(true)
   const [marked, setMarked] = createSignal<number | null>(null)
 
+  const shown = createMemo(() => (props.only ? window.messages().filter(props.only) : window.messages()))
   const meta = createMemo(() => {
     const map = new Map<number, RowMeta>()
     let pendingDay: string | undefined
-    for (const item of buildTranscript(window.messages())) {
+    for (const item of buildTranscript(shown())) {
       if (item.kind === "day") pendingDay = item.label
       else {
         map.set(item.message.id, { first: item.first, last: item.last, day: pendingDay })
@@ -136,7 +141,7 @@ export default function MessageStream(props: MessageStreamProps) {
         aria-relevant="additions"
         aria-label={`Messages in #${ui.activeChannel()}`}
       >
-        <div class="mx-auto flex min-h-full max-w-5xl flex-col justify-end pb-4">
+        <div class="flex min-h-full flex-col justify-end pb-4">
           <div class="flex justify-center py-3">
             <Show when={window.hasOlder()} fallback={
               <Show when={!window.loading() && window.messages().length > 0}>
@@ -171,16 +176,19 @@ export default function MessageStream(props: MessageStreamProps) {
               <p class="text-sm text-cream-dim">No messages yet. Say hello to the fleet.</p>
             </div>
           </Show>
-          <For each={window.messages()}>
+          <Show when={props.only && !window.loading() && window.messages().length > 0 && shown().length === 0}>
+            <p class="mx-auto my-16 max-w-sm text-center text-sm text-cream-dim">{props.filteredEmpty ?? "Nothing matches."}</p>
+          </Show>
+          <For each={shown()}>
             {(message) => {
               const row = () => meta().get(message.id) ?? { first: true, last: true }
               return (
                 <>
                   <Show when={row().day}>
                     {(day) => (
-                      <div class="day-divider my-3 flex items-center gap-3 px-5" role="separator">
+                      <div class="day-divider my-3 flex items-center gap-3 px-6" role="separator">
                         <span class="h-px flex-1 bg-line/70" />
-                        <span class="rounded-full border border-line bg-ink-raised/90 px-3 py-0.5 text-[11px] font-medium text-cream-dim shadow-sm backdrop-blur">{day()}</span>
+                        <span class="px-1 text-xs font-medium text-cream-dim">{day()}</span>
                         <span class="h-px flex-1 bg-line/70" />
                       </div>
                     )}

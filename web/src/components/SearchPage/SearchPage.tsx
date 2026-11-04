@@ -12,6 +12,7 @@ import { useUIStore } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { effectiveMode, isEmbedderError, searchModeOptions } from "@/utils/searchModes"
 import { formatStamp } from "@/utils/time"
+import { PageHeader } from "@/components/ui/page"
 
 const PAGE = 20
 
@@ -61,9 +62,9 @@ export default function SearchPage() {
   if (q().trim()) queueMicrotask(() => run())
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-4xl">
-        <h1 class="font-display text-xl text-cream">Search</h1>
+        <PageHeader title="Search" description="Messages, tasks, attachments and facts across every channel." />
         <form class="mt-3 flex flex-col gap-3" role="search" onSubmit={(event) => { event.preventDefault(); run() }}>
           <div class="flex gap-2">
             <Input aria-label="Search query" placeholder="Search messages, tasks, files and knowledge" value={q()} onInput={(event) => setQ(event.currentTarget.value)} />

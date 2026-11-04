@@ -104,8 +104,11 @@ export function findMatches(messages: FleetMessage[], query: string): number[] {
     .map((message) => message.id)
 }
 
+export type StatusTone = "ok" | "bad" | "warn" | "info"
+
 export type InlineSegment =
   | { kind: "text"; text: string }
+  | { kind: "status"; text: string; tone: StatusTone }
   | { kind: "mention"; text: string }
   | { kind: "code"; text: string }
   | { kind: "link"; text: string; href: string }
@@ -114,6 +117,7 @@ export type InlineSegment =
 export type BlockSegment =
   | { kind: "para"; text: string }
   | { kind: "codeblock"; text: string; lang: string }
+  | { kind: "facts"; rows: { key: string; value: string }[] }
 
 /** Split on ``` fences. An unclosed fence runs to the end of the message. */
 export function blockSegments(text: string): BlockSegment[] {
@@ -129,10 +133,67 @@ export function blockSegments(text: string): BlockSegment[] {
     if (match[0].length === 0) break
   }
   if (last < text.length) out.push({ kind: "para", text: text.slice(last).replace(/^\n/, "") })
-  return out.filter((segment) => segment.kind === "codeblock" || segment.text.length > 0)
+  return out.filter((segment) => segment.kind !== "para" || segment.text.length > 0)
 }
 
-const INLINE_RE = /(`[^`\n]+`)|(https?:\/\/[^\s<>"')\]]+)|(@[A-Za-z0-9][A-Za-z0-9_-]{0,63})/g
+const FACT_RE = /^\s*(?:[-*•]\s+)?([A-Za-z][\w ./()-]{0,28}?)\s*:\s+(\S.{0,200})$/
+
+/**
+ * Block segments with runs of 3+ `Key: value` lines lifted into a facts card,
+ * so agent status reports read as a table instead of a wall of text.
+ */
+export function richBlocks(text: string): BlockSegment[] {
+  const out: BlockSegment[] = []
+  for (const block of blockSegments(text)) {
+    if (block.kind !== "para") { out.push(block); continue }
+    const lines = block.text.split("\n")
+    let buffer: string[] = []
+    let run: { key: string; value: string }[] = []
+    const flushText = () => { if (buffer.length) out.push({ kind: "para", text: buffer.join("\n") }); buffer = [] }
+    const flushRun = () => {
+      if (run.length >= 3) { flushText(); out.push({ kind: "facts", rows: run }) }
+      else buffer.push(...run.map((row) => `${row.key}: ${row.value}`))
+      run = []
+    }
+    for (const line of lines) {
+      const fact = FACT_RE.exec(line)
+      if (fact && !/^https?$/i.test(fact[1])) run.push({ key: fact[1].trim(), value: fact[2].trim() })
+      else { flushRun(); buffer.push(line) }
+    }
+    flushRun()
+    flushText()
+  }
+  return out.filter((segment) => segment.kind !== "para" || segment.text.trim().length > 0)
+}
+
+/** A code block this many lines or longer starts folded. */
+export const LOG_FOLD_LINES = 8
+
+export type MessageAction = { kind: "task"; id: number } | { kind: "proposal"; id: number }
+
+/** Explicit references only ("task #12", "proposal P3"), so "P2" as a priority never becomes a button. */
+export function messageActions(text: string): MessageAction[] {
+  const seen = new Set<string>()
+  const out: MessageAction[] = []
+  for (const match of text.matchAll(/\btask\s*#(\d+)/gi)) {
+    const key = `t${match[1]}`
+    if (!seen.has(key)) { seen.add(key); out.push({ kind: "task", id: Number(match[1]) }) }
+  }
+  for (const match of text.matchAll(/\bproposal\s+#?P?(\d+)\b/gi)) {
+    const key = `p${match[1]}`
+    if (!seen.has(key)) { seen.add(key); out.push({ kind: "proposal", id: Number(match[1]) }) }
+  }
+  return out.slice(0, 4)
+}
+
+const INLINE_RE = /(`[^`\n]+`)|(https?:\/\/[^\s<>"')\]]+)|(@[A-Za-z0-9][A-Za-z0-9_-]{0,63})|\b(PASS(?:ED)?|OK|SUCCESS|DONE|FAIL(?:ED|URE)?|ERROR|OOMKilled|CrashLoopBackOff|BLOCKED|TIMEOUT|WARN(?:ING)?|PENDING|SKIPPED)\b/g
+
+const STATUS_TONE: Record<string, StatusTone> = {
+  PASS: "ok", PASSED: "ok", OK: "ok", SUCCESS: "ok", DONE: "ok",
+  FAIL: "bad", FAILED: "bad", FAILURE: "bad", ERROR: "bad", OOMKilled: "bad", CrashLoopBackOff: "bad", TIMEOUT: "bad",
+  BLOCKED: "warn", WARN: "warn", WARNING: "warn",
+  PENDING: "info", SKIPPED: "info",
+}
 
 /**
  * Inline segments: `code`, http(s) links, known @mentions, and find-highlights.
@@ -144,8 +205,9 @@ export function inlineSegments(text: string, mentions: string[], query = ""): In
   for (const match of text.matchAll(INLINE_RE)) {
     const start = match.index ?? 0
     if (start > last) raw.push({ kind: "text", text: text.slice(last, start) })
-    const [whole, code, url, mention] = match
+    const [whole, code, url, mention, status] = match
     if (code) raw.push({ kind: "code", text: code.slice(1, -1) })
+    else if (status) raw.push({ kind: "status", text: status, tone: STATUS_TONE[status] ?? "info" })
     else if (url) raw.push({ kind: "link", text: url, href: url })
     else if (mention && mentions.includes(mention.slice(1))) raw.push({ kind: "mention", text: mention })
     else raw.push({ kind: "text", text: whole })
@@ -173,5 +235,7 @@ export function inlineSegments(text: string, mentions: string[], query = ""): In
 
 /** A message this long (chars or lines) starts collapsed. */
 export function isLong(text: string): boolean {
-  return text.length > 900 || text.split("\n").length > 14
+  // Code blocks fold on their own (LOG_FOLD_LINES), so only prose counts here.
+  const prose = text.replace(/```[\s\S]*?(?:```|$)/g, "")
+  return prose.length > 900 || prose.split("\n").length > 14
 }

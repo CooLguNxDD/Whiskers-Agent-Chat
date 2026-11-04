@@ -1,6 +1,5 @@
 import { createEffect, createMemo, createSignal, on, Show } from "solid-js"
 import type { FleetMessage } from "@/api/types"
-import ChannelList from "@/components/ChannelList"
 import Composer from "@/components/Composer"
 import MessageStream from "@/components/MessageStream"
 import AgentRoster from "@/components/AgentRoster"
@@ -9,11 +8,12 @@ import { createMessageWindow } from "@/hooks/useMessages"
 import { usePrefs, useUIStore } from "@/store"
 import { findMatches } from "@/utils/chatLayout"
 import { formatStamp } from "@/utils/time"
-import ChatHeader from "./ChatHeader"
+import ChannelSettings from "./ChannelSettings"
+import ChatHeader, { type StreamFilter } from "./ChatHeader"
 
 export type FleetPageProps = Record<string, never>
 
-/** The room: channels, a header with find-in-room, the live transcript, a composer, and recent cats. */
+/** The room: a header with tabs and find, the live transcript, a composer, and the fleet panel. Channels live in the app sidebar. */
 export default function FleetPage() {
   const ui = useUIStore()
   const prefs = usePrefs()
@@ -24,12 +24,17 @@ export default function FleetPage() {
   const [query, setQuery] = createSignal("")
   const [matchIndex, setMatchIndex] = createSignal(-1)
   const [rosterOpen, setRosterOpen] = createSignal(true)
+  const [settingsOpen, setSettingsOpen] = createSignal(false)
+  const [filter, setFilter] = createSignal<StreamFilter>("all")
+  const me = () => prefs.displayName().trim()
+  const mentionsMe = (message: FleetMessage) => me() !== "" && message.mentions.includes(me())
+  const mentionCount = createMemo(() => window.messages().filter(mentionsMe).length)
 
   const matches = createMemo(() => (findOpen() ? findMatches(window.messages(), query()) : []))
   // A new query starts at the newest hit.
   createEffect(on(query, () => setMatchIndex(matches().length - 1)))
   createEffect(on(() => matches().length, (count) => { if (matchIndex() >= count) setMatchIndex(count - 1) }))
-  createEffect(on(ui.activeChannel, () => { setQuery(""); setMatchIndex(-1) }, { defer: true }))
+  createEffect(on(ui.activeChannel, () => { setQuery(""); setMatchIndex(-1); setFilter("all") }, { defer: true }))
 
   const activeMatchId = () => {
     const index = matchIndex()
@@ -49,14 +54,17 @@ export default function FleetPage() {
 
   return (
     <div
-      class="grid min-h-0 flex-1 grid-cols-1 animate-[fade-in_160ms_ease-out] md:grid-cols-[248px_minmax(0,1fr)]"
-      classList={{ "xl:grid-cols-[248px_minmax(0,1fr)_232px]": rosterOpen() }}
+      class="grid min-h-0 flex-1 grid-cols-1 animate-[fade-in_160ms_ease-out]"
+      classList={{ "xl:grid-cols-[minmax(0,1fr)_300px]": rosterOpen() }}
     >
-      <ChannelList />
       <section class="chat-surface flex min-h-0 min-w-0 flex-col" data-bg={prefs.chatBackground()}>
         <ChatHeader
           channel={active()}
           channelName={ui.activeChannel()}
+          filter={filter()}
+          onFilter={setFilter}
+          mentionCount={mentionCount()}
+          onSettings={() => setSettingsOpen(true)}
           findOpen={findOpen()}
           query={query()}
           matchCount={matches().length}
@@ -86,10 +94,13 @@ export default function FleetPage() {
           onReply={setReplyTo}
           query={findOpen() ? query() : ""}
           activeMatchId={activeMatchId()}
+          only={filter() === "mentions" ? mentionsMe : null}
+          filteredEmpty={me() ? `No one has mentioned @${me()} in the loaded history.` : "Set a display name to see your mentions."}
         />
         <Composer replyTo={replyTo()} onClearReply={() => setReplyTo(null)} />
       </section>
       <Show when={rosterOpen()}><AgentRoster /></Show>
+      <ChannelSettings channel={active()} open={settingsOpen()} onOpenChange={setSettingsOpen} />
     </div>
   )
 }

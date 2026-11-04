@@ -12,6 +12,7 @@ import { usePrefs } from "@/store"
 import { getErrorMessage } from "@/utils/errors"
 import { isHandle } from "@/utils/handles"
 import { formatStamp } from "@/utils/time"
+import { PageHeader } from "@/components/ui/page"
 
 const PROJECT_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
@@ -50,9 +51,9 @@ export default function KnowledgePage() {
   }
 
   return (
-    <div class="min-h-0 flex-1 overflow-y-auto p-4">
+    <div class="page min-h-0 flex-1 overflow-y-auto">
       <div class="mx-auto max-w-6xl">
-        <h1 class="font-display text-xl text-cream">Knowledge</h1>
+        <PageHeader title="Knowledge" description="Durable facts the fleet has learned, by project and topic." />
         <form class="mt-3 flex gap-2" role="search" onSubmit={(event) => { event.preventDefault(); setSubmittedQuery(query().trim()) }}>
           <Input aria-label="Search facts" placeholder="Search active facts" value={query()} onInput={(event) => setQuery(event.currentTarget.value)} />
           <Button type="submit">Search</Button>
