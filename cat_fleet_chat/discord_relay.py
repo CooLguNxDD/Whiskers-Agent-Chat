@@ -224,6 +224,8 @@ PROPOSAL_RE = re.compile(r"\bP[1-9][0-9]{0,17}\b", re.IGNORECASE)
 STEP_RE = re.compile(r"\[(S[0-9]{2,}(?:-[A-Za-z0-9_-]+)?)\]")
 OPTION_RE = re.compile(r"\(([a-e])\)", re.IGNORECASE)
 REF_PREFIX = "cat-fleet-ref:"
+# The ``P<n>:`` prefix of a hub proposal embed title.
+EMBED_PROPOSAL_RE = re.compile(r"(P[1-9][0-9]{0,17}):", re.IGNORECASE)
 
 
 def parse_reactions(raw: str | None) -> dict[str, str]:
@@ -406,7 +408,19 @@ class MessageRefs:
                         known.setdefault("hub_channel", data["channel"])
                 except (ValueError, KeyError, TypeError, RecursionError):
                     continue
-        return self.remember_text(message.id, message_text(message), **known)
+        text = message_text(message)
+        if getattr(message, "webhook_id", None) is not None:
+            # Hub proposals arrive as one embed per message (``webhooks.discord_embed``)
+            # titled ``P<n>: title``. Only that leading id counts, so a title that
+            # mentions another proposal still targets its own; several embeds
+            # with different ids still target none.
+            ids = [
+                match[1] for embed in getattr(message, "embeds", [])
+                if isinstance(title := getattr(embed, "title", None), str)
+                and (match := EMBED_PROPOSAL_RE.match(title))
+            ]
+            text = "\n".join([text, *ids]) if text else "\n".join(ids)
+        return self.remember_text(message.id, text, **known)
 
     def _changed(self) -> None:
         """Persist a change. Inside the event loop the write runs in a thread,

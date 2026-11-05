@@ -29,6 +29,11 @@ REF_MAX = 300
 WEIGHT_MIN = 1
 WEIGHT_MAX = 10
 EVENT_SNIPPET = 120
+# Events also carry a bounded summary and evidence so chat cards can show the
+# whole proposal without a second read (webhook embeds, relay cards).
+EVENT_SUMMARY = 1_000
+EVENT_EVIDENCE = 5
+EVENT_EVIDENCE_CLIP = 300
 TAG = "proposal"
 
 STATUSES = ("open", "accepted", "rejected", "building", "built", "withdrawn")
@@ -320,12 +325,17 @@ def event_payload(
         "number": proposal["number"],
         "project": proposal["project"],
         "title": proposal["title"][:EVENT_SNIPPET],
+        "summary": proposal["summary"][:EVENT_SUMMARY],
+        "evidence": [item[:EVENT_EVIDENCE_CLIP] for item in proposal["evidence"][:EVENT_EVIDENCE]],
         "status": proposal["status"],
         "weight": proposal["weight"],
         "author": proposal["author"],
         "actor": actor,
         "post_id": proposal["post_id"],
     }
+    if proposal["decided_by"]:
+        # The recorded decider, which outlives later moves (accepted -> building).
+        payload["decided_by"] = proposal["decided_by"]
     if previous_status is not None:
         payload["previous_status"] = previous_status
         if proposal["reason"]:
