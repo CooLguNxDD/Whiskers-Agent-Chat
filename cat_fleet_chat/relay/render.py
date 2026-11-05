@@ -163,10 +163,13 @@ def _proposal_embed(payload: dict[str, Any]) -> tuple[str, str | None, tuple[tup
         fields.append(("Weight", str(payload.get("weight"))))
     if payload.get("author"):
         fields.append(("Author", str(payload["author"])))
-    if payload.get("previous_status"):
-        fields.append(("Decided by", str(payload.get("actor", "?"))))
-    if payload.get("reason"):
-        fields.append(("Reason", _one_line(payload["reason"], TITLE_CLIP)))
+    # Decision details come from the recorded decision, not whoever made the
+    # latest move: an accepted proposal later moved to building still shows
+    # who accepted it and why.
+    if payload.get("decided_by"):
+        fields.append(("Decided by", str(payload["decided_by"])))
+        if payload.get("reason"):
+            fields.append(("Reason", _one_line(payload["reason"], TITLE_CLIP)))
     parts = []
     summary = str(payload.get("summary") or "").strip()
     if summary:

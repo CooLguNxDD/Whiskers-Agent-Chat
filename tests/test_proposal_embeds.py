@@ -70,13 +70,28 @@ def test_discord_embed_uses_the_fixed_template():
 
 
 def test_decided_proposal_shows_who_and_why_and_no_vote_hint():
-    event = proposal_event(status="rejected", previous_status="open", actor="andrew", reason="x" * 60)
+    event = proposal_event(status="rejected", previous_status="open", actor="andrew",
+                           decided_by="andrew", reason="x" * 60)
     event["kind"] = "proposal_updated"
     embed = discord_embed(event)
     fields = {f["name"]: f for f in embed["fields"]}
     assert fields["Decided by"]["value"] == "andrew"
     assert fields["Reason"]["inline"] is False  # long values get their own row
     assert "react to vote" not in embed["footer"]["text"]
+
+
+async def test_later_moves_keep_the_recorded_decider(hub):
+    created = (await hub.create_proposal(
+        author="ada", project="demo", title="Cache the wheels", summary="s", weight=3,
+    ))["proposal"]
+    await hub.update_proposal(created["id"], "alice", {"status": "accepted", "reason": "worth it"})
+    await hub.update_proposal(created["id"], "bob", {"status": "building"})
+    events = [e for e in await hub.events_after(0, channel=None, limit=100) if e["kind"] == "proposal_updated"]
+    fields = {f["name"]: f["value"] for f in discord_embed(events[-1])["fields"]}
+    assert fields["Status"] == "building"
+    assert fields["Decided by"] == "alice" and fields["Reason"] == "worth it"
+    # An open proposal has no decision to show.
+    assert "Decided by" not in {f["name"] for f in discord_embed(proposal_event())["fields"]}
 
 
 def test_long_evidence_is_capped():
@@ -153,3 +168,13 @@ async def test_embed_titles_from_non_webhooks_or_naming_two_ids_target_nothing(a
     stacked = Message([NS(title="P142: a", footer=None), NS(title="P143: b", footer=None)])
     await actions.observe(stacked)
     assert refs.get(900).proposal is None and stacked.reactions == []
+
+
+async def test_embed_title_naming_another_proposal_still_targets_its_own(actions):
+    actions, refs = actions
+    event = proposal_event(142)
+    event["payload"]["title"] = "Follow up P143"
+    message = Message([embed_of(event)])
+    await actions.observe(message)
+    assert refs.get(900).proposal == "P142"
+    assert message.reactions == ["✅", "❌"]

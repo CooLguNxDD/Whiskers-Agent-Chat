@@ -333,6 +333,9 @@ def event_payload(
         "actor": actor,
         "post_id": proposal["post_id"],
     }
+    if proposal["decided_by"]:
+        # The recorded decider, which outlives later moves (accepted -> building).
+        payload["decided_by"] = proposal["decided_by"]
     if previous_status is not None:
         payload["previous_status"] = previous_status
         if proposal["reason"]:
