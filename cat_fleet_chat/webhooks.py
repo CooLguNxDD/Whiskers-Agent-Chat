@@ -213,6 +213,42 @@ def event_line(event: dict[str, Any], parents: dict[int, dict[str, Any]] | None 
     return f"{kind} #{event.get('id')}"
 
 
+# Kinds a Discord hook posts as their own embed, never coalesced with other
+# lines: one proposal per Discord message, so a reaction has exactly one target.
+EMBED_KINDS = frozenset({"proposal_created", "proposal_updated"})
+EMBED_INLINE_MAX = 40
+
+
+def discord_embed(event: dict[str, Any]) -> dict[str, Any]:
+    """A Discord embed for ``event`` from the shared relay template (``relay.render``).
+
+    The title keeps the ``P<n>`` id, which is how the reaction relay finds the
+    proposal a ✅/❌ is aimed at.
+    """
+    # Imported here: relay.render imports this module for event_line.
+    from cat_fleet_chat.relay.render import render
+
+    shown = render(event, "embed")
+    payload = event.get("payload") or {}
+    embed: dict[str, Any] = {"title": _clip(shown.title or shown.text, 256)}
+    if shown.body:
+        embed["description"] = _clip(shown.body, 4_000)
+    if shown.color is not None:
+        embed["color"] = shown.color
+    if shown.fields:
+        embed["fields"] = [
+            {"name": _clip(name, 256), "value": _clip(value, 1_024) or "—", "inline": len(value) <= EMBED_INLINE_MAX}
+            for name, value in shown.fields[:25]
+        ]
+    footer = ["cat-fleet", event["kind"].replace("_", " ")]
+    if event.get("id") is not None:
+        footer.append(f"event {event['id']}")
+    if payload.get("status") == "open":
+        footer.append("react to vote")
+    embed["footer"] = {"text": " · ".join(footer)}
+    return embed
+
+
 def chat_payloads(
     events: list[dict[str, Any]],
     fmt: str,
@@ -220,56 +256,67 @@ def chat_payloads(
     *,
     refs: bool = False,
 ) -> list[dict[str, Any]]:
-    """Discord or Slack bodies for ``events``. Lines are coalesced up to the 2000-char limit.
+    """Discord or Slack bodies for ``events``, in event order.
+
+    Lines are coalesced up to the 2000-char limit. On Discord, ``EMBED_KINDS``
+    (proposals) are instead posted one per message as an embed with a fixed
+    template, so each can be approved or rejected on its own.
 
     ``refs`` (``CAT_FLEET_DISCORD_REFS``) adds a ``cat-fleet-ref:`` footer to
     single-event Discord posts for the relay's reaction actions; off by default
     because the footer is visible in Discord.
     """
-    lines = [event_line(event, parents) for event in events]
-    if fmt == "slack":
-        # Slack bold is *x*; defang <!channel>, <!here> and <@user> so message
-        # text from an agent cannot ping people.
-        lines = [
-            line.replace("**", "*").replace("<!", "<​!").replace("<@", "<​@")
-            for line in lines
-        ]
-    chunks: list[str] = []
-    chunk_events: list[list[dict[str, Any]]] = []
-    current_events: list[dict[str, Any]] = []
+    # Each group is either ("text", [events]) or ("embed", [one event]).
+    groups: list[tuple[str, list[dict[str, Any]], str]] = []
     current = ""
-    for line, event in zip(lines, events):
+    current_events: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        nonlocal current, current_events
+        if current:
+            groups.append(("text", current_events, current))
+        current, current_events = "", []
+
+    for event in events:
+        if fmt == "discord" and event["kind"] in EMBED_KINDS:
+            flush()
+            groups.append(("embed", [event], ""))
+            continue
+        line = event_line(event, parents)
+        if fmt == "slack":
+            # Slack bold is *x*; defang <!channel>, <!here> and <@user> so message
+            # text from an agent cannot ping people.
+            line = line.replace("**", "*").replace("<!", "<\u200b!").replace("<@", "<\u200b@")
         line = _clip(line, CHAT_LIMIT)
         if current and len(current) + 1 + len(line) > CHAT_LIMIT:
-            chunks.append(current)
-            chunk_events.append(current_events)
-            current, current_events = line, [event]
-        else:
-            current = f"{current}\n{line}" if current else line
-            current_events.append(event)
-    if current:
-        chunks.append(current)
-        chunk_events.append(current_events)
-    if fmt == "discord":
-        # parse=[] turns every @everyone/@here/<@id> in agent text into plain text.
-        payloads = []
-        for chunk, grouped in zip(chunks, chunk_events):
-            body: dict[str, Any] = {
-                "content": chunk, "username": "Cat Fleet", "allowed_mentions": {"parse": []},
-            }
-            # A typed reference lets the relay recover a reply/vote target after
-            # restart. Never assign one id to a coalesced multi-event message.
-            if refs and len(grouped) == 1 and grouped[0]["kind"] in {"message.created", "feed_post"}:
-                event = grouped[0]
-                post_id = (event.get("payload") or {}).get("id", event.get("entity_id"))
-                if type(post_id) is int and post_id > 0:
-                    ref = {"kind": "feed" if event["kind"] == "feed_post" else "message", "id": post_id}
-                    if ref["kind"] == "message":
-                        ref["channel"] = event.get("channel")
-                    body["embeds"] = [{"footer": {"text": "cat-fleet-ref:" + json.dumps(ref, separators=(",", ":"))}}]
+            flush()
+        current = f"{current}\n{line}" if current else line
+        current_events.append(event)
+    flush()
+
+    if fmt != "discord":
+        return [{"text": text} for _, _, text in groups]
+    # parse=[] turns every @everyone/@here/<@id> in agent text into plain text.
+    payloads = []
+    for shape, grouped, text in groups:
+        body: dict[str, Any] = {"username": "Cat Fleet", "allowed_mentions": {"parse": []}}
+        if shape == "embed":
+            body["embeds"] = [discord_embed(grouped[0])]
             payloads.append(body)
-        return payloads
-    return [{"text": chunk} for chunk in chunks]
+            continue
+        body["content"] = text
+        # A typed reference lets the relay recover a reply/vote target after
+        # restart. Never assign one id to a coalesced multi-event message.
+        if refs and len(grouped) == 1 and grouped[0]["kind"] in {"message.created", "feed_post"}:
+            event = grouped[0]
+            post_id = (event.get("payload") or {}).get("id", event.get("entity_id"))
+            if type(post_id) is int and post_id > 0:
+                ref = {"kind": "feed" if event["kind"] == "feed_post" else "message", "id": post_id}
+                if ref["kind"] == "message":
+                    ref["channel"] = event.get("channel")
+                body["embeds"] = [{"footer": {"text": "cat-fleet-ref:" + json.dumps(ref, separators=(",", ":"))}}]
+        payloads.append(body)
+    return payloads
 
 
 def sign(secret: str, body: bytes) -> str:

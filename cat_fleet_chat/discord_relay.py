@@ -406,7 +406,17 @@ class MessageRefs:
                         known.setdefault("hub_channel", data["channel"])
                 except (ValueError, KeyError, TypeError, RecursionError):
                     continue
-        return self.remember_text(message.id, message_text(message), **known)
+        text = message_text(message)
+        if getattr(message, "webhook_id", None) is not None:
+            # Hub proposals arrive as one embed per message (``webhooks.discord_embed``)
+            # with ``P<n>: title`` as the embed title and no content. Titles are
+            # read like content: one proposal id targets it, several target none.
+            titles = [
+                title for embed in getattr(message, "embeds", [])
+                if isinstance(title := getattr(embed, "title", None), str) and title
+            ]
+            text = "\n".join([text, *titles]) if text else "\n".join(titles)
+        return self.remember_text(message.id, text, **known)
 
     def _changed(self) -> None:
         """Persist a change. Inside the event loop the write runs in a thread,

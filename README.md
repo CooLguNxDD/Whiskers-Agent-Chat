@@ -239,7 +239,7 @@ Create one with `direction: "out"`, a `url` (https, or http on loopback) and a
 
 | Format | Sends |
 | --- | --- |
-| `discord` | A Discord webhook body. Events are coalesced into posts of up to 2000 characters, and `allowed_mentions` is empty so message text cannot ping `@everyone`. |
+| `discord` | A Discord webhook body. Events are coalesced into posts of up to 2000 characters, and `allowed_mentions` is empty so message text cannot ping `@everyone`. Proposals (`proposal_created` / `proposal_updated`) are never coalesced: each is its own post with an embed in one fixed template (`P<n>: title`, summary, up to 5 evidence bullets, Status / Project / Weight / Author fields), so a ✅/❌ reaction targets exactly one proposal. |
 | `slack` | `{"text": ...}` with the same lines, with `<!channel>`-style pings defused. |
 | `generic` | One request per event with the raw event JSON and the headers `X-CatFleet-Event`, `X-CatFleet-Delivery` (event id) and `X-CatFleet-Signature: sha256=<HMAC of the body with the hook secret>`. |
 

@@ -26,7 +26,7 @@ All routes are under `/api/v1` and use the normal hub bearer token when configur
 - `PATCH /proposals/{proposal_id}`: set editable fields and/or `status`; `actor` (or `agent_name`) identifies the caller. Send `reason` with a status change; rejecting requires it.
 - `GET /evolve/state`: read the pause state (`paused`, `by`, `at`). It does not change state.
 
-Errors use the common `{ "error": { "code", "message", "details?" } }` shape. Proposal changes emit durable `proposal_created` / `proposal_updated` events. The API's proposal shape includes `post_id`; use that as a feed ID, not the `P<n>` identifier.
+Errors use the common `{ "error": { "code", "message", "details?" } }` shape. Proposal changes emit durable `proposal_created` / `proposal_updated` events. Their payload carries the title, status, weight, author, the summary (first 1,000 characters) and the first 5 evidence items (300 characters each), which is what chat cards render. The API's proposal shape includes `post_id`; use that as a feed ID, not the `P<n>` identifier.
 
 ## MCP tools
 
@@ -51,7 +51,7 @@ MCP reaction tools are `fleet_feed_react`, `fleet_feed_unreact`, and `fleet_feed
 
 ## Discord reaction controls (optional)
 
-Configure the Discord relay separately from the hub. By default the relay maps ✅ to `approve {P}`, ❌ to `reject {P} via Discord reaction`, ⏸️ / ▶️ to `pause evolve` / `resume evolve`, 🇦–🇪 to the matching `[S03]` question answer, and 👍 / 👎 to `+1` / `-1` feed reactions. Proposal actions require exactly one proposal ID in the message; pause/resume require evolve context; question votes require a recognized tagged question and available option. Feed votes require a known feed target. Removing a reaction sends no undo command.
+Configure the Discord relay separately from the hub. By default the relay maps ✅ to `approve {P}`, ❌ to `reject {P} via Discord reaction`, ⏸️ / ▶️ to `pause evolve` / `resume evolve`, 🇦–🇪 to the matching `[S03]` question answer, and 👍 / 👎 to `+1` / `-1` feed reactions. Proposal actions require exactly one proposal ID in the message (its text, or for posts from a webhook, its embed titles; the hub's Discord webhooks post each proposal as its own embed titled `P<n>: title`, so file proposals with `fleet_create_proposal` rather than listing several in one chat message); pause/resume require evolve context; question votes require a recognized tagged question and available option. Feed votes require a known feed target. Removing a reaction sends no undo command.
 
 `CAT_FLEET_DISCORD_REACTIONS` replaces the default mapping, using semicolon-separated `emoji=action` entries. Supported actions include proposal templates with `{P}`, `pause evolve`, `resume evolve`, `{step} answer: (a)` through `(e)`, and feed kinds `+1` / `-1`. At most 12 actions are accepted; malformed maps fail relay startup. 📨 and ⚠️ are reserved delivery-status emojis. When reaction actions are enabled (a non-empty `CAT_FLEET_DISCORD_REACTION_USERS`) and ✅ or ❌ are action mappings, the relay uses the reserved marks for delivery status instead.
 

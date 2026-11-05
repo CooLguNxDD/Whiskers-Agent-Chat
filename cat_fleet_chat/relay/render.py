@@ -148,6 +148,40 @@ def _buttons(event: dict[str, Any]) -> tuple[Button, ...]:
     return ()
 
 
+EVIDENCE_ITEMS = 5
+EVIDENCE_CLIP = 200
+
+
+def _proposal_embed(payload: dict[str, Any]) -> tuple[str, str | None, tuple[tuple[str, str], ...]]:
+    """The one proposal template: ``P<n>: title``, summary + evidence bullets, fixed fields.
+
+    Shared by relay cards and outbound Discord webhooks, so every proposal looks
+    the same whatever the agent wrote. Plain text only (no platform markup).
+    """
+    fields = [("Status", str(payload.get("status"))), ("Project", str(payload.get("project")))]
+    if payload.get("weight") is not None:
+        fields.append(("Weight", str(payload.get("weight"))))
+    if payload.get("author"):
+        fields.append(("Author", str(payload["author"])))
+    if payload.get("previous_status"):
+        fields.append(("Decided by", str(payload.get("actor", "?"))))
+    if payload.get("reason"):
+        fields.append(("Reason", _one_line(payload["reason"], TITLE_CLIP)))
+    parts = []
+    summary = str(payload.get("summary") or "").strip()
+    if summary:
+        parts.append(summary)
+    evidence = [item for item in payload.get("evidence") or [] if str(item).strip()]
+    if evidence:
+        bullets = "\n".join(f"• {_one_line(item, EVIDENCE_CLIP)}" for item in evidence[:EVIDENCE_ITEMS])
+        more = len(evidence) - EVIDENCE_ITEMS
+        if more > 0:
+            bullets += f"\n… and {more} more"
+        parts.append(f"Evidence:\n{bullets}")
+    title = f"{payload.get('id')}: {_one_line(payload.get('title'), TITLE_CLIP)}"
+    return title, _clip("\n\n".join(parts), BODY_CLIP) or None, tuple(fields)
+
+
 def _embed(event: dict[str, Any]) -> tuple[str | None, str | None, tuple[tuple[str, str], ...]]:
     kind = event["kind"]
     payload = event.get("payload") or {}
@@ -164,11 +198,7 @@ def _embed(event: dict[str, Any]) -> tuple[str | None, str | None, tuple[tuple[s
         title = f"Task #{payload.get('id')}: {_one_line(payload.get('title'), TITLE_CLIP)}"
         return title, _clip(str(payload.get("description") or ""), BODY_CLIP) or None, tuple(fields)
     if kind in {"proposal_created", "proposal_updated"}:
-        fields = [("Status", str(payload.get("status"))), ("Project", str(payload.get("project")))]
-        if payload.get("weight") is not None:
-            fields.append(("Weight", str(payload.get("weight"))))
-        title = f"{payload.get('id')}: {_one_line(payload.get('title'), TITLE_CLIP)}"
-        return title, _clip(str(payload.get("summary") or ""), BODY_CLIP) or None, tuple(fields)
+        return _proposal_embed(payload)
     if kind == "feed_post":
         return f"Feed · {payload.get('author', '?')}", _clip(str(payload.get("body", "")), BODY_CLIP), ()
     if kind == "topic.published":

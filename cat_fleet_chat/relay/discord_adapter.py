@@ -31,6 +31,7 @@ from cat_fleet_chat.relay.routing import MapEntry
 logger = logging.getLogger("cat_fleet_chat.relay.discord")
 
 FIELD_MAX = 25
+INLINE_MAX = 40
 STYLES = {"primary": "primary", "secondary": "secondary", "success": "success", "danger": "danger"}
 
 
@@ -63,7 +64,8 @@ class DiscordAdapter:
     def _embed(self, message: Rendered) -> Any:
         embed = self.discord.Embed(title=message.title, description=message.body, color=message.color)
         for name, value in message.fields[:FIELD_MAX]:
-            embed.add_field(name=name[:256], value=value[:1024] or "—", inline=True)
+            # Short values sit side by side; a long one (a reason) gets its own row.
+            embed.add_field(name=name[:256], value=value[:1024] or "—", inline=len(value) <= INLINE_MAX)
         if message.footer:
             embed.set_footer(text=message.footer[:2048])
         return embed
