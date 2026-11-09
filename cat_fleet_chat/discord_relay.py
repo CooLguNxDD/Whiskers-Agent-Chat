@@ -223,6 +223,16 @@ async def handle_message(
 PROPOSAL_RE = re.compile(r"\bP[1-9][0-9]{0,17}\b", re.IGNORECASE)
 STEP_RE = re.compile(r"\[(S[0-9]{2,}(?:-[A-Za-z0-9_-]+)?)\]")
 OPTION_RE = re.compile(r"\(([a-e])\)", re.IGNORECASE)
+# Lead-run questions (Cat Fleet lead mode) have no S id. The preferred head names
+# the run folder, ``[LEAD 2026-11-09-1008-judge-polish] judge-polish: ...``; the
+# older ``[LEAD] judge-polish: ...`` head falls back to the feature. The name fills
+# ``{step}``, giving ``<name> answer: (a)``, which the fleet's lead inbox reads.
+LEAD_NAME = r"[A-Za-z0-9][A-Za-z0-9_./-]{0,99}"
+LEAD_RE = re.compile(r"\[LEAD(?:\s+(" + LEAD_NAME + r"))?\](?:\s+(" + LEAD_NAME + r"):)?")
+LEAD_NAME_RE = re.compile(LEAD_NAME)
+# A lead question's options are its ``(a) ...`` lines; a hint such as
+# ``'x answer: (a)'`` inside a line is not an option.
+LEAD_OPTION_RE = re.compile(r"^\s*\(([a-e])\)\s", re.IGNORECASE | re.MULTILINE)
 REF_PREFIX = "cat-fleet-ref:"
 # The ``P<n>:`` prefix of a hub proposal embed title.
 EMBED_PROPOSAL_RE = re.compile(r"(P[1-9][0-9]{0,17}):", re.IGNORECASE)
@@ -304,6 +314,7 @@ class MessageRef:
     step: str | None = None
     options: tuple[str, ...] = ()
     evolve: bool = False
+    lead: str | None = None  # lead-run question target: run folder (preferred) or feature
 
 
 def _log(context: str, exc: object) -> None:
@@ -343,6 +354,8 @@ class MessageRefs:
                         or any(option not in ("a", "b", "c", "d", "e") for option in ref.options)
                         or (ref.proposal is not None and not PROPOSAL_RE.fullmatch(ref.proposal))
                         or (ref.step is not None and not STEP_RE.fullmatch(f"[{ref.step}]"))
+                        or (ref.lead is not None
+                            and (type(ref.lead) is not str or not LEAD_NAME_RE.fullmatch(ref.lead)))
                         or (ref.hub_channel is not None and not CHANNEL_RE.fullmatch(ref.hub_channel))):
                     raise ValueError("invalid extracted reference in state")
                 if not isinstance(key, int) or key <= 0:
@@ -370,14 +383,19 @@ class MessageRefs:
         prior = self.get(message_id) or MessageRef()
         proposals = set(p.upper() for p in PROPOSAL_RE.findall(text))
         steps = set(STEP_RE.findall(text))
+        leads = {match[1] or match[2] for match in LEAD_RE.finditer(text)}
+        # Exactly one named lead question and no step question; anything else is ambiguous.
+        lead = next(iter(leads)) if len(leads) == 1 and None not in leads and not steps else None
+        options = LEAD_OPTION_RE.findall(text) if lead else OPTION_RE.findall(text)
         ref = MessageRef(
             hub_post_id=hub_post_id if hub_post_id is not None else prior.hub_post_id,
             feed_post_id=feed_post_id if feed_post_id is not None else prior.feed_post_id,
             hub_channel=hub_channel if hub_channel is not None else prior.hub_channel,
             proposal=next(iter(proposals)) if len(proposals) == 1 else None,
-            step=next(iter(steps)) if len(steps) == 1 else None,
-            options=tuple(sorted(set(o.lower() for o in OPTION_RE.findall(text)))),
+            step=next(iter(steps)) if len(steps) == 1 and not leads else None,
+            options=tuple(sorted(set(o.lower() for o in options))),
             evolve=bool(re.search(r"\bevolve\b", text, re.IGNORECASE)),
+            lead=lead,
         )
         if self.get(message_id) != ref:
             self._refs[message_id] = ref
@@ -527,7 +545,8 @@ class ReactionActions:
         if "{P}" in template:
             return template.replace("{P}", ref.proposal) if ref.proposal else None
         if match := ANSWER_RE.fullmatch(template):
-            return template.replace("{step}", ref.step) if ref.step and match[1] in ref.options else None
+            target = ref.step or ref.lead
+            return template.replace("{step}", target) if target and match[1] in ref.options else None
         return template if ref.evolve else None
 
     async def observe(self, message: Any) -> None:

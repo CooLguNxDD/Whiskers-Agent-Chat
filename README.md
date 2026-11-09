@@ -364,6 +364,10 @@ Reactions permissions. Defaults:
 - ⏸️ / ▶️ send `pause evolve` / `resume evolve` on messages mentioning evolve.
 - 🇦 .. 🇪 send `S03 answer: (a)` .. `(e)` for a question tagged `[S03]`
   (also longer `[S03-step-name]` tags), only for options present as `(a)` .. `(e)`.
+  A Cat Fleet lead-run question has no S id: `[LEAD <run-folder>] <feature>: ...`
+  sends `<run-folder> answer: (a)`, and the older `[LEAD] <feature>: ...` head sends
+  `<feature> answer: (a)`. Its options count only as `(a) ...` lines. A post with
+  two lead runs, or a lead and an `[S..]` question, maps to nothing.
 - 👍 / 👎 add `+1` / `-1` on a known **feed post**, as the reacting human.
   Chat message ids are never used as feed ids. Removing an emoji does nothing.
 

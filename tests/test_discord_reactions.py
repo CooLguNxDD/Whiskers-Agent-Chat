@@ -572,3 +572,69 @@ async def test_reaction_command_reaches_real_hub_allowlist_and_is_idempotent(aut
     commands = [post for post in posts if post["text"] == "approve P1"]
     assert len(commands) == 1 and commands[0]["reply_to"] == parent_id
     assert len([post for post in posts if post["author"] == "evolve"]) == (1 if allowed else 0)
+
+
+# Cat Fleet lead-run questions: no S id, the run folder (or feature) is the target.
+LEAD_RUN_Q = ("❓ [LEAD 2026-11-09-1008-judge-polish] judge-polish: Which judge?\n"
+              "(a) strict\n(b) lenient\n(c) skip\n"
+              "Reply in Discord: '2026-11-09-1008-judge-polish answer: (a)' (or your own words)")
+LEAD_FEATURE_Q = ("❓ [LEAD] judge-polish: Which judge?\n(a) strict\n(b) lenient\n"
+                  "Reply in Discord: 'judge-polish answer: (a)' (or your own words)")
+
+
+@pytest.mark.parametrize(("emoji", "text", "expected"), [
+    ("🇦", LEAD_RUN_Q, "2026-11-09-1008-judge-polish answer: (a)"),
+    ("🇨", LEAD_RUN_Q, "2026-11-09-1008-judge-polish answer: (c)"),
+    ("🇧", LEAD_FEATURE_Q, "judge-polish answer: (b)"),
+])
+async def test_lead_question_reaction_posts_run_answer(setup, emoji, text, expected):
+    actions, refs, sent, _ = setup
+    message = Message(text, webhook_id=55, bot=True)
+    refs.remember(message, hub_post_id=42, hub_channel="ops")
+    assert await actions.on_raw_reaction_add(event(emoji), Discord(message)) == "sent"
+    assert sent[0]["text"] == expected
+    assert sent[0]["author"] == "dc-alice" and sent[0]["reply_to"] == 42 and sent[0]["channel"] == "ops"
+
+
+async def test_lead_question_preadds_only_its_option_lines(setup):
+    actions, refs, _, _ = setup
+    message = Message(LEAD_RUN_Q, webhook_id=55, bot=True)
+    await actions.observe(message)
+    assert message.reactions == ["🇦", "🇧", "🇨"]
+    assert refs.get(900).lead == "2026-11-09-1008-judge-polish" and refs.get(900).step is None
+    # Without option lines the hint's '(a)' is not an option: no reactions, no answer.
+    bare = Message("❓ [LEAD] judge-polish: Ready to ship?\nReply in Discord: 'judge-polish answer: (a)'")
+    await actions.observe(bare)
+    assert bare.reactions == []
+
+
+@pytest.mark.parametrize(("emoji", "text"), [
+    ("🇩", LEAD_RUN_Q),  # no (d) option
+    ("🇦", "❓ [LEAD] Which judge?\n(a) strict"),  # no name
+    ("🇦", "❓ [LEAD run-a] a: Q?\n(a) x\n❓ [LEAD run-b] b: Q?\n(a) y"),  # two lead runs in one post
+    ("🇦", "❓ [LEAD run-a] a: Q?\n(a) x\n❓ [S03] f: Q?\n(a) y"),  # lead and step in one post
+])
+async def test_ambiguous_or_inapplicable_lead_reactions_ignored(setup, emoji, text):
+    actions, _, sent, votes = setup
+    assert await actions.on_raw_reaction_add(event(emoji), Discord(Message(text))) == "ignored"
+    assert sent == votes == []
+
+
+async def test_lead_reaction_from_non_allowlisted_user_ignored(setup):
+    actions, _, sent, _ = setup
+    discord = Discord(Message(LEAD_RUN_Q))
+    assert await actions.on_raw_reaction_add(event("🇦", user=222), discord) == "ignored"
+    assert discord.fetches == 0 and sent == []
+
+
+def test_lead_ref_survives_reload_and_bad_lead_state_is_rejected(tmp_path):
+    path = tmp_path / "state.json"
+    refs = relay.MessageRefs(path)
+    refs.remember(Message(LEAD_RUN_Q))
+    reloaded = relay.MessageRefs(path)
+    assert reloaded.get(900).lead == "2026-11-09-1008-judge-polish"
+    assert reloaded.get(900).options == ("a", "b", "c")
+    rows = json.loads(path.read_text())
+    rows[0][1]["lead"] = "bad name; rm -rf"
+    path.write_text(json.dumps(rows))
+    assert len(relay.MessageRefs(path)) == 0
