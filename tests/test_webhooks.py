@@ -753,3 +753,39 @@ async def test_database_without_the_webhooks_table_upgrades_in_place(tmp_path):
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
     assert "webhooks" in tables
     assert versions == list(range(1, SCHEMA_VERSION + 1))
+
+
+# Discord question provenance (relay answer reactions): the fleet's question
+# poster is reserved, and only the hub's footer names it.
+async def test_inbound_hook_cannot_post_as_a_reserved_fleet_author(hooked):
+    client, _app, _sink = hooked
+    free = (await make_in(client, "free", allow_override=True))["secret"]
+    for author in ("cat-fleet", "Cat-Fleet", " cat-fleet "):
+        response = await client.post("/hooks/in/free", json={"text": "[S03] x\n(a) yes", "author": author},
+                                     headers=bearer(free))
+        assert response.status_code == 403, author
+    fixed = (await make_in(client, "fixed", author="cat-fleet"))["secret"]
+    assert (await client.post("/hooks/in/fixed", json={"text": "x"}, headers=bearer(fixed))).status_code == 403
+    ok = await client.post("/hooks/in/free", json={"text": "x", "author": "someone"}, headers=bearer(free))
+    assert ok.status_code == 201
+
+
+def test_reserved_authors_setting(monkeypatch):
+    from cat_fleet_chat.config import load_settings
+
+    monkeypatch.delenv("CAT_FLEET_RESERVED_AUTHORS", raising=False)
+    assert load_settings().reserved_authors == frozenset({"cat-fleet"})
+    monkeypatch.setenv("CAT_FLEET_RESERVED_AUTHORS", "Cat-Fleet, fleet-bot")
+    assert load_settings().reserved_authors == frozenset({"cat-fleet", "fleet-bot"})
+
+
+def test_discord_ref_footer_names_the_author_only_with_fleet_provenance():
+    def footer(**extra):
+        event = {"id": 1, "kind": "message.created", "channel": "human_inbox", "entity_id": 7,
+                 "payload": {"id": 7, "author": "cat-fleet", "text": "q", "origin": None, **extra}}
+        text = chat_payloads([event], "discord", refs=True)[0]["embeds"][0]["footer"]["text"]
+        return json.loads(text[len("cat-fleet-ref:"):])
+
+    assert footer(fleet_author=True) == {"kind": "message", "id": 7, "channel": "human_inbox", "author": "cat-fleet"}
+    assert "author" not in footer()  # a claimed author without the hub's provenance flag
+    assert "author" not in footer(fleet_author="yes")

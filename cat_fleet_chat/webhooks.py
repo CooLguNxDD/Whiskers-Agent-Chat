@@ -314,6 +314,13 @@ def chat_payloads(
                 ref = {"kind": "feed" if event["kind"] == "feed_post" else "message", "id": post_id}
                 if ref["kind"] == "message":
                     ref["channel"] = event.get("channel")
+                    payload = event.get("payload") or {}
+                    # Provenance for the relay's question reactions: the author,
+                    # only when the hub marked the post as the fleet's own
+                    # (reserved-author token, no origin). Text can imitate the
+                    # rendered author line; never this footer.
+                    if payload.get("fleet_author") is True and isinstance(payload.get("author"), str):
+                        ref["author"] = payload["author"]
                 body["embeds"] = [{"footer": {"text": "cat-fleet-ref:" + json.dumps(ref, separators=(",", ":"))}}]
         payloads.append(body)
     return payloads

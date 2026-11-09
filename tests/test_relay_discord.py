@@ -283,3 +283,16 @@ def test_cli_requires_name_and_token(capsys):
     with pytest.raises(SystemExit):
         cli.main(["--name", "ok", "--token", "nope"])
     assert "rly_" in capsys.readouterr().err
+
+
+async def test_send_registers_question_targets_from_the_hub_message(discord_relay):
+    adapter, _core, _hub, _discord_client, _client = discord_relay
+    fleet = {"id": 42, "channel": "fleet", "author": "cat-fleet", "fleet_author": True,
+             "text": "[S03] f: Which?\n(a) yes\n(b) no"}
+    sent_id = await adapter.send("111", Rendered(text="rendered copy", extra={"hub_message": fleet}))
+    ref = adapter.refs.get(int(sent_id))
+    assert (ref.step, ref.options, ref.hub_post_id, ref.sent, ref.fleet) == ("S03", ("a", "b"), 42, True, True)
+    relayed = {**fleet, "id": 43, "author": "dc-mallory", "fleet_author": None,
+               "origin": {"source": "discord", "channel_id": "111"}}
+    other = await adapter.send("111", Rendered(text="copy", extra={"hub_message": relayed}))
+    assert adapter.refs.get(int(other)).step is None and adapter.refs.get(int(other)).fleet is False

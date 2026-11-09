@@ -53,6 +53,10 @@ def create_app(
         hub.feed_post_hooks.append(hub.knowledge_from_feed_post)
         # Who may steer proposals and the evolve pause flag with chat commands.
         hub.human_handles = settings.human_handles
+        # Fleet posting handles that inbound hooks may not claim.
+        hub.reserved_authors = settings.reserved_authors
+        # With reserved-author tokens configured, only they may post as a reserved author.
+        hub.reserved_enforced = bool(settings.reserved_author_tokens)
         app.state.hub = hub
         app.state.settings = settings
         app.state.process_lock = lock

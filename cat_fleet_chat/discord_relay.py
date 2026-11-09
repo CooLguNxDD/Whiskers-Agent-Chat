@@ -223,7 +223,27 @@ async def handle_message(
 PROPOSAL_RE = re.compile(r"\bP[1-9][0-9]{0,17}\b", re.IGNORECASE)
 STEP_RE = re.compile(r"\[(S[0-9]{2,}(?:-[A-Za-z0-9_-]+)?)\]")
 OPTION_RE = re.compile(r"\(([a-e])\)", re.IGNORECASE)
+# Lead-run questions (Cat Fleet lead mode) have no S id. The preferred head names
+# the run folder, ``[LEAD 2026-11-09-1008-judge-polish] judge-polish: ...``; the
+# older ``[LEAD] judge-polish: ...`` head falls back to the feature. The name fills
+# ``{step}``, giving ``<name> answer: (a)``, which the fleet's lead inbox reads.
+LEAD_NAME = r"[A-Za-z0-9][A-Za-z0-9_./-]{0,99}"
+# ``[LEAD <run dir> Q<n>]`` names one question of a run (two may be open at once)
+# and sends ``<run dir> Q<n> answer: (a)``; ``[LEAD <run dir>]`` sends
+# ``<run dir> answer: (a)``. A malformed Q token (``Qx``, ``Q``, extra words)
+# does not match at all, so it maps to nothing.
+LEAD_QUESTION = r"Q[0-9]{1,9}"
+LEAD_RE = re.compile(
+    r"\[LEAD(?:\s+(" + LEAD_NAME + r")(?:\s+(" + LEAD_QUESTION + r"))?)?\](?:\s+(" + LEAD_NAME + r"):)?"
+)
+LEAD_NAME_RE = re.compile(LEAD_NAME + r"(?: " + LEAD_QUESTION + r")?")
+# A lead question's options are its ``(a) ...`` lines; a hint such as
+# ``'x answer: (a)'`` inside a line is not an option.
+LEAD_OPTION_RE = re.compile(r"^\s*\(([a-e])\)\s", re.IGNORECASE | re.MULTILINE)
 REF_PREFIX = "cat-fleet-ref:"
+# The fleet's question poster (Cat Fleet ``chat.author``); keep in step with the
+# hub's CAT_FLEET_RESERVED_AUTHORS so no inbound hook can post as it.
+DEFAULT_QUESTION_AUTHORS = frozenset({"cat-fleet"})
 # The ``P<n>:`` prefix of a hub proposal embed title.
 EMBED_PROPOSAL_RE = re.compile(r"(P[1-9][0-9]{0,17}):", re.IGNORECASE)
 
@@ -283,6 +303,14 @@ def parse_reaction_users(raw: str | None) -> frozenset[int]:
     return _parse_ids("CAT_FLEET_DISCORD_REACTION_USERS", raw)
 
 
+def parse_question_authors(raw: str | None) -> frozenset[str]:
+    """CAT_FLEET_DISCORD_QUESTION_AUTHORS: hub handles whose questions take answer
+    reactions; unset means ``cat-fleet``, empty (or only commas) means none."""
+    if raw is None:
+        return DEFAULT_QUESTION_AUTHORS
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 def parse_ref_webhooks(raw: str | None) -> frozenset[int]:
     """CAT_FLEET_DISCORD_REF_WEBHOOKS: ids of the hub's own Discord webhooks.
 
@@ -304,6 +332,11 @@ class MessageRef:
     step: str | None = None
     options: tuple[str, ...] = ()
     evolve: bool = False
+    lead: str | None = None  # lead-run question target: run folder (preferred) or feature
+    # The hub marked this post as the fleet's own question poster (fleet_author).
+    fleet: bool = False
+    # Registered by this relay's bot when it delivered the hub message (cat-fleet-relay).
+    sent: bool = False
 
 
 def _log(context: str, exc: object) -> None:
@@ -320,6 +353,7 @@ class MessageRefs:
 
     def __init__(
         self, path: str | Path, limit: int = 5000, *, ref_webhooks: frozenset[int] = frozenset(),
+        question_authors: frozenset[str] = DEFAULT_QUESTION_AUTHORS,
     ):
         if limit < 1:
             raise ValueError("message reference limit must be positive")
@@ -327,6 +361,8 @@ class MessageRefs:
         self.limit = limit
         # Webhooks whose ref footers are trusted (the hub's outbound hooks).
         self.ref_webhooks = ref_webhooks
+        # Hub authors whose [S..] / [LEAD ..] questions take answer reactions (lower-cased).
+        self.question_authors = frozenset(a.lower() for a in question_authors)
         self._refs: dict[int, MessageRef] = {}
         self._dirty = False
         self._flush_task: asyncio.Task | None = None
@@ -339,10 +375,12 @@ class MessageRefs:
                     raise ValueError("state reference must be an object")
                 data["options"] = tuple(data.get("options", ()))
                 ref = MessageRef(**data)
-                if (type(ref.evolve) is not bool
+                if (type(ref.evolve) is not bool or type(ref.fleet) is not bool or type(ref.sent) is not bool
                         or any(option not in ("a", "b", "c", "d", "e") for option in ref.options)
                         or (ref.proposal is not None and not PROPOSAL_RE.fullmatch(ref.proposal))
                         or (ref.step is not None and not STEP_RE.fullmatch(f"[{ref.step}]"))
+                        or (ref.lead is not None
+                            and (type(ref.lead) is not str or not LEAD_NAME_RE.fullmatch(ref.lead)))
                         or (ref.hub_channel is not None and not CHANNEL_RE.fullmatch(ref.hub_channel))):
                     raise ValueError("invalid extracted reference in state")
                 if not isinstance(key, int) or key <= 0:
@@ -365,19 +403,32 @@ class MessageRefs:
 
     def remember_text(
         self, message_id: int, text: str, *, hub_post_id: int | None = None,
-        feed_post_id: int | None = None, hub_channel: str | None = None,
+        feed_post_id: int | None = None, hub_channel: str | None = None, fleet: bool = False,
+        sent: bool = False,
     ) -> MessageRef:
+        """``fleet`` marks text the fleet itself posted (``remember``); only then do
+        ``[S..]`` / ``[LEAD ..]`` question targets count, so a foreign post cannot
+        aim an allowlisted human's answer reaction at a step or run."""
         prior = self.get(message_id) or MessageRef()
         proposals = set(p.upper() for p in PROPOSAL_RE.findall(text))
-        steps = set(STEP_RE.findall(text))
+        steps = set(STEP_RE.findall(text)) if fleet else set()
+        leads = {
+            (f"{match[1]} {match[2]}" if match[2] else match[1]) or match[3] for match in LEAD_RE.finditer(text)
+        } if fleet else set()
+        # Exactly one named lead question and no step question; anything else is ambiguous.
+        lead = next(iter(leads)) if len(leads) == 1 and None not in leads and not steps else None
+        options = LEAD_OPTION_RE.findall(text) if lead else OPTION_RE.findall(text)
         ref = MessageRef(
             hub_post_id=hub_post_id if hub_post_id is not None else prior.hub_post_id,
             feed_post_id=feed_post_id if feed_post_id is not None else prior.feed_post_id,
             hub_channel=hub_channel if hub_channel is not None else prior.hub_channel,
             proposal=next(iter(proposals)) if len(proposals) == 1 else None,
-            step=next(iter(steps)) if len(steps) == 1 else None,
-            options=tuple(sorted(set(o.lower() for o in OPTION_RE.findall(text)))),
+            step=next(iter(steps)) if len(steps) == 1 and not leads else None,
+            options=tuple(sorted(set(o.lower() for o in options))),
             evolve=bool(re.search(r"\bevolve\b", text, re.IGNORECASE)),
+            lead=lead,
+            fleet=fleet,
+            sent=sent,
         )
         if self.get(message_id) != ref:
             self._refs[message_id] = ref
@@ -386,11 +437,33 @@ class MessageRefs:
             self._changed()
         return ref
 
+    def remember_hub_message(self, message_id: int, hub: dict[str, Any]) -> MessageRef:
+        """A hub message this relay's bot just delivered (``cat-fleet-relay``): the
+        same author rule as a webhook footer, from the structured event payload."""
+        author = hub.get("author")
+        fleet = (hub.get("fleet_author") is True and not hub.get("origin")
+                 and isinstance(author, str) and author.lower() in self.question_authors)
+        channel = hub.get("channel")
+        post_id = hub.get("id")
+        return self.remember_text(
+            message_id, str(hub.get("text") or ""),
+            hub_post_id=post_id if type(post_id) is int and post_id > 0 else None,
+            hub_channel=channel if isinstance(channel, str) and CHANNEL_RE.fullmatch(channel) else None,
+            fleet=fleet,
+            sent=True,
+        )
+
     def remember(self, message: Any, **known: Any) -> MessageRef:
         # Single-entity webhook payloads carry typed metadata. Coalesced posts
         # intentionally have no reference: choosing one would target the wrong id.
         # Only the hub's own webhooks are trusted; another integration in a
         # mapped channel must not aim a human's vote or reply at any hub id.
+        prior = self.get(message.id)
+        if getattr(message, "webhook_id", None) is None and prior is not None and prior.sent:
+            # Registered from the hub event when this relay's bot sent it
+            # (``remember_hub_message``); Discord text adds nothing to that.
+            return prior
+        fleet = False  # a question target only when the footer names a fleet author
         if getattr(message, "webhook_id", None) in self.ref_webhooks:
             for embed in getattr(message, "embeds", []):
                 footer = getattr(getattr(embed, "footer", None), "text", None)
@@ -406,6 +479,11 @@ class MessageRefs:
                     elif data["kind"] == "message" and CHANNEL_RE.fullmatch(data.get("channel", "")):
                         known.setdefault("hub_post_id", post_id)
                         known.setdefault("hub_channel", data["channel"])
+                        # Provenance, not carrier: the hub writes the stored author
+                        # here only for messages no relay carried in, and inbound
+                        # hooks may not post as a reserved fleet author.
+                        author = data.get("author")
+                        fleet = isinstance(author, str) and author.lower() in self.question_authors
                 except (ValueError, KeyError, TypeError, RecursionError):
                     continue
         text = message_text(message)
@@ -420,7 +498,7 @@ class MessageRefs:
                 and (match := EMBED_PROPOSAL_RE.match(title))
             ]
             text = "\n".join([text, *ids]) if text else "\n".join(ids)
-        return self.remember_text(message.id, text, **known)
+        return self.remember_text(message.id, text, fleet=fleet, **known)
 
     def _changed(self) -> None:
         """Persist a change. Inside the event loop the write runs in a thread,
@@ -527,7 +605,8 @@ class ReactionActions:
         if "{P}" in template:
             return template.replace("{P}", ref.proposal) if ref.proposal else None
         if match := ANSWER_RE.fullmatch(template):
-            return template.replace("{step}", ref.step) if ref.step and match[1] in ref.options else None
+            target = ref.step or ref.lead
+            return template.replace("{step}", target) if target and match[1] in ref.options else None
         return template if ref.evolve else None
 
     async def observe(self, message: Any) -> None:
@@ -647,6 +726,7 @@ def main(argv: list[str] | None = None) -> None:
         reactions = parse_reactions(os.environ.get("CAT_FLEET_DISCORD_REACTIONS"))
         reaction_users = parse_reaction_users(os.environ.get("CAT_FLEET_DISCORD_REACTION_USERS"))
         ref_webhooks = parse_ref_webhooks(os.environ.get("CAT_FLEET_DISCORD_REF_WEBHOOKS"))
+        question_authors = parse_question_authors(os.environ.get("CAT_FLEET_DISCORD_QUESTION_AUTHORS"))
     except ValueError as exc:
         parser.error(str(exc))
     if not args.discord_token:
@@ -666,6 +746,7 @@ def main(argv: list[str] | None = None) -> None:
     refs = MessageRefs(
         os.environ.get("CAT_FLEET_DISCORD_STATE", "cat_fleet_discord_state.json"),
         ref_webhooks=ref_webhooks,
+        question_authors=question_authors,
     )
     ok_reaction, fail_reaction = status_reactions(reactions, reaction_users)
 

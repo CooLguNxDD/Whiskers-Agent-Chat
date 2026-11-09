@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from cat_fleet_chat.discord_relay import (
+    DEFAULT_QUESTION_AUTHORS,
     MessageRefs,
     ReactionActions,
     message_text,
@@ -96,6 +97,12 @@ class DiscordAdapter:
                 message_id=int(message.reply_to_external), channel_id=int(channel_id), fail_if_not_exists=False
             )
         sent = await channel.send(**kwargs)
+        hub = message.extra.get("hub_message")
+        if isinstance(hub, dict):
+            try:
+                self.refs.remember_hub_message(int(sent.id), hub)
+            except (TypeError, ValueError) as exc:
+                logger.warning("could not record a reference for %s: %r", sent.id, exc)
         return str(sent.id)
 
     async def create_thread(self, channel_id: str, name: str) -> str:
@@ -148,6 +155,12 @@ class DiscordAdapter:
             users = frozenset(int(u) for u in config.settings.get("action_users", []) if str(u).isdigit())
             self.refs.ref_webhooks = frozenset(
                 int(w) for w in config.settings.get("ref_webhooks", []) if str(w).isdigit()
+            )
+            # Hub authors whose questions take answer reactions (default: cat-fleet).
+            authors = config.settings.get("question_authors")
+            self.refs.question_authors = (
+                frozenset(str(a).lower() for a in authors if isinstance(a, str)) if isinstance(authors, list)
+                else DEFAULT_QUESTION_AUTHORS
             )
             self.actions = ReactionActions(
                 mapping,
