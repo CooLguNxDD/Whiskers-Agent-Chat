@@ -56,6 +56,12 @@ class Settings:
     # human_inbox questions as ``cat-fleet``). Inbound hooks may not post as them,
     # so the relay can trust a question whose ref footer names one of them.
     reserved_authors: frozenset[str] = frozenset({"cat-fleet"})
+    # CAT_FLEET_RESERVED_AUTHOR_TOKENS: bearer secrets (comma separated) that act
+    # as the fleet token and may also post as a reserved author. Set: every other
+    # client (fleet token, MCP, relay, hook) gets 403 for a reserved author, and
+    # only these posts carry ``fleet_author`` provenance. Unset: nobody does, so no
+    # question takes Discord answer reactions.
+    reserved_author_tokens: frozenset[str] = field(default=frozenset(), repr=False)
 
     @property
     def loopback_bind(self) -> bool:
@@ -126,6 +132,9 @@ def load_settings() -> Settings:
         human_handles=human_handles(os.environ.get("CAT_FLEET_HUMAN_HANDLES", "")),
         discord_refs=_env_str("CAT_FLEET_DISCORD_REFS", "0").lower() in {"1", "true", "yes", "on"},
         reserved_authors=human_handles(os.environ.get("CAT_FLEET_RESERVED_AUTHORS", "cat-fleet")),
+        reserved_author_tokens=frozenset(
+            part.strip() for part in os.environ.get("CAT_FLEET_RESERVED_AUTHOR_TOKENS", "").split(",") if part.strip()
+        ),
     )
 
 

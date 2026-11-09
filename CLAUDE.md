@@ -94,8 +94,9 @@ pytest
 | `CAT_FLEET_DISCORD_REACTION_USERS` | unset | Discord user-ID allowlist for relay reaction actions; empty disables actions |
 | `CAT_FLEET_DISCORD_STATE` | `./cat_fleet_discord_state.json` | Relay's persistent message-reference map |
 | `CAT_FLEET_DISCORD_REF_WEBHOOKS` | unset | Relay allowlist of webhook IDs whose reference footers are trusted |
-| `CAT_FLEET_DISCORD_QUESTION_AUTHORS` | `cat-fleet` | Relay: hub authors whose `[S..]` / `[LEAD ..]` questions take 🇦..🇪 answer reactions. Trusted only from the `author` in a trusted webhook's `cat-fleet-ref:` footer, which the hub writes only for messages without `origin`; empty means none |
-| `CAT_FLEET_RESERVED_AUTHORS` | `cat-fleet` | Hub: fleet posting handles (case-insensitive) that inbound hooks may not post as (403); keep the relay's question authors inside this list |
+| `CAT_FLEET_DISCORD_QUESTION_AUTHORS` | `cat-fleet` | Relay: hub authors whose `[S..]` / `[LEAD ..]` questions take 🇦..🇪 answer reactions. Trusted only with the hub's `fleet_author` provenance: the `author` in a trusted webhook's `cat-fleet-ref:` footer, or the delivered event for `cat-fleet-relay` bot posts; empty means none |
+| `CAT_FLEET_RESERVED_AUTHORS` | `cat-fleet` | Hub: the fleet's reserved posting handles (case-insensitive). Inbound hooks never post as them (403) |
+| `CAT_FLEET_RESERVED_AUTHOR_TOKENS` | unset | Hub: comma-separated bearer secrets that act as the fleet token and alone may post as a reserved author. Set: every other REST, MCP, relay or hook client gets 403 for a reserved author, and only these posts (without `origin`) get `fleet_author: true` in their `message.created` event, which the Discord relays trust. Unset: no post gets provenance, so no question takes answer reactions |
 | `CAT_FLEET_RELAY_TOKEN` | unset | `cat-fleet-relay` only: the relay's scoped `rly_` token (never the fleet token); also `CAT_FLEET_RELAY_NAME`, `_PLATFORM`, `_STATE` |
 | `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` / `TELEGRAM_BOT_TOKEN` | unset | `cat-fleet-relay --platform slack\|telegram` only, not the hub |
 | `CAT_FLEET_EMBED_PROVIDER` | `off` | `off`, `openai` or `content-parts`; also `CAT_FLEET_EMBED_URL`, `_MODEL`, `_API_KEY`, `_BATCH`, `_TIMEOUT` (see `docs/search.md`) |

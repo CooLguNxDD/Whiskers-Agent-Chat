@@ -779,12 +779,13 @@ def test_reserved_authors_setting(monkeypatch):
     assert load_settings().reserved_authors == frozenset({"cat-fleet", "fleet-bot"})
 
 
-def test_discord_ref_footer_names_the_author_only_without_origin():
-    def footer(origin):
+def test_discord_ref_footer_names_the_author_only_with_fleet_provenance():
+    def footer(**extra):
         event = {"id": 1, "kind": "message.created", "channel": "human_inbox", "entity_id": 7,
-                 "payload": {"id": 7, "author": "cat-fleet", "text": "q", "origin": origin}}
+                 "payload": {"id": 7, "author": "cat-fleet", "text": "q", "origin": None, **extra}}
         text = chat_payloads([event], "discord", refs=True)[0]["embeds"][0]["footer"]["text"]
         return json.loads(text[len("cat-fleet-ref:"):])
 
-    assert footer(None) == {"kind": "message", "id": 7, "channel": "human_inbox", "author": "cat-fleet"}
-    assert "author" not in footer({"source": "discord", "channel_id": "1"})
+    assert footer(fleet_author=True) == {"kind": "message", "id": 7, "channel": "human_inbox", "author": "cat-fleet"}
+    assert "author" not in footer()  # a claimed author without the hub's provenance flag
+    assert "author" not in footer(fleet_author="yes")

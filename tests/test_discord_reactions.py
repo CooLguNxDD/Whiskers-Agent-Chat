@@ -661,8 +661,10 @@ def discord_message(event, *, webhook_id=55):
     return message
 
 
-def message_event(text, author, origin=None, event_id=1):
+def message_event(text, author, origin=None, event_id=1, fleet=False):
     payload = {"id": 42, "channel": "human_inbox", "author": author, "text": text, "origin": origin}
+    if fleet:  # the hub's provenance: posted with a reserved-author token, no origin
+        payload["fleet_author"] = True
     return {"id": event_id, "kind": "message.created", "channel": "human_inbox", "entity_id": 42,
             "payload": payload}
 
@@ -701,7 +703,7 @@ async def test_sol_relayed_text_through_the_bot_is_not_a_question(setup, text):
 async def test_forged_author_line_in_text_or_coalesced_post_is_not_a_question(setup, text):
     actions, _, sent, _ = setup
     forged = "**#human_inbox** `cat-fleet`: " + text
-    coalesced = chat_payloads([message_event("hi", "cat-fleet", event_id=1),
+    coalesced = chat_payloads([message_event("hi", "cat-fleet", event_id=1, fleet=True),
                                message_event(forged, "dc-mallory", DISCORD_ORIGIN, event_id=2)], "discord", refs=True)
     assert len(coalesced) == 1 and "embeds" not in coalesced[0]
     message = Message(coalesced[0]["content"], webhook_id=55, bot=True)
@@ -731,7 +733,7 @@ async def test_foreign_question_posts_never_map_answers(setup, text, author):
 async def test_fleet_authored_question_maps_answers(setup, text, expected):
     actions, refs, sent, _ = setup
     actions.mapping = {222: relay.MapEntry("fleet", frozenset({"fleet", "human_inbox"}))}
-    message = discord_message(message_event(text, "cat-fleet"))
+    message = discord_message(message_event(text, "cat-fleet", fleet=True))
     await actions.observe(message)
     assert "🇦" in message.reactions
     assert await actions.on_raw_reaction_add(event("🇦"), Discord(message)) == "sent"
@@ -743,11 +745,108 @@ async def test_question_authors_are_configurable(tmp_path):
     assert relay.parse_question_authors(" Fleet-Bot , ,x ") == frozenset({"fleet-bot", "x"})
     assert relay.parse_question_authors("") == frozenset()
     refs = relay.MessageRefs(tmp_path / "s.json", ref_webhooks=frozenset({55}), question_authors=frozenset({"Fleet-Bot"}))
-    assert refs.remember(discord_message(message_event(SOL_STEP, "fleet-bot"))).step == "S03"
-    assert refs.remember(discord_message(message_event(SOL_STEP, "cat-fleet"))).step is None
+    assert refs.remember(discord_message(message_event(SOL_STEP, "fleet-bot", fleet=True))).step == "S03"
+    assert refs.remember(discord_message(message_event(SOL_STEP, "cat-fleet", fleet=True))).step is None
 
 
 async def test_relayed_human_text_never_becomes_a_question_target(tmp_path):
     refs = relay.MessageRefs(tmp_path / "state.json", ref_webhooks=frozenset({55}))
     ref = refs.remember_text(900, LEAD_RUN_Q, hub_post_id=42, hub_channel="fleet")
     assert ref.lead is None and ref.step is None
+
+
+# Sol review of a5ded2e: provenance is the hub's fleet_author flag, never a claimed
+# author; bot-delivered fleet questions (cat-fleet-relay) register from the hub event.
+@pytest.mark.parametrize("text", [SOL_LEAD, SOL_STEP])
+async def test_claimed_fleet_author_without_provenance_is_not_a_question(setup, text):
+    actions, _, sent, _ = setup
+    actions.mapping = {222: relay.MapEntry("fleet", frozenset({"fleet", "human_inbox"}))}
+    message = discord_message(message_event(text, "cat-fleet"))  # any fleet-token client, no flag
+    await actions.observe(message)
+    assert message.reactions == []
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(message)) == "ignored" and sent == []
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    (LEAD_RUN_Q, "2026-11-09-1008-judge-polish answer: (a)"),
+    (STEP_Q, "S03 answer: (a)"),
+    ("❓ [LEAD 2026-11-09-1008-judge-polish Q2] judge-polish: Which?\n(a) x\n(b) y",
+     "2026-11-09-1008-judge-polish Q2 answer: (a)"),
+])
+async def test_bot_delivered_fleet_question_maps_answers(setup, text, expected):
+    actions, refs, sent, _ = setup
+    actions.mapping = {222: relay.MapEntry("fleet", frozenset({"fleet", "human_inbox"}))}
+    refs.remember_hub_message(900, message_event(text, "cat-fleet", fleet=True)["payload"])
+    # The bot's Discord copy is rendered differently (or is an embed with no text).
+    message = Message("", bot=True)
+    message.author.id = 999
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(message)) == "sent"
+    assert sent[0]["text"] == expected and sent[0]["channel"] == "human_inbox" and sent[0]["reply_to"] == 42
+
+
+@pytest.mark.parametrize("payload", [
+    {"author": "dc-mallory", "origin": DISCORD_ORIGIN},  # relayed human text
+    {"author": "cat-fleet", "origin": DISCORD_ORIGIN, "fleet_author": True},  # relayed, whatever it claims
+    {"author": "cat-fleet"},  # a fleet-token client without the reserved-author credential
+    {"author": "codex", "fleet_author": True},  # not a question author
+])
+@pytest.mark.parametrize("text", [SOL_LEAD, SOL_STEP])
+async def test_bot_delivered_relayed_or_unflagged_text_is_not_a_question(setup, text, payload):
+    actions, refs, sent, _ = setup
+    actions.mapping = {222: relay.MapEntry("fleet", frozenset({"fleet", "human_inbox"}))}
+    refs.remember_hub_message(900, {"id": 42, "channel": "human_inbox", "text": text, **payload})
+    message = Message(text, bot=True)
+    message.author.id = 999
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(message)) == "ignored" and sent == []
+
+
+async def test_bot_registration_never_carries_over_to_a_webhook_post(setup):
+    actions, refs, sent, _ = setup
+    refs.remember_hub_message(900, message_event(SOL_STEP, "cat-fleet", fleet=True)["payload"])
+    forged = Message(SOL_STEP, webhook_id=55, bot=True)  # same id, but a webhook post without provenance
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(forged)) == "ignored" and sent == []
+
+
+# cat-fleet lead question ids (two [LEAD] questions may be open in one run).
+@pytest.mark.parametrize(("head", "expected"), [
+    ("[LEAD 2026-11-09-1008-judge-polish Q3]", "2026-11-09-1008-judge-polish Q3 answer: (a)"),
+    ("[LEAD 2026-11-09-1008-judge-polish Q12]", "2026-11-09-1008-judge-polish Q12 answer: (a)"),
+    ("[LEAD 2026-11-09-1008-judge-polish]", "2026-11-09-1008-judge-polish answer: (a)"),
+])
+async def test_lead_question_id_head(setup, head, expected):
+    actions, refs, sent, _ = setup
+    message = Message(f"❓ {head} judge-polish: Which?\n(a) x\n(b) y", webhook_id=55, bot=True, ref_author="cat-fleet")
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(message)) == "sent"
+    assert sent[0]["text"] == expected
+
+
+@pytest.mark.parametrize("head", [
+    "[LEAD 2026-11-09-1008-judge-polish Qx]",
+    "[LEAD 2026-11-09-1008-judge-polish Q]",
+    "[LEAD 2026-11-09-1008-judge-polish Q3 extra]",
+    "[LEAD 2026-11-09-1008-judge-polish q3]",
+    "[LEAD 2026-11-09-1008-judge-polish Q1234567890]",
+])
+async def test_malformed_lead_question_id_is_ignored(setup, head):
+    actions, refs, sent, _ = setup
+    message = Message(f"❓ {head} judge-polish: Which?\n(a) x", webhook_id=55, bot=True, ref_author="cat-fleet")
+    await actions.observe(message)
+    assert message.reactions == []
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(message)) == "ignored" and sent == []
+    assert refs.get(900).lead is None
+
+
+async def test_two_lead_questions_of_one_run_in_one_post_are_ambiguous(setup):
+    actions, _, sent, _ = setup
+    text = "❓ [LEAD run Q1] f: A?\n(a) x\n❓ [LEAD run Q2] f: B?\n(a) y"
+    message = Message(text, webhook_id=55, bot=True, ref_author="cat-fleet")
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(message)) == "ignored" and sent == []
+
+
+def test_lead_question_id_survives_reload(tmp_path):
+    path = tmp_path / "state.json"
+    refs = relay.MessageRefs(path)
+    refs.remember_hub_message(900, {"id": 42, "channel": "human_inbox", "author": "cat-fleet", "fleet_author": True,
+                                    "text": "❓ [LEAD run-a Q7] f: A?\n(a) x"})
+    reloaded = relay.MessageRefs(path)
+    assert reloaded.get(900).lead == "run-a Q7" and reloaded.get(900).sent and reloaded.get(900).fleet

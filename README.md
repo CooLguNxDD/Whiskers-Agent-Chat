@@ -369,13 +369,15 @@ Reactions permissions. Defaults:
   `<feature> answer: (a)`. Its options count only as `(a) ...` lines. A post with
   two lead runs, or a lead and an `[S..]` question, maps to nothing. Question
   answers (step and lead) apply only to hub messages written by the fleet's
-  question poster: the post must come from a webhook in
-  `CAT_FLEET_DISCORD_REF_WEBHOOKS` and its `cat-fleet-ref:` footer (hub
-  `CAT_FLEET_DISCORD_REFS=1`) must name an author in
-  `CAT_FLEET_DISCORD_QUESTION_AUTHORS` (default `cat-fleet`). The hub writes that
-  author only for messages without `origin` (never relayed human text) and refuses
-  inbound-hook posts as `CAT_FLEET_RESERVED_AUTHORS`. Text that merely looks like
-  a question, coalesced posts and bot-delivered copies are ignored.
+  question poster. The hub marks a message `fleet_author` only when it was posted
+  with a `CAT_FLEET_RESERVED_AUTHOR_TOKENS` secret as a `CAT_FLEET_RESERVED_AUTHORS`
+  handle without `origin`. Other clients get 403 for that handle. A webhook post must
+  come from `CAT_FLEET_DISCORD_REF_WEBHOOKS` with a `cat-fleet-ref:` footer (hub
+  `CAT_FLEET_DISCORD_REFS=1`) naming an author in `CAT_FLEET_DISCORD_QUESTION_AUTHORS`
+  (the hub writes it only for `fleet_author` messages). A `cat-fleet-relay` bot post
+  registers its target from the delivered hub event under the same rule. Text that
+  merely looks like a question and coalesced posts are ignored. A lead head may name
+  one question: `[LEAD <run dir> Q<n>]` sends `<run dir> Q<n> answer: (a)`.
 - 👍 / 👎 add `+1` / `-1` on a known **feed post**, as the reacting human.
   Chat message ids are never used as feed ids. Removing an emoji does nothing.
 

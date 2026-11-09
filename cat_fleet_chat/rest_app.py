@@ -165,8 +165,15 @@ class Guard:
         return _forbidden("a relay token cannot use this route")
 
     def _denied(self, request: Request, *, auth: bool = True) -> JSONResponse | None:
-        if auth and self.settings.token:
-            presented = request.headers.get("authorization", "")
+        presented = request.headers.get("authorization", "")
+        reserved = auth and any(
+            hmac.compare_digest(presented, f"Bearer {secret}") for secret in self.settings.reserved_author_tokens
+        )
+        if reserved:
+            # A reserved-author token is a fleet token that may also post as the
+            # fleet's reserved author (``Hub.post_message(reserved_author_ok=)``).
+            request.scope.setdefault("state", {})["reserved_author"] = True
+        elif auth and self.settings.token:
             expected = f"Bearer {self.settings.token}"
             if not hmac.compare_digest(presented, expected):
                 return _unauthorized()
@@ -287,6 +294,7 @@ async def post_message(request: Request) -> JSONResponse:
             attachments_value=body.get("attachments"),
             destination_value=body.get("destination"),
             origin_value=body.get("origin"),
+            reserved_author_ok=relay is None and request.scope.get("state", {}).get("reserved_author") is True,
         )
         return JSONResponse(result, status_code=201)
     except HubError as exc:

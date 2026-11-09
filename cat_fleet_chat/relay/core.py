@@ -239,6 +239,10 @@ class RelayCore:
                 return True
             rendered = render(event, route["format"])
         rendered = self._masked(rendered)
+        if route is None or event.get("kind") == "message.created":
+            # The structured hub message (author, origin, fleet_author): an adapter
+            # registers reaction targets from it, never from the rendered text.
+            rendered.extra["hub_message"] = event.get("payload") or {}
         nonce = f"cf{route['id'] if route else 0}-{event['id']}"[:25]
         try:
             await self.adapter.send(external, rendered, nonce=nonce)

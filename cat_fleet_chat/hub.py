@@ -135,6 +135,9 @@ class Hub(RelayHubMixin):
         # Fleet posting handles (CAT_FLEET_RESERVED_AUTHORS, lower-cased). An inbound
         # hook never posts as one: the Discord relay trusts questions by this author.
         self.reserved_authors: frozenset[str] = frozenset({"cat-fleet"})
+        # True when CAT_FLEET_RESERVED_AUTHOR_TOKENS is set: then only those tokens
+        # (``reserved_author_ok``) may post as a reserved author; everyone else gets 403.
+        self.reserved_enforced = False
 
     async def _write(self, fn):
         result = await self.db.write(fn)
@@ -407,8 +410,15 @@ class Hub(RelayHubMixin):
         attachments_value: Any = None,
         destination_value: Any = None,
         origin_value: Any = None,
+        *,
+        reserved_author_ok: bool = False,
     ) -> dict[str, Any]:
         """Post a message.
+
+        ``reserved_author_ok`` is set only by the REST route for a caller holding a
+        CAT_FLEET_RESERVED_AUTHOR_TOKENS secret. Such a post as a reserved author,
+        without ``origin``, gets ``fleet_author: true`` in its ``message.created``
+        event: the provenance the Discord relays trust for question reactions.
 
         ``destination`` addresses it to an outbound webhook (a Discord channel).
         With no destination and a ``reply_to`` whose thread started in Discord,
@@ -425,6 +435,11 @@ class Hub(RelayHubMixin):
         key = client_request_id(client_request_id_value)
         explicit_destination = destination_name(destination_value)
         clean_origin = origin(origin_value)
+        reserved = clean_author.lower() in self.reserved_authors
+        if reserved and self.reserved_enforced and not reserved_author_ok:
+            raise HubError("forbidden", "only the fleet's reserved-author token may post as this author", 403,
+                           {"field": "author"})
+        fleet_author = reserved and reserved_author_ok and not clean_origin
         mentions = parse_mentions(clean_text)
         payload = {
             "channel": clean_channel,
@@ -492,7 +507,8 @@ class Hub(RelayHubMixin):
                 "message.created",
                 found["id"],
                 message_id,
-                message,
+                # Provenance lives only in the event (outbound hooks and relays read it).
+                {**message, "fleet_author": True} if fleet_author else message,
                 created_at,
             )
             result: dict[str, Any] = {"message": message}
