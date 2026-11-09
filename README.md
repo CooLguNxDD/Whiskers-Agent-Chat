@@ -367,7 +367,10 @@ Reactions permissions. Defaults:
   A Cat Fleet lead-run question has no S id: `[LEAD <run-folder>] <feature>: ...`
   sends `<run-folder> answer: (a)`, and the older `[LEAD] <feature>: ...` head sends
   `<feature> answer: (a)`. Its options count only as `(a) ...` lines. A post with
-  two lead runs, or a lead and an `[S..]` question, maps to nothing.
+  two lead runs, or a lead and an `[S..]` question, maps to nothing. Question
+  answers (step and lead) apply only to posts the fleet made: a hub webhook listed
+  in `CAT_FLEET_DISCORD_REF_WEBHOOKS` (how hub questions reach Discord) or the
+  relay's own bot user. The same tags in anyone else's post are ignored.
 - 👍 / 👎 add `+1` / `-1` on a known **feed post**, as the reacting human.
   Chat message ids are never used as feed ids. Removing an emoji does nothing.
 

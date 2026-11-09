@@ -93,7 +93,7 @@ pytest
 | `CAT_FLEET_DISCORD_REACTIONS` | unset | Optional relay emoji/action map; unset uses built-in defaults (`discord_relay.py`) |
 | `CAT_FLEET_DISCORD_REACTION_USERS` | unset | Discord user-ID allowlist for relay reaction actions; empty disables actions |
 | `CAT_FLEET_DISCORD_STATE` | `./cat_fleet_discord_state.json` | Relay's persistent message-reference map |
-| `CAT_FLEET_DISCORD_REF_WEBHOOKS` | unset | Relay allowlist of webhook IDs whose reference footers are trusted |
+| `CAT_FLEET_DISCORD_REF_WEBHOOKS` | unset | Relay allowlist of webhook IDs whose reference footers are trusted; also the only webhooks whose `[S..]` / `[LEAD ..]` questions take 🇦..🇪 answer reactions (besides the relay's own bot user) |
 | `CAT_FLEET_RELAY_TOKEN` | unset | `cat-fleet-relay` only: the relay's scoped `rly_` token (never the fleet token); also `CAT_FLEET_RELAY_NAME`, `_PLATFORM`, `_STATE` |
 | `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` / `TELEGRAM_BOT_TOKEN` | unset | `cat-fleet-relay --platform slack\|telegram` only, not the hub |
 | `CAT_FLEET_EMBED_PROVIDER` | `off` | `off`, `openai` or `content-parts`; also `CAT_FLEET_EMBED_URL`, `_MODEL`, `_API_KEY`, `_BATCH`, `_TIMEOUT` (see `docs/search.md`) |

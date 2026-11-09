@@ -378,12 +378,15 @@ class MessageRefs:
 
     def remember_text(
         self, message_id: int, text: str, *, hub_post_id: int | None = None,
-        feed_post_id: int | None = None, hub_channel: str | None = None,
+        feed_post_id: int | None = None, hub_channel: str | None = None, fleet: bool = False,
     ) -> MessageRef:
+        """``fleet`` marks text the fleet itself posted (``remember``); only then do
+        ``[S..]`` / ``[LEAD ..]`` question targets count, so a foreign post cannot
+        aim an allowlisted human's answer reaction at a step or run."""
         prior = self.get(message_id) or MessageRef()
         proposals = set(p.upper() for p in PROPOSAL_RE.findall(text))
-        steps = set(STEP_RE.findall(text))
-        leads = {match[1] or match[2] for match in LEAD_RE.finditer(text)}
+        steps = set(STEP_RE.findall(text)) if fleet else set()
+        leads = {match[1] or match[2] for match in LEAD_RE.finditer(text)} if fleet else set()
         # Exactly one named lead question and no step question; anything else is ambiguous.
         lead = next(iter(leads)) if len(leads) == 1 and None not in leads and not steps else None
         options = LEAD_OPTION_RE.findall(text) if lead else OPTION_RE.findall(text)
@@ -404,7 +407,16 @@ class MessageRefs:
             self._changed()
         return ref
 
-    def remember(self, message: Any, **known: Any) -> MessageRef:
+    def is_fleet(self, message: Any, self_id: int | None = None) -> bool:
+        """Posted by the fleet: one of the hub's own webhooks (``ref_webhooks``,
+        how hub messages such as ``human_inbox`` questions reach Discord) or this
+        relay's own bot user (``cat-fleet-relay`` delivers hub messages itself)."""
+        if getattr(message, "webhook_id", None) is not None:
+            return message.webhook_id in self.ref_webhooks
+        author = getattr(getattr(message, "author", None), "id", None)
+        return self_id is not None and author == self_id
+
+    def remember(self, message: Any, *, self_id: int | None = None, **known: Any) -> MessageRef:
         # Single-entity webhook payloads carry typed metadata. Coalesced posts
         # intentionally have no reference: choosing one would target the wrong id.
         # Only the hub's own webhooks are trusted; another integration in a
@@ -438,7 +450,7 @@ class MessageRefs:
                 and (match := EMBED_PROPOSAL_RE.match(title))
             ]
             text = "\n".join([text, *ids]) if text else "\n".join(ids)
-        return self.remember_text(message.id, text, **known)
+        return self.remember_text(message.id, text, fleet=self.is_fleet(message, self_id), **known)
 
     def _changed(self) -> None:
         """Persist a change. Inside the event loop the write runs in a thread,
@@ -531,6 +543,8 @@ class ReactionActions:
     ):
         self.mapping, self.forward, self.refs = mapping, forward, refs
         self.users = users
+        # This relay's Discord user id (set on ready / on a reaction): its own posts are fleet posts.
+        self.bot_id: int | None = None
         self.reactions = dict(DEFAULT_REACTIONS) if reactions is None else reactions
         self.react, self.prefix, self.pace = react, prefix, pace
         self._add_lock = asyncio.Lock()
@@ -553,7 +567,7 @@ class ReactionActions:
         """Pre-add applicable actions, including on webhook posts, never their text."""
         if not self.users or self.mapped_id(message.channel) not in self.mapping:
             return
-        ref = self.refs.remember(message)
+        ref = self.refs.remember(message, self_id=self.bot_id)
         emojis = [emoji for emoji, template in self.reactions.items() if self.command(template, ref)]
         # Globally serialised and capped per message; discord.py handles rate
         # limits, and a failed add stops the batch rather than hammering Discord.
@@ -590,7 +604,8 @@ class ReactionActions:
         except Exception as exc:
             _log("could not fetch reaction target or human", exc)
             return "ignored"
-        ref = self.refs.remember(message)
+        self.bot_id = getattr(client.user, "id", None) or self.bot_id
+        ref = self.refs.remember(message, self_id=self.bot_id)
         command = self.command(template, ref)
         if command is None:
             return "ignored"
@@ -702,6 +717,7 @@ def main(argv: list[str] | None = None) -> None:
             sys.stderr.write(
                 f"cat-fleet-discord: logged in as {self.user}; relaying {len(mapping)} channel(s)\n"
             )
+            self.actions.bot_id = getattr(self.user, "id", None)
 
         async def on_message(self, message: Any) -> None:
             # Establish the chat ref before exposing actions to a fast-clicking

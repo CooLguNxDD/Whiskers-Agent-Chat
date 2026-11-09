@@ -159,6 +159,8 @@ class DiscordAdapter:
                 prefix=config.prefix,
             )
             self._actions_version = config.version
+        if self.client.user is not None:  # this relay's own posts are fleet posts (question targets)
+            self.actions.bot_id = self.client.user.id
         return self.actions
 
     async def _forward(self, payload: dict[str, Any]) -> tuple[bool, str]:

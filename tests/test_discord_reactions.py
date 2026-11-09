@@ -109,7 +109,7 @@ async def test_preadd_includes_webhooks_but_not_unmapped_or_ordinary_messages(se
     for message in (Message("hello"), Message("P1 and P2"), Message(channel=444)):
         await actions.observe(message)
         assert message.reactions == []
-    question = Message("[S03] Which? (a) first (c) third; evolve")
+    question = Message("[S03] Which? (a) first (c) third; evolve", webhook_id=55, bot=True)
     await actions.observe(question)
     assert question.reactions == ["⏸️", "▶️", "🇦", "🇨"]
 
@@ -123,7 +123,7 @@ async def test_preadd_includes_webhooks_but_not_unmapped_or_ordinary_messages(se
 ])
 async def test_allowed_human_posts_command_with_origin_and_stable_id(setup, emoji, text, expected):
     actions, refs, sent, _ = setup
-    message = Message(text)
+    message = Message(text, webhook_id=55, bot=True)  # questions count only from the hub's webhook
     refs.remember(message, hub_post_id=42, hub_channel="ops")
     await actions.on_raw_reaction_add(event(emoji), Discord(message))
     payload = sent[0]
@@ -438,7 +438,7 @@ async def test_preadds_are_paced_and_bounded(setup, monkeypatch):
 
     monkeypatch.setattr(relay.asyncio, "sleep", sleep)
     actions.pace = 0.25
-    message = Message("P1 evolve [S03] Which? (a) a (b) b (c) c (d) d (e) e")
+    message = Message("P1 evolve [S03] Which? (a) a (b) b (c) c (d) d (e) e", webhook_id=55, bot=True)
     await actions.observe(message)
     assert len(message.reactions) == 9
     assert pauses == [0.25] * 9
@@ -603,7 +603,8 @@ async def test_lead_question_preadds_only_its_option_lines(setup):
     assert message.reactions == ["🇦", "🇧", "🇨"]
     assert refs.get(900).lead == "2026-11-09-1008-judge-polish" and refs.get(900).step is None
     # Without option lines the hint's '(a)' is not an option: no reactions, no answer.
-    bare = Message("❓ [LEAD] judge-polish: Ready to ship?\nReply in Discord: 'judge-polish answer: (a)'")
+    bare = Message("❓ [LEAD] judge-polish: Ready to ship?\nReply in Discord: 'judge-polish answer: (a)'",
+                   webhook_id=55, bot=True)
     await actions.observe(bare)
     assert bare.reactions == []
 
@@ -616,7 +617,8 @@ async def test_lead_question_preadds_only_its_option_lines(setup):
 ])
 async def test_ambiguous_or_inapplicable_lead_reactions_ignored(setup, emoji, text):
     actions, _, sent, votes = setup
-    assert await actions.on_raw_reaction_add(event(emoji), Discord(Message(text))) == "ignored"
+    message = Message(text, webhook_id=55, bot=True)
+    assert await actions.on_raw_reaction_add(event(emoji), Discord(message)) == "ignored"
     assert sent == votes == []
 
 
@@ -629,8 +631,8 @@ async def test_lead_reaction_from_non_allowlisted_user_ignored(setup):
 
 def test_lead_ref_survives_reload_and_bad_lead_state_is_rejected(tmp_path):
     path = tmp_path / "state.json"
-    refs = relay.MessageRefs(path)
-    refs.remember(Message(LEAD_RUN_Q))
+    refs = relay.MessageRefs(path, ref_webhooks=frozenset({55}))
+    refs.remember(Message(LEAD_RUN_Q, webhook_id=55, bot=True))
     reloaded = relay.MessageRefs(path)
     assert reloaded.get(900).lead == "2026-11-09-1008-judge-polish"
     assert reloaded.get(900).options == ("a", "b", "c")
@@ -638,3 +640,44 @@ def test_lead_ref_survives_reload_and_bad_lead_state_is_rejected(tmp_path):
     rows[0][1]["lead"] = "bad name; rm -rf"
     path.write_text(json.dumps(rows))
     assert len(relay.MessageRefs(path)) == 0
+
+
+# Sol review of 5d4db24: question targets come only from the fleet's own posts.
+STEP_Q = "❓ [S03] judge-polish: Which judge?\n(a) strict\n(b) lenient"
+
+
+@pytest.mark.parametrize("text", [LEAD_RUN_Q, LEAD_FEATURE_Q, STEP_Q])
+@pytest.mark.parametrize("author", [
+    {},  # an ordinary Discord user
+    {"bot": True},  # another bot
+    {"webhook_id": 77, "bot": True},  # a webhook that is not the hub's
+])
+async def test_foreign_question_posts_never_map_answers(setup, text, author):
+    actions, refs, sent, _ = setup
+    message = Message(text, **author)
+    await actions.observe(message)
+    assert message.reactions == []
+    for emoji in ("🇦", "🇧"):
+        assert await actions.on_raw_reaction_add(event(emoji), Discord(message)) == "ignored"
+    ref = refs.get(900)
+    assert ref.step is None and ref.lead is None and sent == []
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    (LEAD_RUN_Q, "2026-11-09-1008-judge-polish answer: (a)"),
+    (STEP_Q, "S03 answer: (a)"),
+])
+async def test_fleet_question_posts_map_answers(setup, text, expected):
+    actions, _, sent, _ = setup
+    hub = Message(text, webhook_id=55, bot=True)  # the hub's outbound webhook
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(hub)) == "sent"
+    own = Message(text, bot=True)  # this relay's own bot user (cat-fleet-relay delivery)
+    own.author.id = 999
+    assert await actions.on_raw_reaction_add(event("🇦"), Discord(own)) == "sent"
+    assert [p["text"] for p in sent] == [expected, expected]
+
+
+async def test_relayed_human_text_never_becomes_a_question_target(tmp_path):
+    refs = relay.MessageRefs(tmp_path / "state.json", ref_webhooks=frozenset({55}))
+    ref = refs.remember_text(900, LEAD_RUN_Q, hub_post_id=42, hub_channel="fleet")
+    assert ref.lead is None and ref.step is None
