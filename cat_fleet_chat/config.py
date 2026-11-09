@@ -52,6 +52,10 @@ class Settings:
     # CAT_FLEET_DISCORD_REACTIONS / CAT_FLEET_DISCORD_REACTION_USERS) can map a
     # reaction back to its hub message or feed post after a restart.
     discord_refs: bool = False
+    # CAT_FLEET_RESERVED_AUTHORS: the fleet's own posting handles (Cat Fleet posts
+    # human_inbox questions as ``cat-fleet``). Inbound hooks may not post as them,
+    # so the relay can trust a question whose ref footer names one of them.
+    reserved_authors: frozenset[str] = frozenset({"cat-fleet"})
 
     @property
     def loopback_bind(self) -> bool:
@@ -121,6 +125,7 @@ def load_settings() -> Settings:
         embed_timeout=embed_timeout,
         human_handles=human_handles(os.environ.get("CAT_FLEET_HUMAN_HANDLES", "")),
         discord_refs=_env_str("CAT_FLEET_DISCORD_REFS", "0").lower() in {"1", "true", "yes", "on"},
+        reserved_authors=human_handles(os.environ.get("CAT_FLEET_RESERVED_AUTHORS", "cat-fleet")),
     )
 
 

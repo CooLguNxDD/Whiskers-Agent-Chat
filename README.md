@@ -368,9 +368,14 @@ Reactions permissions. Defaults:
   sends `<run-folder> answer: (a)`, and the older `[LEAD] <feature>: ...` head sends
   `<feature> answer: (a)`. Its options count only as `(a) ...` lines. A post with
   two lead runs, or a lead and an `[S..]` question, maps to nothing. Question
-  answers (step and lead) apply only to posts the fleet made: a hub webhook listed
-  in `CAT_FLEET_DISCORD_REF_WEBHOOKS` (how hub questions reach Discord) or the
-  relay's own bot user. The same tags in anyone else's post are ignored.
+  answers (step and lead) apply only to hub messages written by the fleet's
+  question poster: the post must come from a webhook in
+  `CAT_FLEET_DISCORD_REF_WEBHOOKS` and its `cat-fleet-ref:` footer (hub
+  `CAT_FLEET_DISCORD_REFS=1`) must name an author in
+  `CAT_FLEET_DISCORD_QUESTION_AUTHORS` (default `cat-fleet`). The hub writes that
+  author only for messages without `origin` (never relayed human text) and refuses
+  inbound-hook posts as `CAT_FLEET_RESERVED_AUTHORS`. Text that merely looks like
+  a question, coalesced posts and bot-delivered copies are ignored.
 - 👍 / 👎 add `+1` / `-1` on a known **feed post**, as the reacting human.
   Chat message ids are never used as feed ids. Removing an emoji does nothing.
 

@@ -19,6 +19,7 @@ import logging
 from typing import Any
 
 from cat_fleet_chat.discord_relay import (
+    DEFAULT_QUESTION_AUTHORS,
     MessageRefs,
     ReactionActions,
     message_text,
@@ -149,6 +150,12 @@ class DiscordAdapter:
             self.refs.ref_webhooks = frozenset(
                 int(w) for w in config.settings.get("ref_webhooks", []) if str(w).isdigit()
             )
+            # Hub authors whose questions take answer reactions (default: cat-fleet).
+            authors = config.settings.get("question_authors")
+            self.refs.question_authors = (
+                frozenset(str(a).lower() for a in authors if isinstance(a, str)) if isinstance(authors, list)
+                else DEFAULT_QUESTION_AUTHORS
+            )
             self.actions = ReactionActions(
                 mapping,
                 self._forward,
@@ -159,8 +166,6 @@ class DiscordAdapter:
                 prefix=config.prefix,
             )
             self._actions_version = config.version
-        if self.client.user is not None:  # this relay's own posts are fleet posts (question targets)
-            self.actions.bot_id = self.client.user.id
         return self.actions
 
     async def _forward(self, payload: dict[str, Any]) -> tuple[bool, str]:

@@ -53,6 +53,8 @@ def create_app(
         hub.feed_post_hooks.append(hub.knowledge_from_feed_post)
         # Who may steer proposals and the evolve pause flag with chat commands.
         hub.human_handles = settings.human_handles
+        # Fleet posting handles that inbound hooks may not claim.
+        hub.reserved_authors = settings.reserved_authors
         app.state.hub = hub
         app.state.settings = settings
         app.state.process_lock = lock

@@ -132,6 +132,9 @@ class Hub(RelayHubMixin):
         # Handles whose chat commands (evolve.py) steer proposals and the evolve
         # pause flag. The app sets it from CAT_FLEET_HUMAN_HANDLES; empty means nobody.
         self.human_handles: frozenset[str] = frozenset()
+        # Fleet posting handles (CAT_FLEET_RESERVED_AUTHORS, lower-cased). An inbound
+        # hook never posts as one: the Discord relay trusts questions by this author.
+        self.reserved_authors: frozenset[str] = frozenset({"cat-fleet"})
 
     async def _write(self, fn):
         result = await self.db.write(fn)
@@ -3112,6 +3115,11 @@ class Hub(RelayHubMixin):
         if hook["allow_override"]:
             channel = body.get("channel") or channel
             author = body.get("author") or author
+        if isinstance(author, str) and author.strip().lower() in self.reserved_authors:
+            # A hook secret holder is not the fleet: never let it speak as the
+            # handle whose questions take Discord answer reactions.
+            raise HubError("forbidden", "an inbound hook cannot post as a reserved fleet author", 403,
+                           {"field": "author"})
         key = client_request_id(body.get("client_request_id"))
         if key is not None and len(key) > 120:
             raise HubError("validation_error", "client_request_id must be 1..120 characters", 400)

@@ -234,6 +234,9 @@ LEAD_NAME_RE = re.compile(LEAD_NAME)
 # ``'x answer: (a)'`` inside a line is not an option.
 LEAD_OPTION_RE = re.compile(r"^\s*\(([a-e])\)\s", re.IGNORECASE | re.MULTILINE)
 REF_PREFIX = "cat-fleet-ref:"
+# The fleet's question poster (Cat Fleet ``chat.author``); keep in step with the
+# hub's CAT_FLEET_RESERVED_AUTHORS so no inbound hook can post as it.
+DEFAULT_QUESTION_AUTHORS = frozenset({"cat-fleet"})
 # The ``P<n>:`` prefix of a hub proposal embed title.
 EMBED_PROPOSAL_RE = re.compile(r"(P[1-9][0-9]{0,17}):", re.IGNORECASE)
 
@@ -293,6 +296,14 @@ def parse_reaction_users(raw: str | None) -> frozenset[int]:
     return _parse_ids("CAT_FLEET_DISCORD_REACTION_USERS", raw)
 
 
+def parse_question_authors(raw: str | None) -> frozenset[str]:
+    """CAT_FLEET_DISCORD_QUESTION_AUTHORS: hub handles whose questions take answer
+    reactions; unset means ``cat-fleet``, empty (or only commas) means none."""
+    if raw is None:
+        return DEFAULT_QUESTION_AUTHORS
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 def parse_ref_webhooks(raw: str | None) -> frozenset[int]:
     """CAT_FLEET_DISCORD_REF_WEBHOOKS: ids of the hub's own Discord webhooks.
 
@@ -331,6 +342,7 @@ class MessageRefs:
 
     def __init__(
         self, path: str | Path, limit: int = 5000, *, ref_webhooks: frozenset[int] = frozenset(),
+        question_authors: frozenset[str] = DEFAULT_QUESTION_AUTHORS,
     ):
         if limit < 1:
             raise ValueError("message reference limit must be positive")
@@ -338,6 +350,8 @@ class MessageRefs:
         self.limit = limit
         # Webhooks whose ref footers are trusted (the hub's outbound hooks).
         self.ref_webhooks = ref_webhooks
+        # Hub authors whose [S..] / [LEAD ..] questions take answer reactions (lower-cased).
+        self.question_authors = frozenset(a.lower() for a in question_authors)
         self._refs: dict[int, MessageRef] = {}
         self._dirty = False
         self._flush_task: asyncio.Task | None = None
@@ -407,20 +421,12 @@ class MessageRefs:
             self._changed()
         return ref
 
-    def is_fleet(self, message: Any, self_id: int | None = None) -> bool:
-        """Posted by the fleet: one of the hub's own webhooks (``ref_webhooks``,
-        how hub messages such as ``human_inbox`` questions reach Discord) or this
-        relay's own bot user (``cat-fleet-relay`` delivers hub messages itself)."""
-        if getattr(message, "webhook_id", None) is not None:
-            return message.webhook_id in self.ref_webhooks
-        author = getattr(getattr(message, "author", None), "id", None)
-        return self_id is not None and author == self_id
-
-    def remember(self, message: Any, *, self_id: int | None = None, **known: Any) -> MessageRef:
+    def remember(self, message: Any, **known: Any) -> MessageRef:
         # Single-entity webhook payloads carry typed metadata. Coalesced posts
         # intentionally have no reference: choosing one would target the wrong id.
         # Only the hub's own webhooks are trusted; another integration in a
         # mapped channel must not aim a human's vote or reply at any hub id.
+        fleet = False  # a question target only when the footer names a fleet author
         if getattr(message, "webhook_id", None) in self.ref_webhooks:
             for embed in getattr(message, "embeds", []):
                 footer = getattr(getattr(embed, "footer", None), "text", None)
@@ -436,6 +442,11 @@ class MessageRefs:
                     elif data["kind"] == "message" and CHANNEL_RE.fullmatch(data.get("channel", "")):
                         known.setdefault("hub_post_id", post_id)
                         known.setdefault("hub_channel", data["channel"])
+                        # Provenance, not carrier: the hub writes the stored author
+                        # here only for messages no relay carried in, and inbound
+                        # hooks may not post as a reserved fleet author.
+                        author = data.get("author")
+                        fleet = isinstance(author, str) and author.lower() in self.question_authors
                 except (ValueError, KeyError, TypeError, RecursionError):
                     continue
         text = message_text(message)
@@ -450,7 +461,7 @@ class MessageRefs:
                 and (match := EMBED_PROPOSAL_RE.match(title))
             ]
             text = "\n".join([text, *ids]) if text else "\n".join(ids)
-        return self.remember_text(message.id, text, fleet=self.is_fleet(message, self_id), **known)
+        return self.remember_text(message.id, text, fleet=fleet, **known)
 
     def _changed(self) -> None:
         """Persist a change. Inside the event loop the write runs in a thread,
@@ -543,8 +554,6 @@ class ReactionActions:
     ):
         self.mapping, self.forward, self.refs = mapping, forward, refs
         self.users = users
-        # This relay's Discord user id (set on ready / on a reaction): its own posts are fleet posts.
-        self.bot_id: int | None = None
         self.reactions = dict(DEFAULT_REACTIONS) if reactions is None else reactions
         self.react, self.prefix, self.pace = react, prefix, pace
         self._add_lock = asyncio.Lock()
@@ -567,7 +576,7 @@ class ReactionActions:
         """Pre-add applicable actions, including on webhook posts, never their text."""
         if not self.users or self.mapped_id(message.channel) not in self.mapping:
             return
-        ref = self.refs.remember(message, self_id=self.bot_id)
+        ref = self.refs.remember(message)
         emojis = [emoji for emoji, template in self.reactions.items() if self.command(template, ref)]
         # Globally serialised and capped per message; discord.py handles rate
         # limits, and a failed add stops the batch rather than hammering Discord.
@@ -604,8 +613,7 @@ class ReactionActions:
         except Exception as exc:
             _log("could not fetch reaction target or human", exc)
             return "ignored"
-        self.bot_id = getattr(client.user, "id", None) or self.bot_id
-        ref = self.refs.remember(message, self_id=self.bot_id)
+        ref = self.refs.remember(message)
         command = self.command(template, ref)
         if command is None:
             return "ignored"
@@ -681,6 +689,7 @@ def main(argv: list[str] | None = None) -> None:
         reactions = parse_reactions(os.environ.get("CAT_FLEET_DISCORD_REACTIONS"))
         reaction_users = parse_reaction_users(os.environ.get("CAT_FLEET_DISCORD_REACTION_USERS"))
         ref_webhooks = parse_ref_webhooks(os.environ.get("CAT_FLEET_DISCORD_REF_WEBHOOKS"))
+        question_authors = parse_question_authors(os.environ.get("CAT_FLEET_DISCORD_QUESTION_AUTHORS"))
     except ValueError as exc:
         parser.error(str(exc))
     if not args.discord_token:
@@ -700,6 +709,7 @@ def main(argv: list[str] | None = None) -> None:
     refs = MessageRefs(
         os.environ.get("CAT_FLEET_DISCORD_STATE", "cat_fleet_discord_state.json"),
         ref_webhooks=ref_webhooks,
+        question_authors=question_authors,
     )
     ok_reaction, fail_reaction = status_reactions(reactions, reaction_users)
 
@@ -717,7 +727,6 @@ def main(argv: list[str] | None = None) -> None:
             sys.stderr.write(
                 f"cat-fleet-discord: logged in as {self.user}; relaying {len(mapping)} channel(s)\n"
             )
-            self.actions.bot_id = getattr(self.user, "id", None)
 
         async def on_message(self, message: Any) -> None:
             # Establish the chat ref before exposing actions to a fast-clicking

@@ -175,6 +175,7 @@ click at anything else, and the hub checks every action:
 | `action_users` | `[]` | Platform user ids whose buttons and reactions act |
 | `reactions` | built-in map | Discord emoji → action (`approve {P}`, `pause evolve`, `{step} answer: (a)`, `+1`, …; same grammar as `CAT_FLEET_DISCORD_REACTIONS`) |
 | `ref_webhooks` | `[]` | Discord webhook ids whose `cat-fleet-ref:` footers are trusted |
+| `question_authors` | `["cat-fleet"]` | Hub authors whose `[S..]` / `[LEAD ..]` questions take 🇦..🇪 answer reactions; read from the ref footer of a trusted webhook post, never from text |
 | `guilds` | `[]` | Discord guilds to sync slash commands to (empty: global, which can take an hour) |
 | `mask` | `true` | Mask credential shapes in relayed text, both directions |
 | `status_marks` | `true` | Mark relayed messages delivered or failed |
