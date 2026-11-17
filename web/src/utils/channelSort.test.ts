@@ -17,12 +17,15 @@ const rows = [
 ]
 
 describe("sortChannels", () => {
+  const order = rows.map((c) => c.name)
+
   it("puts the latest message first, empty channels by creation, ties by name", () => {
     expect(sortChannels(rows, "latest").map((c) => c.name)).toEqual(["beta", "delta", "gamma", "alpha"])
+    expect(rows.map((c) => c.name)).toEqual(order)
   })
 
-  it("sorts by name and never mutates the input", () => {
+  it("sorts by name without mutating the input", () => {
     expect(sortChannels(rows, "name").map((c) => c.name)).toEqual(["alpha", "beta", "delta", "gamma"])
-    expect(rows[0].name).toBe("alpha")
+    expect(rows.map((c) => c.name)).toEqual(order)
   })
 })
