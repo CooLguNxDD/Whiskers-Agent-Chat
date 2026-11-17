@@ -4,6 +4,7 @@ import { usePrefs } from "@/store"
 import { themeList } from "@/themes/registry"
 import { accents } from "@/themes/appearance"
 import { chatBackgrounds } from "@/store/prefsSlice"
+import { resetAllDocks } from "@/components/ui/dock"
 
 /** Theme previews and accent swatches with immediate, device-local persistence. */
 export default function Appearance(props: { open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -44,6 +45,13 @@ export default function Appearance(props: { open: boolean; onOpenChange: (open: 
           {bg}
         </button>}</For>
       </div>
+    </fieldset>
+    <fieldset class="mt-5">
+      <legend class="mb-3 text-sm text-cream-dim">Layout</legend>
+      <button type="button" class="theme-choice rounded-lg border border-line px-3 py-2 text-sm" onClick={resetAllDocks}>
+        Reset panel layout
+      </button>
+      <span class="ml-3 text-xs text-cream-dim">Drag panel tabs to dock them; drag the bars between panels to resize.</span>
     </fieldset>
     <p class="mt-4 text-xs text-cream-dim">Changes apply immediately and are saved on this device.</p>
   </Modal>

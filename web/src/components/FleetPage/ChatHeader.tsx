@@ -77,7 +77,7 @@ export default function ChatHeader(props: ChatHeaderProps) {
         </div>
         <button
           type="button"
-          class="icon-btn hidden xl:inline-flex"
+          class="icon-btn"
           aria-pressed={props.rosterOpen}
           onClick={props.onToggleRoster}
           title={props.rosterOpen ? "Hide fleet panel" : "Show fleet panel"}

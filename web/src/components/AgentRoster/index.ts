@@ -1,2 +1,2 @@
-export { default } from "./AgentRoster"
+export { default, InProgressTasks } from "./AgentRoster"
 export type { AgentRosterProps } from "./AgentRoster"
