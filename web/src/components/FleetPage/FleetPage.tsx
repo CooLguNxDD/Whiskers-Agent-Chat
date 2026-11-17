@@ -2,7 +2,8 @@ import { createEffect, createMemo, createSignal, on, Show } from "solid-js"
 import type { FleetMessage } from "@/api/types"
 import Composer from "@/components/Composer"
 import MessageStream from "@/components/MessageStream"
-import AgentRoster from "@/components/AgentRoster"
+import { fleetPanel, inProgressPanel } from "@/components/panels"
+import { createDockState, DockArea, split, stack, type PanelDef, type PanelHome } from "@/components/ui/dock"
 import { useActiveChannel } from "@/hooks/useChannels"
 import { createMessageWindow } from "@/hooks/useMessages"
 import { usePrefs, useUIStore } from "@/store"
@@ -13,7 +14,22 @@ import ChatHeader, { type StreamFilter } from "./ChatHeader"
 
 export type FleetPageProps = Record<string, never>
 
-/** The room: a header with tabs and find, the live transcript, a composer, and the fleet panel. Channels live in the app sidebar. */
+/** Default chat layout: transcript on the left; fleet roster over in-progress tasks on the right. */
+export const chatDefaultLayout = () =>
+  split("row", [stack(["chat"]), split("col", [stack(["fleet"]), stack(["in-progress"])], [0.6, 0.4])], [0.76, 0.24])
+
+const CHAT_PANELS = ["chat", "fleet", "in-progress"]
+/** Where a re-opened panel docks: beside its sibling, else the right edge at 24%. */
+const CHAT_HOMES: Record<string, PanelHome> = {
+  fleet: { zone: "right", share: 0.24, near: { panel: "in-progress", zone: "top" } },
+  "in-progress": { zone: "right", share: 0.24, near: { panel: "fleet", zone: "bottom" } },
+}
+
+/**
+ * The room as a dock (panel kit): the Chat panel (header with tabs and find, the live transcript,
+ * a composer), Fleet and In progress, resizable and re-dockable; the layout is saved per device.
+ * Channels live in the app sidebar.
+ */
 export default function FleetPage() {
   const ui = useUIStore()
   const prefs = usePrefs()
@@ -23,7 +39,7 @@ export default function FleetPage() {
   const [findOpen, setFindOpen] = createSignal(false)
   const [query, setQuery] = createSignal("")
   const [matchIndex, setMatchIndex] = createSignal(-1)
-  const [rosterOpen, setRosterOpen] = createSignal(true)
+  const dock = createDockState("chat", CHAT_PANELS, chatDefaultLayout, CHAT_HOMES)
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [filter, setFilter] = createSignal<StreamFilter>("all")
   const me = () => prefs.displayName().trim()
@@ -52,11 +68,7 @@ export default function FleetPage() {
     if (!open) { setQuery(""); setMatchIndex(-1); ui.requestComposerFocus() }
   }
 
-  return (
-    <div
-      class="grid min-h-0 flex-1 grid-cols-1 animate-[fade-in_160ms_ease-out]"
-      classList={{ "xl:grid-cols-[minmax(0,1fr)_300px]": rosterOpen() }}
-    >
+  const chatPanel: PanelDef = { id: "chat", title: "Chat", icon: "chat", closable: false, render: () => (
       <section class="chat-surface flex min-h-0 min-w-0 flex-col" data-bg={prefs.chatBackground()}>
         <ChatHeader
           channel={active()}
@@ -72,8 +84,8 @@ export default function FleetPage() {
           onFindOpen={openFind}
           onQuery={setQuery}
           onStep={step}
-          rosterOpen={rosterOpen()}
-          onToggleRoster={() => setRosterOpen((open) => !open)}
+          rosterOpen={dock.isOpen("fleet")}
+          onToggleRoster={() => dock.toggle("fleet")}
         />
         <Show when={active() && active()!.state !== "active" ? active() : undefined}>
           {(channel) => (
@@ -99,7 +111,11 @@ export default function FleetPage() {
         />
         <Composer replyTo={replyTo()} onClearReply={() => setReplyTo(null)} />
       </section>
-      <Show when={rosterOpen()}><AgentRoster /></Show>
+  ) }
+
+  return (
+    <div class="flex min-h-0 flex-1 animate-[fade-in_160ms_ease-out]">
+      <DockArea dock={dock} panels={[chatPanel, fleetPanel, inProgressPanel]} />
       <ChannelSettings channel={active()} open={settingsOpen()} onOpenChange={setSettingsOpen} />
     </div>
   )

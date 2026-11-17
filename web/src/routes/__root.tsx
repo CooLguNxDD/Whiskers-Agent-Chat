@@ -8,6 +8,7 @@ import { Icon, type IconName } from "@/components/ui/icons"
 import { Input } from "@/components/ui/input"
 import { Modal } from "@/components/ui/dialog"
 import { INFRA_PATHS } from "@/components/ui/page"
+import { readDockNumber, ResizeHandle, writeDockNumber } from "@/components/ui/dock"
 import { useFleetStream } from "@/hooks/useFleetStream"
 import { useProposals } from "@/hooks/useProposals"
 import { useTasks } from "@/hooks/useTasks"
@@ -62,6 +63,9 @@ function NavLink(props: { href: string; label: string; icon: IconName; active?: 
   )
 }
 
+const SIDEBAR = { key: "sidebar-width", fallback: 248, min: 200, max: 420, step: 16 } as const
+const clampSidebar = (width: number) => Math.min(SIDEBAR.max, Math.max(SIDEBAR.min, width))
+
 function NavCount(props: { value: number | undefined }) {
   return <Show when={props.value}><span class="nav-count">{props.value}</span></Show>
 }
@@ -69,7 +73,8 @@ function NavCount(props: { value: number | undefined }) {
 /**
  * App shell: a left sidebar (brand, primary nav with counts, channels,
  * Infrastructure, connection, profile) and a slim top bar (breadcrumb, fleet
- * status, search, avatar). On narrow screens the sidebar becomes a drawer.
+ * status, search, avatar). On narrow screens the sidebar becomes a drawer; on wider ones its
+ * right edge drags (or arrow-keys) to resize, saved per device with the panel-kit layouts.
  * Ctrl/⌘+K opens Search on every page except Chat, where it finds in the channel.
  */
 export function RootLayout(props: ParentProps) {
@@ -86,6 +91,15 @@ export function RootLayout(props: ParentProps) {
   const [dismissedPrompt, setDismissedPrompt] = createSignal(false)
   const [draftToken, setDraftToken] = createSignal("")
   const [drawer, setDrawer] = createSignal(false)
+  const [sidebarWidth, setSidebarWidth] = createSignal(readDockNumber(SIDEBAR.key, SIDEBAR.fallback, SIDEBAR.min, SIDEBAR.max))
+  let sidebarStart: number = SIDEBAR.fallback
+  const resizeSidebar = (width: number, persist: boolean) => {
+    setSidebarWidth(clampSidebar(width))
+    if (persist) writeDockNumber(SIDEBAR.key, sidebarWidth())
+  }
+  const onDockReset = () => setSidebarWidth(SIDEBAR.fallback)
+  window.addEventListener("cat-fleet-dock-reset", onDockReset)
+  onCleanup(() => window.removeEventListener("cat-fleet-dock-reset", onDockReset))
   const showToken = () => tokenOpen() || (session.tokenRequired() && !dismissedPrompt())
   const onChat = () => location.pathname === "/"
   const onInfra = () => INFRA_PATHS.includes(location.pathname)
@@ -117,8 +131,9 @@ export function RootLayout(props: ParentProps) {
           <div class="fixed inset-0 z-30 bg-black/40 md:hidden" aria-hidden="true" onClick={() => setDrawer(false)} />
         </Show>
         <aside
-          class="app-sidebar fixed inset-y-0 left-0 z-40 flex w-[248px] shrink-0 -translate-x-full flex-col border-r border-line transition-transform md:static md:translate-x-0"
+          class="app-sidebar fixed inset-y-0 left-0 z-40 flex w-[248px] shrink-0 -translate-x-full flex-col border-r border-line transition-transform md:relative md:w-(--sidebar-w) md:translate-x-0"
           classList={{ "translate-x-0": drawer() }}
+          style={{ "--sidebar-w": `${sidebarWidth()}px` }}
           aria-label="Main"
         >
           <A href="/" class="flex items-center gap-3 px-6 pb-5 pt-6">
@@ -176,6 +191,16 @@ export function RootLayout(props: ParentProps) {
               ><Icon name="key" /></button>
             </div>
           </div>
+          <ResizeHandle
+            dir="row"
+            label="Resize sidebar"
+            class="sidebar-resizer hidden md:block"
+            value={((sidebarWidth() - SIDEBAR.min) / (SIDEBAR.max - SIDEBAR.min)) * 100}
+            onStart={() => { sidebarStart = sidebarWidth() }}
+            onMove={(px) => resizeSidebar(sidebarStart + px, false)}
+            onEnd={() => writeDockNumber(SIDEBAR.key, sidebarWidth())}
+            onStep={(direction) => resizeSidebar(sidebarWidth() + direction * SIDEBAR.step, true)}
+          />
         </aside>
         <div class="flex min-h-0 min-w-0 flex-1 flex-col">
           <header class="topbar flex h-[72px] shrink-0 items-center gap-3 border-b border-line px-5 sm:px-8">

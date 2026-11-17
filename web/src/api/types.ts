@@ -52,6 +52,8 @@ export interface Channel {
   /** Set while the channel is archived (read-only); mirrors state === "archived". */
   archived_at: string | null
   archived_by: string | null
+  /** Newest message's created_at (channel list only); null when the channel is empty. */
+  last_message_at?: string | null
 }
 
 export interface TaskEvent {

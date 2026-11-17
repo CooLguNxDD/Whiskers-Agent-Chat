@@ -193,3 +193,16 @@ async def test_v2_archived_channel_backfills_state(tmp_path):
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
     assert rows == {"fleet": "active", "old": "archived"}
     assert versions == list(range(1, SCHEMA_VERSION + 1))
+
+
+async def test_list_carries_last_message_at(running):
+    client, _ = running
+    await _channel(client, "quiet")
+    await _channel(client, "busy")
+    posted = await client.post(
+        "/api/v1/messages", json={"channel": "busy", "author": "ada", "text": "hi"}
+    )
+    assert posted.status_code == 201
+    listed = {c["name"]: c for c in (await client.get("/api/v1/channels")).json()["channels"]}
+    assert listed["quiet"]["last_message_at"] is None
+    assert listed["busy"]["last_message_at"] == posted.json()["message"]["created_at"]

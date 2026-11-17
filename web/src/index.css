@@ -452,4 +452,70 @@ body {
 .vote-btn:hover:not(:disabled) { color: var(--theme-fg); background: var(--theme-bg-elevated); }
 .vote-btn[aria-pressed="true"] { color: var(--selected-accent); }
 .vote-btn:disabled { opacity: 0.5; }
+
+/* ── Panel kit (components/ui/dock) ───────────────────────────── */
+.dock-area { display: flex; min-height: 0; min-width: 0; flex: 1 1 0%; }
+.dock-split { display: flex; min-height: 0; min-width: 0; flex: 1 1 0%; }
+.dock-split[data-dir="col"] { flex-direction: column; }
+.dock-cell { display: flex; min-height: 0; min-width: 0; overflow: hidden; }
+.dock-stack { display: flex; min-height: 0; min-width: 0; flex: 1 1 0%; flex-direction: column; }
+.dock-tabs {
+  display: flex; flex-shrink: 0; gap: 2px; overflow-x: auto; padding: 4px 6px 0;
+  border-bottom: 1px solid var(--theme-border);
+  background: color-mix(in oklab, var(--theme-bg-sunken) 70%, var(--theme-bg));
+}
+.dock-tab {
+  display: inline-flex; align-items: center; border-radius: 8px 8px 0 0;
+  color: var(--color-cream-dim); font-size: 12.5px; white-space: nowrap;
+}
+.dock-tab[aria-selected="true"] {
+  color: var(--theme-fg); background: var(--theme-bg);
+  box-shadow: inset 0 2px 0 var(--selected-accent);
+}
+.dock-tab:hover { color: var(--theme-fg); }
+.dock-tab-label { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; cursor: grab; }
+.dock-tab-label:focus-visible, .dock-tab-close:focus-visible { outline: 2px solid var(--selected-accent); outline-offset: -2px; border-radius: 6px; }
+.dock-tab-close { padding: 0 8px 0 2px; opacity: 0.6; }
+.dock-tab-close:hover { opacity: 1; color: var(--theme-fg); }
+.dock-body { position: relative; display: flex; min-height: 0; min-width: 0; flex: 1 1 0%; }
+.dock-slot { display: flex; min-height: 0; min-width: 0; flex: 1 1 0%; }
+.dock-panel-body { display: flex; min-height: 0; min-width: 0; flex: 1 1 0%; flex-direction: column; }
+.dock-drop-preview {
+  position: absolute; pointer-events: none; z-index: 20; border-radius: 6px; transition: inset 80ms ease;
+  background: color-mix(in oklab, var(--selected-accent) 22%, transparent);
+  border: 2px solid var(--selected-accent);
+  inset: 0;
+}
+.dock-drop-preview[data-zone="left"] { inset: 0 50% 0 0; }
+.dock-drop-preview[data-zone="right"] { inset: 0 0 0 50%; }
+.dock-drop-preview[data-zone="top"] { inset: 0 0 50% 0; }
+.dock-drop-preview[data-zone="bottom"] { inset: 50% 0 0 0; }
+/* While a tab is dragged, iframes/inputs inside panels must not swallow the drag events. */
+.dock-area[data-dragging] .dock-panel-body { pointer-events: none; }
+.dock-resizer { position: relative; flex: 0 0 5px; z-index: 10; background: var(--theme-border); transition: background-color 120ms ease; touch-action: none; }
+.dock-resizer[data-dir="row"] { cursor: col-resize; }
+.dock-resizer[data-dir="col"] { cursor: row-resize; }
+.dock-resizer:hover, .dock-resizer:focus-visible { background: var(--selected-accent); outline: none; }
+.dock-resizer::after { content: ""; position: absolute; inset: 0 -4px; }
+.dock-resizer[data-dir="col"]::after { inset: -4px 0; }
+body[data-resizing] { user-select: none; }
+body[data-resizing="row"] { cursor: col-resize; }
+body[data-resizing="col"] { cursor: row-resize; }
+.sidebar-resizer { position: absolute; inset-block: 0; right: -3px; flex: none; width: 5px; background: transparent; }
+.collapsible-head { display: inline-flex; min-width: 0; align-items: center; gap: 6px; border-radius: 6px; font-size: 0.875rem; font-weight: 600; color: var(--theme-fg); }
+.collapsible-head:focus-visible, .collapsible-more:focus-visible { outline: 2px solid var(--selected-accent); outline-offset: 2px; }
+.collapsible-chevron { display: inline-block; font-size: 10px; color: var(--color-cream-dim); transform: rotate(90deg); transition: transform 120ms ease; }
+.collapsible[data-folded] .collapsible-chevron { transform: none; }
+.collapsible-more { margin-top: 6px; border-radius: 8px; padding: 4px 8px; font-size: 12px; font-weight: 500; color: var(--color-brass, var(--selected-accent)); }
+.collapsible-more:hover { background: var(--theme-bg-elevated); }
+.hovercard {
+  position: fixed; z-index: 60; border-radius: 14px; padding: 14px; pointer-events: none;
+  border: 1px solid var(--theme-border); background: var(--theme-bg-elevated); color: var(--theme-fg);
+  box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.45); animation: fade-in 120ms ease-out;
+}
+.hovercard-face { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; flex: none; border-radius: 12px; font-size: 22px; background: color-mix(in oklab, var(--selected-accent) 18%, var(--theme-bg)); }
+.hovercard-facts { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 12px; }
+.hovercard-facts dt { color: var(--color-cream-dim); }
+.hovercard-facts dd { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roster-card:focus-visible { outline: 2px solid var(--selected-accent); outline-offset: -2px; }
 }
