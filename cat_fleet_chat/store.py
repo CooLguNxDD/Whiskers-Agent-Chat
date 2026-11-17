@@ -189,8 +189,20 @@ async def list_channels(
     include_archived: bool = False,
     states: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Channels by name. ``states`` filters; archived ones need ``include_archived`` or that state."""
-    stmt = select(*CHANNEL_COLUMNS).order_by(channels.c.name)
+    """Channels by name. ``states`` filters; archived ones need ``include_archived`` or that state.
+
+    Each row carries ``last_message_at`` (newest message's ``created_at``, ``None`` when empty) so
+    clients can order by activity; it is a per-channel seek on ``idx_messages_channel_id``.
+    """
+    last_message_at = (
+        select(messages.c.created_at)
+        .where(messages.c.channel_id == channels.c.id)
+        .order_by(messages.c.id.desc())
+        .limit(1)
+        .scalar_subquery()
+        .label("last_message_at")
+    )
+    stmt = select(*CHANNEL_COLUMNS, last_message_at).order_by(channels.c.name)
     wanted = sorted(states or ())
     if wanted:
         stmt = stmt.where(channels.c.state.in_(wanted))

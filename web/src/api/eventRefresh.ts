@@ -24,6 +24,8 @@ export class EventRefresh {
     if (event.event === "message.created") {
       this.dirty.add("messages")
       this.dirty.add("agents")
+      // The sidebar orders channels by their latest message.
+      this.dirty.add("channels")
     } else if (event.event === "channel.created") {
       this.dirty.add("channels")
     } else if (event.event === "channel.state_changed") {

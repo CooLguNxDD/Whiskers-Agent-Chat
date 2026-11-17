@@ -8,7 +8,8 @@ import { Input } from "@/components/ui/input"
 import { Modal } from "@/components/ui/dialog"
 import { useChannels, useCreateChannel } from "@/hooks/useChannels"
 import { cn } from "@/lib/utils"
-import { useUIStore } from "@/store"
+import { usePrefs, useUIStore } from "@/store"
+import { sortChannels } from "@/utils/channelSort"
 import { getErrorMessage } from "@/utils/errors"
 import { CHANNEL_RE } from "@/utils/handles"
 
@@ -16,7 +17,8 @@ export type ChannelListProps = Record<string, never>
 
 /**
  * Sidebar channel navigation. A duplicate name offers a jump to the existing
- * room. Each row shows a non-active state. Archived channels are hidden unless
+ * room. Each row shows a non-active state. Rows sort by latest message (or by name;
+ * the toggle is a device-local pref). Archived channels are hidden unless
  * "Show archived" is on (the open one always shows). Channel state lives in
  * the room header's settings dialog (`ChannelSettings`), not here.
  */
@@ -24,6 +26,7 @@ export default function ChannelList() {
   const channels = useChannels()
   const create = useCreateChannel()
   const ui = useUIStore()
+  const prefs = usePrefs()
   const navigate = useNavigate()
   const [showArchived, setShowArchived] = createSignal(false)
   const [open, setOpen] = createSignal(false)
@@ -47,7 +50,7 @@ export default function ChannelList() {
 
   const [filter, setFilter] = createSignal("")
   const visible = () =>
-    (channels.data?.channels ?? []).filter(
+    sortChannels(channels.data?.channels ?? [], prefs.channelSort()).filter(
       (channel) =>
         (channel.state !== "archived" || showArchived() || channel.name === ui.activeChannel()) &&
         (!filter().trim() || channel.name.includes(filter().trim().toLowerCase()) || channel.name === ui.activeChannel()),
@@ -58,6 +61,14 @@ export default function ChannelList() {
       <div class="flex items-center justify-between pb-1.5 pl-3">
         <h2 class="side-label">Channels</h2>
         <div class="flex items-center gap-0.5">
+          <button
+            type="button"
+            class="icon-btn"
+            aria-pressed={prefs.channelSort() === "latest"}
+            title={prefs.channelSort() === "latest" ? "Sorted by latest message (click for A–Z)" : "Sorted A–Z (click for latest message)"}
+            aria-label="Sort channels by latest message"
+            onClick={() => prefs.setChannelSort(prefs.channelSort() === "latest" ? "name" : "latest")}
+          ><Icon name="list" class="size-4" /></button>
           <button
             type="button"
             class="icon-btn"
