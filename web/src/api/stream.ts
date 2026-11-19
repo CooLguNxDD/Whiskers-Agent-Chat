@@ -62,6 +62,7 @@ export function openEventStream(opts: {
   const headers = new Headers({ Accept: "text/event-stream" })
   if (opts.token) headers.set("Authorization", `Bearer ${opts.token}`)
   return fetch(`/api/v1/events?after_event_id=${opts.afterEventId}`, {
+    credentials: "same-origin",
     headers,
     signal: opts.signal,
   })

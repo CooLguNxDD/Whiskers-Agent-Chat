@@ -8,11 +8,13 @@ import json
 import logging
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from cat_fleet_chat import auth as auth_rules
 from cat_fleet_chat.config import Settings, allowed_hostnames, allowed_origins
 from cat_fleet_chat import relays
 from cat_fleet_chat.errors import INTERNAL_ERROR, HubError
@@ -93,8 +95,12 @@ RELAY_DISABLED_ALLOWED = tuple(
 )
 
 
+# Public auth endpoints live in cat_fleet_chat/auth_contract.json (auth.PUBLIC_AUTH_ROUTES).
+PUBLIC_AUTH_ROUTES = auth_rules.PUBLIC_AUTH_ROUTES
+
+
 class Guard:
-    """Bearer auth plus browser Origin/Host checks.
+    """Bearer or session-cookie auth plus browser Origin/Host checks.
 
     Every caller must use an allowed Host, even when Origin is absent.
     A browser write must come from an allowed origin, and its Host must be
@@ -117,13 +123,29 @@ class Guard:
             request = Request(scope)
             denied = await self._relay_denied(request, scope)
             if denied is None and "relay" not in scope.get("state", {}):
-                denied = self._denied(request)
+                denied = await self._denied(request)
             elif denied is None:
-                denied = self._denied(request, auth=False)
+                denied = await self._denied(request, auth=False)
             if denied is not None:
                 await denied(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+    def _origin_allowed(self, origin: str, host_header: str, host: str) -> bool:
+        normalized = origin.rstrip("/")
+        if normalized in self._origins:
+            return True
+        if host not in self._hosts:
+            return False
+        try:
+            parsed = urlsplit(origin)
+        except ValueError:
+            return False
+        return (
+            parsed.scheme in {"http", "https"}
+            and bool(parsed.netloc)
+            and parsed.netloc.lower() == host_header.strip().lower()
+        )
 
     async def _relay_denied(self, request: Request, scope) -> JSONResponse | None:
         """Authenticate a scoped ``Bearer rly_…`` relay token and hold it to its allowlist.
@@ -164,30 +186,63 @@ class Guard:
             return None
         return _forbidden("a relay token cannot use this route")
 
-    def _denied(self, request: Request, *, auth: bool = True) -> JSONResponse | None:
+    async def _resolve_auth(self, request: Request, state: dict[str, Any]) -> None:
         presented = request.headers.get("authorization", "")
-        reserved = auth and any(
-            hmac.compare_digest(presented, f"Bearer {secret}") for secret in self.settings.reserved_author_tokens
+        reserved = any(
+            hmac.compare_digest(presented, f"Bearer {secret}")
+            for secret in self.settings.reserved_author_tokens
         )
         if reserved:
             # A reserved-author token is a fleet token that may also post as the
             # fleet's reserved author (``Hub.post_message(reserved_author_ok=)``).
-            request.scope.setdefault("state", {})["reserved_author"] = True
-        elif auth and self.settings.token:
-            expected = f"Bearer {self.settings.token}"
-            if not hmac.compare_digest(presented, expected):
+            state["reserved_author"] = True
+            state["auth_kind"] = "bearer"
+            return
+        if self.settings.token and hmac.compare_digest(
+            presented, f"Bearer {self.settings.token}"
+        ):
+            state["auth_kind"] = "bearer"
+            return
+        if presented:
+            # Explicit invalid Authorization header never falls back to a session cookie.
+            if not self.settings.token:
+                state["auth_kind"] = "open"
+            return
+        if request.url.path.startswith("/api/"):
+            # Session cookies authenticate /api/* only (never /mcp), and never
+            # grant reserved_author provenance.
+            cookie = request.cookies.get(auth_rules.SESSION_COOKIE, "")
+            if cookie:
+                hub = getattr(request.app.state, "hub", None)
+                resolved = await hub.resolve_session(cookie) if hub is not None else None
+                if resolved is not None:
+                    sess, user = resolved
+                    state["auth_kind"] = "session"
+                    state["session"] = sess
+                    state["user"] = user
+                    return
+        if not self.settings.token:
+            state["auth_kind"] = "open"
+
+    async def _denied(self, request: Request, *, auth: bool = True) -> JSONResponse | None:
+        if auth:
+            state = request.scope.setdefault("state", {})
+            await self._resolve_auth(request, state)
+            is_public_auth = (request.method.upper(), request.url.path) in PUBLIC_AUTH_ROUTES
+            if self.settings.token and "auth_kind" not in state and not is_public_auth:
                 return _unauthorized()
 
+        host_header = request.headers.get("host", "")
+        host = _hostname(host_header)
         origin = request.headers.get("origin")
         method = request.method.upper()
         if method in _WRITE_METHODS:
-            if origin is not None and origin.rstrip("/") not in self._origins:
+            if origin is not None and not self._origin_allowed(origin, host_header, host):
                 return _forbidden("cross-origin write rejected")
             if request.headers.get("sec-fetch-site") == "cross-site":
                 return _forbidden("cross-site write rejected")
 
         # Same-origin browser GETs need not send Origin (including DNS rebinding).
-        host = _hostname(request.headers.get("host", ""))
         if host not in self._hosts:
             return JSONResponse(
                 {"error": {"code": "invalid_host", "message": "host is not allowed"}},

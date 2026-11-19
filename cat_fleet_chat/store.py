@@ -48,9 +48,11 @@ from cat_fleet_chat.schema import (
     relays,
     run,
     search_rowid,
+    sessions,
     task_events,
     topic_subscriptions,
     tasks,
+    users,
     webhooks,
 )
 
@@ -2224,3 +2226,135 @@ async def update_route(conn: aiosqlite.Connection, route_id: int, values: dict[s
 
 async def delete_route(conn: aiosqlite.Connection, route_id: int) -> None:
     await run(conn, delete(relay_routes).where(relay_routes.c.id == route_id))
+
+
+# ---- auth: users and sessions (schema v16) ---------------------------------
+
+
+def _session_select():
+    return select(
+        *sessions.c,
+        users.c.username,
+        users.c.display_name,
+        users.c.created_at.label("user_created_at"),
+        users.c.updated_at.label("user_updated_at"),
+        users.c.last_login_at.label("user_last_login_at"),
+    ).select_from(sessions.outerjoin(users, sessions.c.user_id == users.c.id))
+
+
+async def count_users(conn: aiosqlite.Connection) -> int:
+    row = await fetch_one(conn, select(func.count()).select_from(users))
+    return int(row[0]) if row is not None else 0
+
+
+async def insert_user(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(users).values(**values))
+    return int(cursor.lastrowid)
+
+
+async def get_user_by_id(conn: aiosqlite.Connection, user_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(users).where(users.c.id == user_id))
+    return dict(row) if row is not None else None
+
+
+async def get_user_by_username(conn: aiosqlite.Connection, username: str) -> dict[str, Any] | None:
+    row = await fetch_one(conn, select(users).where(users.c.username == username))
+    return dict(row) if row is not None else None
+
+
+async def list_users(conn: aiosqlite.Connection, now_iso: str) -> list[dict[str, Any]]:
+    active_sessions = (
+        select(func.count())
+        .select_from(sessions)
+        .where(sessions.c.user_id == users.c.id, sessions.c.expires_at > now_iso)
+        .correlate(users)
+        .scalar_subquery()
+        .label("active_sessions")
+    )
+    rows = await fetch_all(conn, select(*users.c, active_sessions).order_by(users.c.id.asc()))
+    return [dict(row) for row in rows]
+
+
+async def update_user_password(
+    conn: aiosqlite.Connection, user_id: int, password_hash: str, updated_at: str
+) -> None:
+    await run(
+        conn,
+        update(users)
+        .where(users.c.id == user_id)
+        .values(password_hash=password_hash, updated_at=updated_at),
+    )
+
+
+async def touch_user_login(conn: aiosqlite.Connection, user_id: int, last_login_at: str) -> None:
+    await run(
+        conn,
+        update(users).where(users.c.id == user_id).values(last_login_at=last_login_at),
+    )
+
+
+async def delete_user(conn: aiosqlite.Connection, user_id: int) -> int:
+    cursor = await run(conn, delete(users).where(users.c.id == user_id))
+    return int(cursor.rowcount or 0)
+
+
+async def insert_session(conn: aiosqlite.Connection, values: dict[str, Any]) -> int:
+    cursor = await run(conn, insert(sessions).values(**values))
+    return int(cursor.lastrowid)
+
+
+async def get_session_by_token_hash(
+    conn: aiosqlite.Connection, token_hash: str
+) -> dict[str, Any] | None:
+    row = await fetch_one(conn, _session_select().where(sessions.c.token_hash == token_hash))
+    return dict(row) if row is not None else None
+
+
+async def get_session_by_id(conn: aiosqlite.Connection, session_id: int) -> dict[str, Any] | None:
+    row = await fetch_one(conn, _session_select().where(sessions.c.id == session_id))
+    return dict(row) if row is not None else None
+
+
+async def list_sessions(conn: aiosqlite.Connection, now_iso: str) -> list[dict[str, Any]]:
+    rows = await fetch_all(
+        conn,
+        _session_select()
+        .where(sessions.c.expires_at > now_iso)
+        .order_by(sessions.c.last_seen_at.desc(), sessions.c.id.desc()),
+    )
+    return [dict(row) for row in rows]
+
+
+async def touch_session(conn: aiosqlite.Connection, session_id: int, last_seen_at: str) -> None:
+    await run(
+        conn,
+        update(sessions).where(sessions.c.id == session_id).values(last_seen_at=last_seen_at),
+    )
+
+
+async def delete_session(conn: aiosqlite.Connection, session_id: int) -> int:
+    cursor = await run(conn, delete(sessions).where(sessions.c.id == session_id))
+    return int(cursor.rowcount or 0)
+
+
+async def delete_other_sessions(conn: aiosqlite.Connection, keep_session_id: int | None) -> int:
+    stmt = delete(sessions)
+    if keep_session_id is not None:
+        stmt = stmt.where(sessions.c.id != keep_session_id)
+    cursor = await run(conn, stmt)
+    return int(cursor.rowcount or 0)
+
+
+async def delete_user_other_sessions(
+    conn: aiosqlite.Connection, user_id: int, keep_session_id: int | None
+) -> int:
+    stmt = delete(sessions).where(sessions.c.user_id == user_id)
+    if keep_session_id is not None:
+        stmt = stmt.where(sessions.c.id != keep_session_id)
+    cursor = await run(conn, stmt)
+    return int(cursor.rowcount or 0)
+
+
+async def prune_expired_sessions(conn: aiosqlite.Connection, now_iso: str) -> int:
+    cursor = await run(conn, delete(sessions).where(sessions.c.expires_at <= now_iso))
+    return int(cursor.rowcount or 0)

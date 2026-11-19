@@ -1,3 +1,5 @@
+import type { AuthKind, AuthMethodName } from "./authContract.generated"
+
 export interface FleetMessage {
   id: number
   channel: string
@@ -561,4 +563,45 @@ export interface AuditRow {
   target: string
   before: unknown
   after: unknown
+}
+
+export interface AuthUser {
+  id: number
+  username: string
+  display_name: string
+  created_at: string
+  updated_at: string
+  last_login_at: string | null
+  active_sessions?: number
+}
+
+export interface AuthSession {
+  id: number
+  user_id: number | null
+  username: string | null
+  display_name: string | null
+  auth_method: AuthMethodName
+  label: string
+  user_agent: string
+  ip_address: string
+  created_at: string
+  last_seen_at: string
+  expires_at: string
+  current: boolean
+}
+
+export interface AuthStatusResponse {
+  auth_required: boolean
+  authenticated: boolean
+  auth_method: AuthKind | null
+  has_users: boolean
+  user: AuthUser | null
+  session: AuthSession | null
+}
+
+export interface AuthLoginResponse {
+  authenticated: boolean
+  auth_method: "session"
+  user: AuthUser | null
+  session: AuthSession
 }

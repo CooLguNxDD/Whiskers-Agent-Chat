@@ -22,7 +22,22 @@ export function FleetStreamProvider(props: ParentProps) {
   let attemptNumber = 0
 
   createEffect(() => {
+    const ready = session.authReady()
+    const authed = session.authenticated()
+    const required = session.authRequired()
     const token = session.token()
+    const epoch = session.authEpoch()
+    void epoch
+
+    if (!ready) {
+      setStatus("connecting")
+      return
+    }
+    if (required && !authed && !token) {
+      setStatus("unauthorized")
+      return
+    }
+
     const abort = new AbortController()
     let timer: number | undefined
     let retry: number | undefined
@@ -57,7 +72,7 @@ export function FleetStreamProvider(props: ParentProps) {
       try {
         const response = await openEventStream({ afterEventId: refresh.cursor, token, signal: abort.signal })
         if (response.status === 401 || response.status === 403) {
-          session.markTokenRequired()
+          session.markUnauthorized()
           setStatus("unauthorized")
           return
         }

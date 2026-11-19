@@ -492,6 +492,39 @@ relay_routes = Table(
     Index("idx_relay_routes_relay", "relay_id"),
 )
 
+# Schema v16. Portal user accounts and durable SQLite-backed browser sessions.
+# Passwords hold salted scrypt hashes; sessions store only the SHA-256 digest
+# of the random ``ses_`` cookie token. Direct hub-token logins leave
+# ``user_id`` null with ``auth_method = 'token'``.
+users = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("username", Text, nullable=False, unique=True),
+    Column("display_name", Text, nullable=False),
+    Column("password_hash", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("last_login_at", Text),
+)
+
+sessions = Table(
+    "sessions",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("token_hash", Text, nullable=False, unique=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE")),
+    Column("auth_method", Text, nullable=False),
+    Column("label", Text, nullable=False, server_default=text("''")),
+    Column("user_agent", Text, nullable=False, server_default=text("''")),
+    Column("ip_address", Text, nullable=False, server_default=text("''")),
+    Column("created_at", Text, nullable=False),
+    Column("last_seen_at", Text, nullable=False),
+    Column("expires_at", Text, nullable=False),
+    Index("idx_sessions_user_id", "user_id"),
+    Index("idx_sessions_expires_at", "expires_at"),
+)
+
 # Columns that a database created at an older version is missing. SQLite has
 # no "ADD COLUMN IF NOT EXISTS", so db.py checks table_info before adding.
 ADDED_COLUMNS: tuple[tuple[Table, str], ...] = (

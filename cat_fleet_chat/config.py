@@ -6,6 +6,8 @@ import ipaddress
 import os
 from dataclasses import dataclass, field
 
+from cat_fleet_chat import auth as auth_contract
+
 EMBED_PROVIDERS = ("off", "openai", "content-parts")
 
 
@@ -62,6 +64,8 @@ class Settings:
     # only these posts carry ``fleet_author`` provenance. Unset: nobody does, so no
     # question takes Discord answer reactions.
     reserved_author_tokens: frozenset[str] = field(default=frozenset(), repr=False)
+    # Persistent portal session lifetime in days (CAT_FLEET_SESSION_TTL_DAYS).
+    session_ttl_days: int = auth_contract.SESSION_TTL_DEFAULT
 
     @property
     def loopback_bind(self) -> bool:
@@ -116,6 +120,16 @@ def load_settings() -> Settings:
         raise SystemExit(
             f"CAT_FLEET_EMBED_PROVIDER={provider} needs CAT_FLEET_EMBED_URL and CAT_FLEET_EMBED_MODEL"
         )
+    ttl_raw = _env_str("CAT_FLEET_SESSION_TTL_DAYS", str(auth_contract.SESSION_TTL_DEFAULT))
+    try:
+        session_ttl_days = int(ttl_raw)
+    except ValueError as exc:
+        raise SystemExit(f"CAT_FLEET_SESSION_TTL_DAYS must be an integer, got {ttl_raw!r}") from exc
+    if not auth_contract.SESSION_TTL_MIN <= session_ttl_days <= auth_contract.SESSION_TTL_MAX:
+        raise SystemExit(
+            f"CAT_FLEET_SESSION_TTL_DAYS out of range "
+            f"({auth_contract.SESSION_TTL_MIN}..{auth_contract.SESSION_TTL_MAX}): {session_ttl_days}"
+        )
     return Settings(
         host=_env_str("CAT_FLEET_HOST", "127.0.0.1"),
         port=port,
@@ -135,6 +149,7 @@ def load_settings() -> Settings:
         reserved_author_tokens=frozenset(
             part.strip() for part in os.environ.get("CAT_FLEET_RESERVED_AUTHOR_TOKENS", "").split(",") if part.strip()
         ),
+        session_ttl_days=session_ttl_days,
     )
 
 

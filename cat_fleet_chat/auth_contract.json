@@ -1,0 +1,153 @@
+{
+  "cookie": {
+    "name": "cat_fleet_session",
+    "token_prefix": "ses_",
+    "touch_interval_seconds": 300
+  },
+  "session_ttl_days": {
+    "default": 30,
+    "min": 1,
+    "max": 365
+  },
+  "rate_limit": {
+    "max_failures": 10,
+    "window_seconds": 60
+  },
+  "limits": {
+    "username_pattern": "^[a-z0-9][a-z0-9_-]{1,31}$",
+    "password_min": 8,
+    "password_max": 256,
+    "label_max": 120,
+    "user_agent_max": 256
+  },
+  "auth_methods": [
+    "password",
+    "token"
+  ],
+  "auth_kinds": [
+    "session",
+    "bearer",
+    "open"
+  ],
+  "auth_kind_labels": {
+    "session": "Signed in with Hub token",
+    "bearer": "Authenticated with bearer token",
+    "open": "Open local mode"
+  },
+  "routes": [
+    {
+      "id": "status",
+      "method": "GET",
+      "path": "/api/v1/auth/status",
+      "public": true,
+      "skip_unauthorized_redirect": true
+    },
+    {
+      "id": "login",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "public": true,
+      "skip_unauthorized_redirect": true
+    },
+    {
+      "id": "register",
+      "method": "POST",
+      "path": "/api/v1/auth/register",
+      "public": true,
+      "skip_unauthorized_redirect": true
+    },
+    {
+      "id": "logout",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "public": true,
+      "skip_unauthorized_redirect": true
+    },
+    {
+      "id": "list_sessions",
+      "method": "GET",
+      "path": "/api/v1/auth/sessions",
+      "public": false,
+      "skip_unauthorized_redirect": false
+    },
+    {
+      "id": "revoke_other_sessions",
+      "method": "POST",
+      "path": "/api/v1/auth/sessions/revoke-others",
+      "public": false,
+      "skip_unauthorized_redirect": false
+    },
+    {
+      "id": "revoke_session",
+      "method": "DELETE",
+      "path": "/api/v1/auth/sessions/{session_id:int}",
+      "public": false,
+      "skip_unauthorized_redirect": false
+    },
+    {
+      "id": "list_users",
+      "method": "GET",
+      "path": "/api/v1/auth/users",
+      "public": false,
+      "skip_unauthorized_redirect": false
+    },
+    {
+      "id": "delete_user",
+      "method": "DELETE",
+      "path": "/api/v1/auth/users/{user_id:int}",
+      "public": false,
+      "skip_unauthorized_redirect": false
+    },
+    {
+      "id": "change_password",
+      "method": "POST",
+      "path": "/api/v1/auth/password",
+      "public": false,
+      "skip_unauthorized_redirect": true
+    }
+  ],
+  "ua_browsers": [
+    {
+      "label": "Edge",
+      "tokens": ["edg/", "edge/"]
+    },
+    {
+      "label": "Chrome",
+      "tokens": ["chrome/", "chromium/", "crios/"]
+    },
+    {
+      "label": "Firefox",
+      "tokens": ["firefox/", "fxios/"]
+    },
+    {
+      "label": "Safari",
+      "tokens": ["safari/"]
+    },
+    {
+      "label": "Browser",
+      "tokens": ["mozilla/"]
+    }
+  ],
+  "ua_oses": [
+    {
+      "label": "iOS",
+      "tokens": ["iphone", "ipad", "ios"]
+    },
+    {
+      "label": "Android",
+      "tokens": ["android"]
+    },
+    {
+      "label": "Windows",
+      "tokens": ["windows"]
+    },
+    {
+      "label": "macOS",
+      "tokens": ["mac os", "macintosh"]
+    },
+    {
+      "label": "Linux",
+      "tokens": ["linux"]
+    }
+  ]
+}
