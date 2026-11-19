@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from cat_fleet_chat.auth_hub import AuthHubMixin
 from cat_fleet_chat.db import Database
 from cat_fleet_chat.errors import HubError
 from cat_fleet_chat.relay_hub import RelayHubMixin
@@ -112,7 +113,7 @@ def agent_relevant(
     return kind.startswith("channel.")
 
 
-class Hub(RelayHubMixin):
+class Hub(RelayHubMixin, AuthHubMixin):
     def __init__(self, db: Database, waiters: WaitHub) -> None:
         self.db = db
         self.waiters = waiters

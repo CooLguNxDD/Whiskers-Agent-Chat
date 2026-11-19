@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "vitest run",
-    "gen:panel": "node generator/gen_panel.mjs"
+    "gen:panel": "node generator/gen_panel.mjs",
+    "gen:auth": "node generator/gen_auth_contract.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.0",

@@ -43,7 +43,7 @@ py-modules = ["run"]
 packages = ["cat_fleet_chat", "cat_fleet_chat.relay"]
 
 [tool.setuptools.package-data]
-cat_fleet_chat = ["static/**"]
+cat_fleet_chat = ["static/**", "auth_contract.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

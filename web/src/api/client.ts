@@ -1,10 +1,19 @@
+import { SKIP_UNAUTHORIZED_PATHS } from "./authContract.generated"
 import type { ApiErrorBody } from "./types"
 
 let tokenGetter: () => string = () => ""
+let unauthorizedHandler: (() => void) | null = null
+
+const SKIP_UNAUTHORIZED_SET = new Set<string>(SKIP_UNAUTHORIZED_PATHS)
 
 /** Register the in-memory token reader. Called once from the app shell. */
 export function setTokenGetter(getter: () => string) {
   tokenGetter = getter
+}
+
+/** Register a callback invoked when a protected hub call answers 401. */
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler
 }
 
 export class ApiError extends Error {
@@ -38,8 +47,12 @@ async function request(path: string, init: RequestInit): Promise<Response> {
   const token = tokenGetter()
   if (token) headers.set("Authorization", `Bearer ${token}`)
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json")
-  const response = await fetch(path, { ...init, headers })
+  const response = await fetch(path, { ...init, credentials: "same-origin", headers })
   if (!response.ok) {
+    const pathname = path.split("?", 1)[0]
+    if (response.status === 401 && !SKIP_UNAUTHORIZED_SET.has(pathname)) {
+      unauthorizedHandler?.()
+    }
     throw new ApiError(response.status, await readError(response), response.statusText)
   }
   return response

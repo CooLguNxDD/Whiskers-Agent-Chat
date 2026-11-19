@@ -10,6 +10,8 @@ import httpx
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
+from cat_fleet_chat.auth import LoginRateLimiter
+from cat_fleet_chat.auth_rest import auth_api_routes
 from cat_fleet_chat.config import Settings
 from cat_fleet_chat.db import Database, ProcessLock
 from cat_fleet_chat.embed import Embedder, EmbedQueue, build_embedder
@@ -60,6 +62,7 @@ def create_app(
         app.state.hub = hub
         app.state.settings = settings
         app.state.process_lock = lock
+        app.state.login_limiter = LoginRateLimiter()
         set_hub(hub)
         dispatcher: WebhookDispatcher | None = None
         if settings.webhooks_enabled:
@@ -118,6 +121,7 @@ def create_app(
     app = Starlette(
         routes=[
             *api_routes(),
+            *auth_api_routes(),
             *relay_api_routes(),
             *hook_routes(),
             Mount("/mcp", app=mcp_http),
@@ -126,5 +130,6 @@ def create_app(
         lifespan=lifespan,
         exception_handlers={Exception: internal_error_handler},
     )
+    app.state.login_limiter = LoginRateLimiter()
     app.add_middleware(Guard, settings=settings)
     return app

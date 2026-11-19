@@ -1,12 +1,10 @@
-import { createEffect, createSignal, For, on, onCleanup, Show, type JSX, type ParentProps } from "solid-js"
+import { createEffect, createSignal, For, on, onCleanup, onMount, Show, type JSX, type ParentProps } from "solid-js"
 import { A, useLocation, useNavigate } from "@solidjs/router"
-import { setTokenGetter } from "@/api/client"
+import { setTokenGetter, setUnauthorizedHandler } from "@/api/client"
+import AuthModal from "@/components/AuthModal"
 import ChannelList from "@/components/ChannelList"
 import { Avatar } from "@/components/ui/avatar"
-import { Button } from "@/components/ui/button"
 import { Icon, type IconName } from "@/components/ui/icons"
-import { Input } from "@/components/ui/input"
-import { Modal } from "@/components/ui/dialog"
 import { INFRA_PATHS } from "@/components/ui/page"
 import { readDockNumber, ResizeHandle, writeDockNumber } from "@/components/ui/dock"
 import { useFleetStream } from "@/hooks/useFleetStream"
@@ -38,7 +36,7 @@ const STATUS_TEXT = {
   connecting: "Connecting…",
   connected: "Fleet connected",
   disconnected: "Reconnecting…",
-  unauthorized: "Needs a hub token",
+  unauthorized: "Sign in required",
 } as const
 
 function isTyping(target: EventTarget | null) {
@@ -86,10 +84,9 @@ export function RootLayout(props: ParentProps) {
   const navigate = useNavigate()
   const tasks = useTasks(ui.activeChannel)
   const proposals = useProposals(() => "")
-  const [tokenOpen, setTokenOpen] = createSignal(false)
+  const [authOpen, setAuthOpen] = createSignal(false)
   const [appearanceOpen, setAppearanceOpen] = createSignal(false)
   const [dismissedPrompt, setDismissedPrompt] = createSignal(false)
-  const [draftToken, setDraftToken] = createSignal("")
   const [drawer, setDrawer] = createSignal(false)
   const [sidebarWidth, setSidebarWidth] = createSignal(readDockNumber(SIDEBAR.key, SIDEBAR.fallback, SIDEBAR.min, SIDEBAR.max))
   let sidebarStart: number = SIDEBAR.fallback
@@ -100,15 +97,31 @@ export function RootLayout(props: ParentProps) {
   const onDockReset = () => setSidebarWidth(SIDEBAR.fallback)
   window.addEventListener("cat-fleet-dock-reset", onDockReset)
   onCleanup(() => window.removeEventListener("cat-fleet-dock-reset", onDockReset))
-  const showToken = () => tokenOpen() || (session.tokenRequired() && !dismissedPrompt())
+  const showAuth = () => authOpen() || (session.authReady() && session.tokenRequired() && !dismissedPrompt())
+  const isSignedIn = () => (session.authenticated() && session.authMethod() !== "open") || Boolean(session.token())
   const onChat = () => location.pathname === "/"
   const onInfra = () => INFRA_PATHS.includes(location.pathname)
   const activeTasks = () => (tasks.data?.tasks ?? []).filter((task) => ["open", "claimed", "in_progress", "blocked"].includes(task.status)).length
   const openProposals = () => (proposals.data?.proposals ?? []).filter((item) => item.status === "open").length
   const handle = () => prefs.displayName().trim()
 
+  onMount(() => {
+    void session.refreshAuth()
+  })
+  setUnauthorizedHandler(() => {
+    session.markUnauthorized()
+    setDismissedPrompt(false)
+  })
+  onCleanup(() => setUnauthorizedHandler(null))
+
   createEffect(() => setTokenGetter(() => session.token()))
-  createEffect(() => { if (showToken()) setAppearanceOpen(false) })
+  createEffect(() => {
+    const activeUser = session.user()
+    if (activeUser && prefs.displayName().trim() === "") {
+      prefs.setDisplayName(activeUser.display_name)
+    }
+  })
+  createEffect(() => { if (showAuth()) setAppearanceOpen(false) })
   createEffect(on(() => location.pathname, () => setDrawer(false)))
   createEffect(on(ui.activeChannel, () => setDrawer(false), { defer: true }))
 
@@ -184,10 +197,10 @@ export function RootLayout(props: ParentProps) {
               <button
                 type="button"
                 class="icon-btn"
-                classList={{ "text-moss": Boolean(session.token()) }}
-                title={session.token() ? "Hub token set" : "Hub token"}
-                aria-label={session.token() ? "Hub token set" : "Hub token"}
-                onClick={() => { setDismissedPrompt(false); setTokenOpen(true) }}
+                classList={{ "text-moss": isSignedIn() }}
+                title={isSignedIn() ? "Account & sessions" : "Sign in"}
+                aria-label={isSignedIn() ? "Account & sessions" : "Sign in"}
+                onClick={() => { setDismissedPrompt(false); setAuthOpen(true) }}
               ><Icon name="key" /></button>
             </div>
           </div>
@@ -212,10 +225,25 @@ export function RootLayout(props: ParentProps) {
               <Show when={onChat()}><span class="truncate text-cream-dim">#{ui.activeChannel()}</span></Show>
             </nav>
             <div class="ml-auto flex items-center gap-3">
-              <span class="status-pill hidden items-center gap-2 rounded-full px-3 py-1 text-xs sm:inline-flex" data-status={stream.status()}>
-                <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
-                {stream.status() === "connected" ? "All systems operational" : STATUS_TEXT[stream.status()]}
-              </span>
+              <Show
+                when={stream.status() === "unauthorized"}
+                fallback={
+                  <span class="status-pill hidden items-center gap-2 rounded-full px-3 py-1 text-xs sm:inline-flex" data-status={stream.status()}>
+                    <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
+                    {stream.status() === "connected" ? "All systems operational" : STATUS_TEXT[stream.status()]}
+                  </span>
+                }
+              >
+                <button
+                  type="button"
+                  class="status-pill hidden cursor-pointer items-center gap-2 rounded-full px-3 py-1 text-xs sm:inline-flex"
+                  data-status="unauthorized"
+                  onClick={() => { setDismissedPrompt(false); setAuthOpen(true) }}
+                >
+                  <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
+                  {STATUS_TEXT.unauthorized}
+                </button>
+              </Show>
               <A href="/search" class="icon-btn" title="Search (Ctrl K)" aria-label="Search"><Icon name="search" /></A>
               <button type="button" class="rounded-full" title="Profile and appearance" aria-label="Profile and appearance" onClick={() => setAppearanceOpen(true)}>
                 <Avatar name={handle() || "?"} size="sm" />
@@ -225,17 +253,19 @@ export function RootLayout(props: ParentProps) {
           {props.children}
         </div>
       </div>
-      <Modal open={showToken()} onOpenChange={(next) => { setTokenOpen(next); if (!next) setDismissedPrompt(true) }} title="Hub token">
-        <form class="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); session.setToken(draftToken().trim()); setDraftToken(""); setTokenOpen(false) }}>
-          <p class="text-sm text-cream-dim">Kept in memory for this tab only. It is not saved in the browser and not baked into the app.</p>
-          <Input type="password" aria-label="Hub token" value={draftToken()} autocomplete="off" onInput={(event) => setDraftToken(event.currentTarget.value)} />
-          <div class="flex justify-end gap-2">
-            {session.token() && <Button type="button" variant="ghost" onClick={() => { session.setToken(""); setTokenOpen(false) }}>Clear</Button>}
-            <Button type="submit">Use token</Button>
-          </div>
-        </form>
-      </Modal>
-      <Appearance open={appearanceOpen() && !showToken()} onOpenChange={setAppearanceOpen} />
+      <AuthModal
+        open={showAuth()}
+        onOpenChange={(next) => {
+          setAuthOpen(next)
+          if (!next) {
+            setDismissedPrompt(true)
+            if (!session.authRequired() && !session.authenticated()) {
+              void session.refreshAuth()
+            }
+          }
+        }}
+      />
+      <Appearance open={appearanceOpen() && !showAuth()} onOpenChange={setAppearanceOpen} />
     </>
   )
 }

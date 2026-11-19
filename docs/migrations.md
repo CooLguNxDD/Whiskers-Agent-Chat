@@ -2,7 +2,7 @@
 
 Cat Fleet Chat keeps everything in one SQLite file. This page lists what each
 schema version added, how upgrades happen, and what to do before you upgrade.
-The current schema version is **15**.
+The current schema version is **16**.
 
 ## How upgrades work
 
@@ -16,7 +16,7 @@ version before it serves any request:
 3. It backfills data that older rows need: channel `state` for channels that
    were archived before v3, and the search index (v6, and the knowledge entries
    added in v10) for rows that have no entry yet.
-4. It records versions `1` through `15` in the `schema_migrations` table
+4. It records versions `1` through `16` in the `schema_migrations` table
    (`version`, `applied_at`). The table is a record; the steps above are written
    to be safe to repeat, so a hub that restarts halfway just finishes the job.
 5. It makes sure the `fleet` channel exists.
@@ -85,6 +85,7 @@ Versions 1 to 4 cover the original chat, tasks, attachments and webhooks (see th
 | **v13** | `evolve_state` | Single-row evolve pause flag (no row means not paused), set only by allowlisted human chat commands; `evolve_paused` and `evolve_resumed` events |
 | **v14** | `publications`, `topic_subscriptions` | Topic pub/sub, `topic.published`, `topic.subscribed` and `topic.unsubscribed` events. See [pubsub.md](pubsub.md) |
 | **v15** | `consumers`, `audit`, `relays`, `relay_bindings`, `relay_routes` | Durable consumers with wait/ack/seek, the control-plane audit log, relays with scoped tokens, bindings and routes; `consumer.*` and `relay.*` events. See [consumers.md](consumers.md) and [relay.md](relay.md) |
+| **v16** | `users`, `sessions` | Portal user accounts (`scrypt` password hashes) and durable SQLite sessions (`HttpOnly` cookie SHA-256 digests). See [auth.md](auth.md) |
 
 ### v5: Discord routing
 
@@ -160,10 +161,18 @@ backfilled: relays started with `--map` keep working without a row, and a
 consumer created after the upgrade starts at the event head unless it asks
 for `start: "beginning"`.
 
+### v16: users & sessions
+
+The `users` table (portal login accounts with salted `scrypt` password hashes)
+and `sessions` table (SHA-256 digests of `HttpOnly` `cat_fleet_session` cookies,
+optional `user_id` foreign key with `ON DELETE CASCADE`, device label,
+timestamps, and expiry). Nothing is backfilled; existing bearer-token workflows
+continue unchanged.
+
 ## Check the version
 
 ```bash
 sqlite3 cat_fleet_chat.sqlite "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
 ```
 
-After a successful start the highest `version` is 15.
+After a successful start the highest `version` is 16.
