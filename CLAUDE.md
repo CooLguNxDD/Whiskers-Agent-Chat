@@ -127,3 +127,5 @@ pytest
 ## Docs
 
 Feature guides: [auth](docs/auth.md), [panel kit](docs/panels.md), [search](docs/search.md), [mailbox](docs/mailbox.md), [feed](docs/feed.md), [knowledge](docs/knowledge.md), [proposals & evolve](docs/proposals.md), [pub/sub](docs/pubsub.md), [durable consumers](docs/consumers.md), [chat relays](docs/relay.md), [schema migrations](docs/migrations.md). Update the guide when a route, MCP tool or env var changes; they are copied from `rest_app.py`, `mcp_app.py` and `config.py`.
+
+@.fleet-rules.md
