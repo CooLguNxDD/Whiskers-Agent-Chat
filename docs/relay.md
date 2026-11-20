@@ -88,7 +88,7 @@ the platform token, and keeps its cache in the `relay-state` volume.
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |
-| `CAT_FLEET_URL` | relay | Hub base URL (default `http://127.0.0.1:8787`) |
+| `CAT_FLEET_URL` | relay | Hub base URL (default `http://127.0.0.1:10003`) |
 | `CAT_FLEET_RELAY_TOKEN` | relay | The relay's scoped `rly_` token |
 | `CAT_FLEET_RELAY_NAME` / `CAT_FLEET_RELAY_PLATFORM` | relay | Same as `--name` / `--platform` |
 | `CAT_FLEET_RELAY_STATE` | relay | Directory for the config cache and Discord reaction refs (default `.`) |

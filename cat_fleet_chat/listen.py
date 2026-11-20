@@ -30,7 +30,7 @@ from typing import Any
 
 import httpx
 
-DEFAULT_URL = "http://127.0.0.1:8787"
+DEFAULT_URL = "http://127.0.0.1:10003"
 POLL_TIMEOUT = 60
 BACKOFF_MAX = 30.0
 

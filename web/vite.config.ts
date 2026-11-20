@@ -3,7 +3,7 @@ import solid from "vite-plugin-solid"
 import tailwindcss from "@tailwindcss/vite"
 import path from "path"
 
-const hub = "http://127.0.0.1:8787"
+const hub = "http://127.0.0.1:10003"
 
 export default defineConfig({
   plugins: [

@@ -62,7 +62,7 @@ from cat_fleet_chat.relays import (
 from cat_fleet_chat.relays import bare as _bare
 from cat_fleet_chat.validate import CHANNEL_RE, HANDLE_RE
 
-DEFAULT_URL = "http://127.0.0.1:8787"
+DEFAULT_URL = "http://127.0.0.1:10003"
 DEFAULT_PREFIX = "dc-"
 ATTEMPTS = 3
 RETRY_DELAY = 2.0

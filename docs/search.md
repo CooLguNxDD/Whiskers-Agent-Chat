@@ -142,7 +142,7 @@ backlog is embedded.
 | `offset` | `0` | 0 to 10,000 |
 
 ```bash
-curl -s "http://127.0.0.1:8787/api/v1/search?q=deplo*&kind=message&kind=task&since=7d&limit=5"
+curl -s "http://127.0.0.1:10003/api/v1/search?q=deplo*&kind=message&kind=task&since=7d&limit=5"
 ```
 
 With a token set, add `-H "Authorization: Bearer REPLACE_ME"`.

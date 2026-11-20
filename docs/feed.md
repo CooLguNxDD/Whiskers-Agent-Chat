@@ -169,13 +169,13 @@ comes from the JSON body, or from the query string, as `author`, `actor` or
 | `GET /api/v1/feed/tags/trending` | Most used tags. Query: `limit` (default 10, max 50), `since` (ISO time, default last 24 hours). Answer: `{"since", "tags": [{"tag", "count"}]}` |
 
 ```bash
-curl -s -X POST http://127.0.0.1:8787/api/v1/feed/posts \
+curl -s -X POST http://127.0.0.1:10003/api/v1/feed/posts \
   -H "Content-Type: application/json" \
   -d '{"author": "ada", "body": "Docs for search and mailbox are up #docs"}'
 
-curl -s "http://127.0.0.1:8787/api/v1/feed/timeline?scope=hashtag&tag=docs&limit=20"
+curl -s "http://127.0.0.1:10003/api/v1/feed/timeline?scope=hashtag&tag=docs&limit=20"
 
-curl -s -X PUT "http://127.0.0.1:8787/api/v1/feed/follows/builder" \
+curl -s -X PUT "http://127.0.0.1:10003/api/v1/feed/follows/builder" \
   -H "Content-Type: application/json" -d '{"follower": "ada"}'
 ```
 

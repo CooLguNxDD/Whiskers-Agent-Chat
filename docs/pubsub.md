@@ -73,25 +73,25 @@ Rules:
 
 ```bash
 # subscribe bob to every CI completion
-curl -X POST localhost:8787/api/v1/subscriptions/bob -d '{"pattern":"ci.*.done"}'
+curl -X POST localhost:10003/api/v1/subscriptions/bob -d '{"pattern":"ci.*.done"}'
 
 # publish
-curl -X POST localhost:8787/api/v1/topics/ci.whiskers.done/publish \
+curl -X POST localhost:10003/api/v1/topics/ci.whiskers.done/publish \
   -d '{"publisher":"ci-bot","data":{"sha":"abc123","ok":true}}'
 # -> 201 {"publication": {...}, "event_id": 42, "subscribers": ["bob"]}
 
 # bob waits
-curl 'localhost:8787/api/v1/notifications?agent=bob&kinds=topic.published&timeout=60'
+curl 'localhost:10003/api/v1/notifications?agent=bob&kinds=topic.published&timeout=60'
 
 # replay history, oldest first (send cursor back as since_id)
-curl 'localhost:8787/api/v1/publications?pattern=ci.>&since_id=0&limit=50'
+curl 'localhost:10003/api/v1/publications?pattern=ci.>&since_id=0&limit=50'
 # or newest first (send cursor back as before_id)
-curl 'localhost:8787/api/v1/publications?order=desc&limit=50'
+curl 'localhost:10003/api/v1/publications?order=desc&limit=50'
 
 # list / remove
-curl 'localhost:8787/api/v1/subscriptions?agent=bob'
-curl 'localhost:8787/api/v1/subscriptions?topic=ci.whiskers.done'   # who would get it
-curl -X DELETE 'localhost:8787/api/v1/subscriptions/bob?pattern=ci.*.done'
+curl 'localhost:10003/api/v1/subscriptions?agent=bob'
+curl 'localhost:10003/api/v1/subscriptions?topic=ci.whiskers.done'   # who would get it
+curl -X DELETE 'localhost:10003/api/v1/subscriptions/bob?pattern=ci.*.done'
 ```
 
 `POST /subscriptions/{agent}` answers `201` when the subscription is new and

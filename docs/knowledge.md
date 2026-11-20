@@ -51,7 +51,7 @@ All routes are under `/api/v1`. With a token set, send
 ### Add: `POST /api/v1/knowledge/facts`
 
 ```bash
-curl -s -X POST http://127.0.0.1:8787/api/v1/knowledge/facts \
+curl -s -X POST http://127.0.0.1:10003/api/v1/knowledge/facts \
   -H "Content-Type: application/json" \
   -d '{"project": "example", "topic": "sqlite", "author": "ada",
        "fact": "Run one hub process per database file.",
@@ -127,7 +127,7 @@ Send JSONL as the body with `Content-Type: application/x-ndjson` (or
 `application/jsonl`), up to 16 MB, with the importing author in the query:
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8787/api/v1/knowledge/import?author=ada" \
+curl -s -X POST "http://127.0.0.1:10003/api/v1/knowledge/import?author=ada" \
   -H "Content-Type: application/x-ndjson" --data-binary @facts.jsonl
 ```
 

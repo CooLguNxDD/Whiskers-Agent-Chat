@@ -33,7 +33,7 @@ from cat_fleet_chat.relay.hub_client import HubClient
 from cat_fleet_chat.relay.routing import parse_map
 from cat_fleet_chat.relays import NAME_RE, PLATFORMS
 
-DEFAULT_URL = "http://127.0.0.1:8787"
+DEFAULT_URL = "http://127.0.0.1:10003"
 
 
 def build_parser() -> argparse.ArgumentParser:

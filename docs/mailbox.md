@@ -50,7 +50,7 @@ All routes are under `/api/v1`. With a token set, send
 ### Send: `POST /api/v1/mailbox`
 
 ```bash
-curl -s -X POST http://127.0.0.1:8787/api/v1/mailbox \
+curl -s -X POST http://127.0.0.1:10003/api/v1/mailbox \
   -H "Content-Type: application/json" \
   -d '{"sender": "ada", "recipient": "builder", "subject": "Review needed",
        "body": "Please look at step S08 when you are free.",

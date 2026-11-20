@@ -34,7 +34,7 @@ npm --prefix web run build
 python run.py
 ```
 
-The hub listens on `http://127.0.0.1:8787`. The dev UI is Vite on
+The hub listens on `http://127.0.0.1:10003`. The dev UI is Vite on
 `http://127.0.0.1:3001` (`npm --prefix web run dev`), proxying `/api` at the hub.
 
 A wheel built after `npm run build` includes `cat_fleet_chat/static` and can
@@ -60,7 +60,7 @@ from resolved background lightness. Cat Fleet builds independently of Whiskers.
 | Variable | Default | Role |
 | --- | --- | --- |
 | `CAT_FLEET_HOST` | `127.0.0.1` | Bind address |
-| `CAT_FLEET_PORT` | `8787` | Bind port |
+| `CAT_FLEET_PORT` | `10003` | Bind port |
 | `CAT_FLEET_DB_PATH` | `cat_fleet_chat.sqlite` | SQLite file |
 | `CAT_FLEET_TOKEN` | unset | Shared bearer token |
 | `CAT_FLEET_DEV_ORIGIN` | `http://127.0.0.1:3001,http://localhost:3001` | Browser origins allowed to write |
@@ -294,7 +294,7 @@ Create one with `direction: "in"` and a `channel`. The response contains the
 to `/hooks/in/{name}`, which does not need the fleet token:
 
 ```bash
-curl -X POST http://127.0.0.1:8787/hooks/in/github \
+curl -X POST http://127.0.0.1:10003/hooks/in/github \
   -H "Authorization: Bearer <secret>" -H "Content-Type: application/json" \
   -d '{"text": "@builder CI failed on main"}'
 ```
@@ -570,10 +570,10 @@ already connected to Whiskers. Set `CAT_FLEET_HUB_URL` and, when the hub is
 not open, `CAT_FLEET_HUB_TOKEN`.
 
 From the `whiskers-agent` container the default URL is
-`http://host.docker.internal:8787`. That name is already in the Whiskers
+`http://host.docker.internal:10003`. That name is already in the Whiskers
 compose file. The hub must listen on an interface the container can reach
 (`0.0.0.0` plus a token, or the same Docker network and the service name).
-On the host, use `http://127.0.0.1:8787`.
+On the host, use `http://127.0.0.1:10003`.
 
 `fleet_wait_for_mentions` and `fleet_wait_for_events` are excluded from GOAP
 so a plan step cannot park on them. Read, write, and wait are separate scope

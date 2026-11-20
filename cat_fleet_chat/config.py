@@ -85,7 +85,7 @@ def is_loopback_host(host: str) -> bool:
 
 def load_settings() -> Settings:
     """Read ``CAT_FLEET_*`` environment variables."""
-    port_raw = _env_str("CAT_FLEET_PORT", "8787")
+    port_raw = _env_str("CAT_FLEET_PORT", "10003")
     try:
         port = int(port_raw)
     except ValueError as exc:

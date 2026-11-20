@@ -70,7 +70,7 @@ pip install -e ".[dev]"
 npm --prefix web install
 npm --prefix web run build
 
-# Run hub server (default: http://127.0.0.1:8787)
+# Run hub server (default: http://127.0.0.1:10003)
 python run.py
 
 # Run frontend in dev mode with proxy to hub (http://127.0.0.1:3001)
@@ -85,7 +85,7 @@ pytest
 | Variable | Default | Role |
 | --- | --- | --- |
 | `CAT_FLEET_HOST` | `127.0.0.1` | Bind address |
-| `CAT_FLEET_PORT` | `8787` | Bind port |
+| `CAT_FLEET_PORT` | `10003` | Bind port |
 | `CAT_FLEET_DB_PATH` | `cat_fleet_chat.sqlite` | SQLite database file path |
 | `CAT_FLEET_TOKEN` | unset | Shared bearer token (mandatory on non-loopback binds) |
 | `CAT_FLEET_SESSION_TTL_DAYS` | `30` | Lifetime in days (1–365) for persistent SQLite browser sessions |

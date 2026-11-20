@@ -49,15 +49,15 @@ entries per list.
 
 ```bash
 # create
-curl -X POST localhost:8787/api/v1/consumers \
+curl -X POST localhost:10003/api/v1/consumers \
   -d '{"actor":"ann","name":"ann-ci","topics":["ci.*.done"]}'
 
 # wait (<= 45 s); never acks
-curl 'localhost:8787/api/v1/consumers/ann-ci/wait?timeout=30&limit=50'
+curl 'localhost:10003/api/v1/consumers/ann-ci/wait?timeout=30&limit=50'
 # -> {"events":[...], "cursor": 812, "has_more": false, "timed_out": false}
 
 # after handling the events
-curl -X POST localhost:8787/api/v1/consumers/ann-ci/ack -d '{"cursor":812}'
+curl -X POST localhost:10003/api/v1/consumers/ann-ci/ack -d '{"cursor":812}'
 ```
 
 - A wait returns at once when matching events are already pending.
